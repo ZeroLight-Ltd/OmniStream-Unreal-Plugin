@@ -1,0 +1,6 @@
+{
+	"OutputFiles": [
+		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\PCH.ZLCloudPlugin.h.obj",
+		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\Module.ZLCloudPlugin.cpp.obj"
+	]
+}

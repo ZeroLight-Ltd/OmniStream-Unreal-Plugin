@@ -1,0 +1,6 @@
+{
+	"OutputFiles": [
+		"PCH.ZLCloudPlugin.h.obj",
+		"Module.ZLCloudPlugin.cpp.obj"
+	]
+}
