@@ -12,7 +12,6 @@ public class Portal : ModuleRules
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
 			// Add the import library
-			PublicIncludePaths.Add(Path.Combine(ModuleDirectory, "include"));
 			PublicAdditionalLibraries.Add(Path.Combine(ModuleDirectory, "x64", "Release", "portal_client_c.lib"));
 
 			// Delay-load the DLL, so we can load it from the right place first
