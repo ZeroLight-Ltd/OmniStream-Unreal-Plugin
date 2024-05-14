@@ -1,7 +1,7 @@
 {
     "FileVersion": 3,
-    "Version": 41,
-    "VersionName": "1.0.41",
+    "Version": 45,
+    "VersionName": "1.0.45",
     "FriendlyName": "ZeroLight OmniStream Plugin",
     "Description": "Cloud Streaming plugin used to stream real-time content from the cloud",
     "Category": "Cloud",
