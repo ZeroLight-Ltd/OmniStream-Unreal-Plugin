@@ -92,6 +92,7 @@ public class ZLCloudPlugin : ModuleRules
 					"OutputLog",
 					"LiveCoding",
 					"UnrealEd",
+					"BlueprintGraph",
 					"Portal"
 			});
 		}
