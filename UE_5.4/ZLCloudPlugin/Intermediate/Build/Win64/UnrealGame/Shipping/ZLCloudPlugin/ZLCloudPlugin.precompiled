@@ -29,6 +29,8 @@
 		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\ZLCloudPluginVideoInputI420.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\ZLCloudPluginVideoInputRHI.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\ZLCloudPluginVideoInputViewport.cpp.obj",
-		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\ZLScreenshot.cpp.obj"
+		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\ZLScreenshot.cpp.obj",
+		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\ZLSpotLightCameraComponent.cpp.obj",
+		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\ZLTrackedStateBlueprint.cpp.obj"
 	]
 }
