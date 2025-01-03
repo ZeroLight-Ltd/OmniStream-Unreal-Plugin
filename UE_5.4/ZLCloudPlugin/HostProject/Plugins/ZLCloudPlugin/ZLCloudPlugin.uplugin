@@ -1,38 +1,44 @@
 {
-	"FileVersion": 3,
-	"Version": 1,
-	"VersionName": "1.0.X",
-	"FriendlyName": "ZeroLight OmniStream Plugin",
-	"Description": "Cloud Streaming plugin used to stream real-time content from the cloud",
-	"Category": "Cloud",
-	"CreatedBy": "ZeroLight",
-	"CreatedByURL": "https://www.zerolight.com",
-	"DocsURL": "https://resources.zerolight.com/",
-	"MarketplaceURL": "com.epicgames.launcher://ue/marketplace/product/23da1e28c168496b8739cd2868f81be2",
-	"SupportURL": "https://zerolight.com/contact",
-	"CanContainContent": true,
-	"IsBetaVersion": false,
-	"IsExperimentalVersion": false,
-	"Installed": false,
-	"EngineVersion": [ "5.1", "5.2", "5.3" ],
-	"WhitelistPlatforms": [ "Win64" ],
-	"Modules": [
-		{
-			"Name": "ZLCloudPlugin",
-			"Type": "Runtime",
-			"LoadingPhase": "PreDefault",
-			"PlatformAllowList": [
-				"Win64"
-			],
-			"TargetDenyList": [
-				"Server"
-			]
-		}
-	],
-	"Plugins": [
-		{
-			"Name": "PixelCapture",
-			"Enabled": true
-		}
-	]
+    "FileVersion": 3,
+    "Version": 79,
+    "VersionName": "1.0.79",
+    "FriendlyName": "ZeroLight OmniStream Plugin",
+    "Description": "Cloud Streaming plugin used to stream real-time content from the cloud",
+    "Category": "Cloud",
+    "CreatedBy": "ZeroLight",
+    "CreatedByURL": "https://www.zerolight.com",
+    "DocsURL": "https://resources.zerolight.com/",
+    "MarketplaceURL": "com.epicgames.launcher://ue/marketplace/product/23da1e28c168496b8739cd2868f81be2",
+    "SupportURL": "https://zerolight.com/contact",
+    "CanContainContent": true,
+    "IsBetaVersion": false,
+    "IsExperimentalVersion": false,
+    "Installed": false,
+    "EngineVersion": [
+        "5.1",
+        "5.2",
+        "5.3"
+    ],
+    "WhitelistPlatforms": [
+        "Win64"
+    ],
+    "Modules": [
+        {
+            "Name": "ZLCloudPlugin",
+            "Type": "Runtime",
+            "LoadingPhase": "PreDefault",
+            "PlatformAllowList": [
+                "Win64"
+            ],
+            "TargetDenyList": [
+                "Server"
+            ]
+        }
+    ],
+    "Plugins": [
+        {
+            "Name": "PixelCapture",
+            "Enabled": true
+        }
+    ]
 }

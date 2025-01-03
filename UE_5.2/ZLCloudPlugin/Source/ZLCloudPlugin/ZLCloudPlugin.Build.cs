@@ -95,7 +95,8 @@ public class ZLCloudPlugin : ModuleRules
 					"BlueprintGraph",
 					"HTTP",
 					"FileUtilities",
-					"Portal"
+					"Portal",
+					"GameProjectGeneration"
 			});
 		}
 
