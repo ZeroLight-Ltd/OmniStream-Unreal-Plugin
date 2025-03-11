@@ -22,11 +22,11 @@ public class CloudStream2 : ModuleRules
 		}
         else if (Target.Platform == UnrealTargetPlatform.Mac)
         {
-			//TODO
+
         }
         else if (Target.Platform == UnrealTargetPlatform.Linux)
 		{
-			//TODO
+
 		}
 	}
 }

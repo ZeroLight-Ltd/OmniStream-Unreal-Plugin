@@ -1,0 +1,46 @@
+{
+	"RemapUnityFiles": 
+	{
+		"Module.ZLCloudPlugin.cpp.obj": [
+			"EditorZLCloudPluginSettings.gen.cpp.obj",
+			"ZLCloudPlugin.init.gen.cpp.obj",
+			"ZLCloudPluginAudioComponent.gen.cpp.obj",
+			"ZLCloudPluginBlueprints.gen.cpp.obj",
+			"ZLCloudPluginDelegates.gen.cpp.obj",
+			"ZLCloudPluginInputComponent.gen.cpp.obj",
+			"ZLCloudPluginStateManager.gen.cpp.obj",
+			"ZLSpotLightCameraComponent.gen.cpp.obj",
+			"ZLTrackedStateBlueprint.gen.cpp.obj",
+			"CloudStream2.cpp.obj",
+			"EditorZLCloudPluginSettings.cpp.obj",
+			"InputHandlers.cpp.obj",
+			"LauncherComms.cpp.obj",
+			"MessageCallbacks.cpp.obj",
+			"MessageHandler.cpp.obj",
+			"MessageReader.cpp.obj",
+			"PortalCLI.cpp.obj",
+			"VideoSource.cpp.obj",
+			"VideoSourceGroup.cpp.obj",
+			"ZeroLightAboutScreen.cpp.obj",
+			"ZeroLightEditorStyle.cpp.obj",
+			"ZeroLightMainButton.cpp.obj",
+			"ZLAudioSubmixCapturer.cpp.obj",
+			"ZLCloudPluginApplicationWrapper.cpp.obj",
+			"ZLCloudPluginAudioComponent.cpp.obj",
+			"ZLCloudPluginBlueprints.cpp.obj",
+			"ZLCloudPluginDelegates.cpp.obj",
+			"ZLCloudPluginInputComponent.cpp.obj",
+			"ZLCloudPluginInputHandler.cpp.obj",
+			"ZLCloudPluginModule.cpp.obj",
+			"ZLCloudPluginStateManager.cpp.obj",
+			"ZLCloudPluginVideoInput.cpp.obj",
+			"ZLCloudPluginVideoInputBackBuffer.cpp.obj",
+			"ZLCloudPluginVideoInputI420.cpp.obj",
+			"ZLCloudPluginVideoInputRHI.cpp.obj",
+			"ZLCloudPluginVideoInputViewport.cpp.obj",
+			"ZLScreenshot.cpp.obj",
+			"ZLSpotLightCameraComponent.cpp.obj",
+			"ZLTrackedStateBlueprint.cpp.obj"
+		]
+	}
+}

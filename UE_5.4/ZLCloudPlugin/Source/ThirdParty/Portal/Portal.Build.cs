@@ -21,11 +21,9 @@ public class Portal : ModuleRules
 		}
         else if (Target.Platform == UnrealTargetPlatform.Mac)
         {
-			//TODO
         }
         else if (Target.Platform == UnrealTargetPlatform.Linux)
 		{
-			//TODO
 		}
 	}
 }

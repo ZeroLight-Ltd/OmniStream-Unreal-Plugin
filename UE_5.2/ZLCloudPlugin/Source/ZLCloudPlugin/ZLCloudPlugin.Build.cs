@@ -96,7 +96,8 @@ public class ZLCloudPlugin : ModuleRules
 					"HTTP",
 					"FileUtilities",
 					"Portal",
-					"GameProjectGeneration"
+					"GameProjectGeneration",
+					"AssetRegistry"
 			});
 		}
 
