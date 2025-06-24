@@ -1,6 +1,8 @@
 {
 	"OutputFiles": [
 		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\PCH.ZLCloudPlugin.h.obj",
-		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\Module.ZLCloudPlugin.cpp.obj"
+		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\Module.ZLCloudPlugin.1_of_3.cpp.obj",
+		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\Module.ZLCloudPlugin.2_of_3.cpp.obj",
+		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\Module.ZLCloudPlugin.3_of_3.cpp.obj"
 	]
 }

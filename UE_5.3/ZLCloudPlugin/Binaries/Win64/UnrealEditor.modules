@@ -2,6 +2,7 @@
 	"BuildId": "27405482",
 	"Modules": 
 	{
-		"ZLCloudPlugin": "UnrealEditor-ZLCloudPlugin.dll"
+		"ZLCloudPlugin": "UnrealEditor-ZLCloudPlugin.dll",
+		"ZLCloudPluginEditor": "UnrealEditor-ZLCloudPluginEditor.dll"
 	}
 }

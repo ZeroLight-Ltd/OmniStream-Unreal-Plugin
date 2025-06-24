@@ -1,6 +1,8 @@
 {
 	"OutputFiles": [
 		"PCH.ZLCloudPlugin.h.obj",
-		"Module.ZLCloudPlugin.cpp.obj"
+		"Module.ZLCloudPlugin.1_of_3.cpp.obj",
+		"Module.ZLCloudPlugin.2_of_3.cpp.obj",
+		"Module.ZLCloudPlugin.3_of_3.cpp.obj"
 	]
 }
