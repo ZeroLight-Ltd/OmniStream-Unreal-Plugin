@@ -2,6 +2,7 @@
 
 #include "EditorZLCloudPluginSettings.h"
 #include "JavaScriptKeyCodes.inl"
+#include "Misc/ConfigCacheIni.h"
 
 #if WITH_EDITOR
 #include <Developer/SettingsEditor/Public/ISettingsEditorModule.h>
@@ -13,8 +14,9 @@ DEFINE_LOG_CATEGORY(LogZLCloudPluginSettings);
 
 UZLCloudPluginSettings::UZLCloudPluginSettings(const FObjectInitializer& ObjectInitlaizer) : Super(ObjectInitlaizer)
 {
-	FString savedIniPath = FPaths::GeneratedConfigDir() + TEXT("WindowsEditor/ZLCloudPluginSettings.ini");
-	LoadConfig(NULL, *savedIniPath);
+	FString savedIniPath = FPaths::ProjectConfigDir() + TEXT("DefaultZLCloudPluginSettings.ini");
+	const FString NormalizedIniPath = FConfigCacheIni::NormalizeConfigIniPath(savedIniPath);
+	LoadConfig(NULL, *NormalizedIniPath);
 
 	UE_LOG(LogZLCloudPluginSettings, Display, TEXT("Filtered keys list %s"), *filteredKeyList);
 
@@ -50,9 +52,12 @@ void UZLCloudPluginSettings::UpdateFilteredKeys()
 		FilteredKeys.Add(*AgnosticKey);
 	}
 
-	FString savedIniPath = FPaths::GeneratedConfigDir() + TEXT("WindowsEditor/ZLCloudPluginSettings.ini");
+	FString savedIniPath = FConfigCacheIni::NormalizeConfigIniPath(FPaths::ProjectConfigDir() + TEXT("DefaultZLCloudPluginSettings.ini"));
 
 	SaveConfig(NULL, *savedIniPath);
+#if WITH_EDITOR
+	SaveToCustomIni();
+#endif
 }
 
 FName UZLCloudPluginSettings::GetCategoryName() const
@@ -77,9 +82,58 @@ void UZLCloudPluginSettings::PostEditChangeProperty(FPropertyChangedEvent& Prope
 		UpdateFilteredKeys();
 	}
 
-	Super::PostEditChangeProperty(PropertyChangedEvent);
-	FString savedIniPath = FPaths::GeneratedConfigDir() + TEXT("WindowsEditor/ZLCloudPluginSettings.ini");
+	//Super::PostEditChangeProperty(PropertyChangedEvent);
+	FString savedIniPath = FConfigCacheIni::NormalizeConfigIniPath(FPaths::ProjectConfigDir() + TEXT("DefaultZLCloudPluginSettings.ini"));
 
 	SaveConfig(NULL, *savedIniPath);
+	SaveToCustomIni();
+}
+
+void UZLCloudPluginSettings::SaveToCustomIni()
+{
+	const FString IniPath = FPaths::ProjectConfigDir() + TEXT("DefaultZLCloudPluginSettings.ini");
+
+	const FString NormalizedIniPath = FConfigCacheIni::NormalizeConfigIniPath(IniPath);
+
+	FConfigFile ConfigFile;
+	ConfigFile.Read(NormalizedIniPath); // Load existing content
+
+	const FString Section = TEXT("/Script/ZLCloudPlugin.ZLCloudPluginSettings");
+
+	// Helper macro to write key-value pairs
+#define WRITE_CONFIG(Key, Value) \
+	ConfigFile.SetString(*Section, TEXT(Key), Value)
+
+	WRITE_CONFIG("bMouseAlwaysAttached", bMouseAlwaysAttached ? TEXT("True") : TEXT("False"));
+	WRITE_CONFIG("filteredKeyList", *filteredKeyList);
+	WRITE_CONFIG("FramesPerSecond", *FString::FromInt(FramesPerSecond));
+	WRITE_CONFIG("DelayAppReadyToStream", DelayAppReadyToStream ? TEXT("True") : TEXT("False"));
+	WRITE_CONFIG("bRebootAppOnDisconnect", bRebootAppOnDisconnect ? TEXT("True") : TEXT("False"));
+	WRITE_CONFIG("bDisableTextureStreamingOnLaunch", bDisableTextureStreamingOnLaunch ? TEXT("True") : TEXT("False"));
+	WRITE_CONFIG("stateRequestWarningTime", *FString::SanitizeFloat(stateRequestWarningTime));
+	WRITE_CONFIG("stateRequestTimeout", *FString::SanitizeFloat(stateRequestTimeout));
+	WRITE_CONFIG("screenshotFrameWaitCountOverride", *FString::FromInt(screenshotFrameWaitCountOverride));
+	WRITE_CONFIG("supportsVR", supportsVR ? TEXT("True") : TEXT("False"));
+	WRITE_CONFIG("deployName", *deployName);
+	WRITE_CONFIG("displayName", *displayName);
+	WRITE_CONFIG("buildId", *buildId);
+	WRITE_CONFIG("buildFolder", *buildFolder);
+	WRITE_CONFIG("portalAssetLineId", *portalAssetLineId);
+	WRITE_CONFIG("portalServerUrl", *portalServerUrl);
+	WRITE_CONFIG("httpProxyOverride", *httpProxyOverride);
+
+	FString NormalizedPath = thumbnailImagePath.FilePath;
+	NormalizedPath.ReplaceInline(TEXT("/"), TEXT("\\"));
+
+	const FString FinalFormatted = FString::Printf(TEXT("(FilePath=\"%s\")"), *NormalizedPath);
+
+	FConfigSection* ConfigSection = ConfigFile.Find(Section);
+	ConfigSection->Remove(TEXT("thumbnailImagePath"));
+	ConfigSection->Add(TEXT("thumbnailImagePath"), FConfigValue(FinalFormatted));
+
+#undef WRITE_CONFIG
+
+	ConfigFile.Dirty = true;
+	ConfigFile.Write(NormalizedIniPath);
 }
 #endif

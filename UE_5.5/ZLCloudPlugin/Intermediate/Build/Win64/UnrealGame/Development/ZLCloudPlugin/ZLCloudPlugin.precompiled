@@ -1,7 +1,8 @@
 {
 	"OutputFiles": [
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\PCH.ZLCloudPlugin.h.obj",
-		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\Module.ZLCloudPlugin.cpp.obj",
+		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\Module.ZLCloudPlugin.1.cpp.obj",
+		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\Module.ZLCloudPlugin.2.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\CloudStream2.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\EditorZLCloudPluginSettings.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\InputHandlers.cpp.obj",

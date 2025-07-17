@@ -17,6 +17,8 @@
 #include "ZLDebugUIWidget.h"
 #include "ZLCloudPluginStateManager.generated.h"
 
+TSharedPtr<FJsonObject> MergeJsonObjectsRecursive(const TSharedPtr<FJsonObject>& JsonObject1, const TSharedPtr<FJsonObject>& JsonObject2);
+
 UCLASS()
 class ZLCLOUDPLUGIN_API UZLCloudPluginStateManager : public UObject
 {
@@ -85,6 +87,7 @@ public:
 
 	void ResetCurrentAppState(FString jsonString);
 	void ResetCurrentAppState(TSharedPtr<FJsonObject> jsonObj);
+	TSharedPtr<FJsonObject> GetCurrentAppState() { return JsonObject_currentState; };
 	bool IsProcessingStateRequest();
 	void PopStateRequestQueue();
 	void ClearProcessingState();
@@ -144,6 +147,9 @@ public:
 	int m_stateRequestTimeout = 30;
 	double m_lastStateWarningPrintTime;
 
+	//Debug stats
+	int request_recieved_id;
+
 private:
 	// The singleton object.
 	static UZLCloudPluginStateManager* Singleton;
@@ -178,12 +184,37 @@ private:
 	bool m_debugUIVisible = false;
 
 	void CopyRequestId();
-
-	//Debug stats
-	int request_recieved_id;
 };
 
+USTRUCT(BlueprintType)
+struct ZLCLOUDPLUGIN_API FSubKeyValueResult
+{
+	GENERATED_BODY()
 
+	UPROPERTY(BlueprintReadOnly, Category = "SubKeyValueResult")
+	FString Key;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SubKeyValueResult")
+	FString StringValue;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SubKeyValueResult")
+	float NumberValue;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SubKeyValueResult")
+	bool BoolValue;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SubKeyValueResult")
+	TArray<FString> StringArray;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SubKeyValueResult")
+	TArray<float> NumberArray;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SubKeyValueResult")
+	TArray<bool> BoolArray;
+
+	UPROPERTY(BlueprintReadOnly, Category = "SubKeyValueResult")
+	EStateKeyDataType Type;
+};
 
 UCLASS()
 class ZLCLOUDPLUGIN_API UZLCloudPluginStateManagerBlueprints : public UBlueprintFunctionLibrary
@@ -441,6 +472,15 @@ public:
 	}
 
 	/**
+	 * Get if a stream is connected
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Zerolight Omnistream State")
+	static bool IsInitialStateRequest()
+	{
+		return UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->request_recieved_id == 1;
+	}
+
+	/**
 	 * Set App Ready to Stream
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Zerolight Omnistream Events")
@@ -462,7 +502,7 @@ public:
 	 * Set the current state in state manager to match the provided Schema asset. Note: Correct default values should be specified in the selected schema if using this 
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Zerolight Omnistream State")
-	static void SetCurrentSchema(UStateKeyInfoAsset* Asset, bool triggerProcessStateNow = false)
+	static void SetCurrentSchema(UStateKeyInfoAsset* Asset, bool triggerProcessStateNow = false, bool clearPreviousState = true)
 	{
 		if (Asset != nullptr)
 		{
@@ -541,6 +581,9 @@ public:
 
 			if (triggerProcessStateNow)
 			{
+				if(clearPreviousState)
+					UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->ResetCurrentAppState(MakeShared<FJsonObject>());
+
 				if (UZLCloudPluginDelegates* Delegates = UZLCloudPluginDelegates::GetZLCloudPluginDelegates())
 				{
 					FString JsonString_Schema;
@@ -553,7 +596,15 @@ public:
 				}
 			}
 			else
-				UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->ResetCurrentAppState(OutJsonObject);
+			{
+				if(clearPreviousState)
+					UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->ResetCurrentAppState(OutJsonObject);
+				else
+				{
+					TSharedPtr<FJsonObject> MergedStateObject = MergeJsonObjectsRecursive(UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->GetCurrentAppState(), OutJsonObject);
+					UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->ResetCurrentAppState(MergedStateObject);
+				}
+			}
 
 			UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->SetCurrentSchema(Asset);
 		}
@@ -576,10 +627,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Zerolight Omnistream State", meta = (BlueprintInternalUseOnly = "true"))
 	static void GetRequestedSchemaValue(UStateKeyInfoAsset* Asset, FString KeyName, bool InstantConfirm, 
 										FString& OutString, float& OutNumber, bool& OutBool, TArray<FString>& OutStringArray, TArray<float>& OutNumberArray, TArray<bool>& OutBoolArray,
-										bool& Success, FLatentActionInfo LatentInfo) //Useful note: FLatentActionInfo here is not used but forces adding the Exec pins required to route this through our custom ZLK2Node
+										bool& Success, FString& KeyOut, FLatentActionInfo LatentInfo) //Useful note: FLatentActionInfo here is not used but forces adding the Exec pins required to route this through our custom ZLK2Node
 	{
 		if (Asset && Asset->KeyInfos.Contains(KeyName))
 		{
+			KeyOut = KeyName;
 			switch (Asset->KeyInfos[KeyName].GetDataTypeEnum())
 			{
 			case EStateKeyDataType::String:
@@ -608,6 +660,74 @@ public:
 			}
 
 		}
+	}
+
+	UFUNCTION(BlueprintCallable, Category = "Zerolight Omnistream State", meta = (BlueprintInternalUseOnly = "true"))
+	static void GetRequestedSchemaValueSubKeys(UStateKeyInfoAsset* Asset, FString ParentKey, bool InstantConfirm,
+		TArray<FSubKeyValueResult>& Results, bool& Success)
+	{
+		bool AnySuccess = false;
+		Success = false;
+		Results.Empty();
+
+		if (!Asset)
+		{
+			UE_LOG(LogZLCloudPlugin, Error, TEXT("Asset is null"));
+			return;
+		}
+
+		// Loop through all keys in the asset
+		for (const TPair<FString, FStateKeyInfo>& Pair : Asset->KeyInfos)
+		{
+			const FString& FullKey = Pair.Key;
+
+			// Check if key starts with the desired parent path and is a direct child (one level deeper)
+			if (FullKey.StartsWith(ParentKey + "."))
+			{
+				FString SubPath = FullKey.RightChop(ParentKey.Len() + 1);
+				if (!SubPath.Contains("."))
+				{
+					FSubKeyValueResult Result;
+					Result.Key = FullKey;
+					Result.Type = Pair.Value.GetDataTypeEnum();
+					bool EntrySuccess = false;
+
+					switch (Result.Type)
+					{
+					case EStateKeyDataType::String:
+						UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->GetRequestedStateValue<FString>(FullKey, InstantConfirm, Result.StringValue, EntrySuccess);
+						break;
+					case EStateKeyDataType::StringArray:
+						UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->GetRequestedStateValue<TArray<FString>>(FullKey, InstantConfirm, Result.StringArray, EntrySuccess);
+						break;
+					case EStateKeyDataType::Number:
+						UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->GetRequestedStateValue<float>(FullKey, InstantConfirm, Result.NumberValue, EntrySuccess);
+						break;
+					case EStateKeyDataType::NumberArray:
+						UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->GetRequestedStateValue<TArray<float>>(FullKey, InstantConfirm, Result.NumberArray, EntrySuccess);
+						break;
+					case EStateKeyDataType::Bool:
+						UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->GetRequestedStateValue<bool>(FullKey, InstantConfirm, Result.BoolValue, EntrySuccess);
+						break;
+					case EStateKeyDataType::BoolArray:
+						UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->GetRequestedStateValue<TArray<bool>>(FullKey, InstantConfirm, Result.BoolArray, EntrySuccess);
+						break;
+					default:
+						UE_LOG(LogZLCloudPlugin, Warning, TEXT("Unsupported type for key %s"), *FullKey);
+						Success = false;
+						continue;
+					}
+
+					if (EntrySuccess)
+					{
+						AnySuccess = true;
+						Results.Add(Result);
+					}
+				}
+			}
+		}
+
+		Success = AnySuccess;
 	}
 };
 

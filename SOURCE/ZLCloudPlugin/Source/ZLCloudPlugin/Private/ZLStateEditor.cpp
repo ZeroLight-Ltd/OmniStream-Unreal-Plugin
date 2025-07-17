@@ -5,6 +5,10 @@
 #include "ZLStateEditor.h"
 #include "ZLCloudPluginVersion.h"
 
+#if UNREAL_5_6_OR_NEWER
+#include "UObject/SavePackage.h"
+#endif
+
 #define LOCTEXT_NAMESPACE "FZLStateEditor"
 
 DEFINE_LOG_CATEGORY(LogZLStateEditor);
@@ -124,7 +128,13 @@ void FZLStateEditor::SaveAssetFromMap()
 
 		const FString PackageFileName = FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension());
 
-		UPackage::SavePackage(Package, NewAsset, EObjectFlags::RF_Public | EObjectFlags::RF_Standalone, *PackageFileName);
+		#if UNREAL_5_6_OR_NEWER
+			FSavePackageArgs SaveArgs;
+			SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+			UPackage::SavePackage(Package, NewAsset, *PackageFileName, SaveArgs);
+		#else
+			UPackage::SavePackage(Package, NewAsset, EObjectFlags::RF_Public | EObjectFlags::RF_Standalone, *PackageFileName);
+		#endif
 
 		UE_LOG(LogTemp, Log, TEXT("Asset saved to: %s"), *PackageFileName);
 	}
@@ -348,9 +358,9 @@ void FZLStateEditor::Construct(const FArguments& InArgs)
 										.FillHeight(0.5f)
 										[
 											SNew(SVerticalBox)
-											+ SVerticalBox::Slot().Padding(0,0,0,4).AutoHeight()[SNew(SButton)
+											/*+ SVerticalBox::Slot().Padding(0,0,0,4).AutoHeight()[SNew(SButton)
 											.Text(FText::FromString("Validate JSON Schema Keys")
-											)]
+											)]*/
 
 											+ SVerticalBox::Slot().Padding(0,0,0,4).AutoHeight()[SNew(SButton)
 											.OnClicked_Lambda([this] {
@@ -411,6 +421,12 @@ void FZLStateEditor::Construct(const FArguments& InArgs)
 													{
 														this->keyInfos.Add(newKeyStr);
 														this->keyInfos[newKeyStr].dataType = "String";
+														this->keyInfos[newKeyStr].defaultValue = MakeShared<FJsonValueString>("");
+
+														if(!AreaExpansionStates.Contains(newKeyStr))
+															AreaExpansionStates.Add(newKeyStr, TPair<bool, bool>(true, true));
+														else
+															AreaExpansionStates[newKeyStr].Key = true;
 
 														TArray<FString> Parts;
 														newKeyStr.ParseIntoArray(Parts, TEXT("."));

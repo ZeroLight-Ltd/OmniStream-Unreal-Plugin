@@ -26,7 +26,7 @@
 #include "HAL/ThreadSafeBool.h"
 #include "HAL/ThreadSafeCounter.h"
 #include "HAL/FileManager.h"
-#include "Modules/ModuleManager.h"
+
 
 DECLARE_LOG_CATEGORY_EXTERN(LogPortalCLI, Log, All);
 
@@ -214,6 +214,7 @@ public:
 			s_cloudstreamSettings->portalAssetLineId = id.ToString();
 			s_cloudstreamSettings->buildId = id.ToString();
 			s_cloudstreamSettings->SaveConfig(NULL, *s_savedIniPath);
+			s_cloudstreamSettings->SaveToCustomIni();
 		}
 	}
 	inline static void SetPortalDisplayName_Static(const FString& name) {
@@ -221,9 +222,10 @@ public:
 		{
 			s_cloudstreamSettings->displayName = name;
 			s_cloudstreamSettings->SaveConfig(NULL, *s_savedIniPath);
+			s_cloudstreamSettings->SaveToCustomIni();
 		}
 	};
-	inline bool IsCodeProject()
+	inline bool IsCodeProject() const
 	{
 		//Same logic as used by internal module (FMainFrameActionCallbacks)
 		const bool bIsCodeProject = IFileManager::Get().DirectoryExists(*FPaths::GameSourceDir());
@@ -275,7 +277,7 @@ public:
 
 	inline bool ProjectHasWarnings()
 	{
-		return !IsCodeProject() || IsPixelStreamingEnabled() || NeedsOpenXREnabling() || !IsPixelCaptureEnabled();
+		return /*!IsCodeProject() ||*/ IsPixelStreamingEnabled() || NeedsOpenXREnabling() || !IsPixelCaptureEnabled();
 	}
 	FReply AutoResolveProjectWarnings();
 	void TogglePluginEnabled(const FString& PluginName, bool bEnable);

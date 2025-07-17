@@ -222,6 +222,7 @@ void ZLCloudPlugin::FZLCloudPluginModule::OnEndPIE(bool bIsSimulating)
 		stateManager->ClearProcessingState();
 		stateManager->ResetCurrentAppState("");
 		stateManager->DestroyDebugUI();
+		stateManager->request_recieved_id = 0;
 	}
 }
 
@@ -296,6 +297,7 @@ void ZLCloudPlugin::FZLCloudPluginModule::StartupModule()
 		UEditorPerformanceSettings* Settings = GetMutableDefault<UEditorPerformanceSettings>();
 		Settings->bThrottleCPUWhenNotForeground = false;
 		Settings->PostEditChange();
+
 		Settings->SaveConfig();
 #else
 
@@ -331,11 +333,55 @@ void ZLCloudPlugin::FZLCloudPluginModule::StartupModule()
 	
 #endif
 
-
+	if (IsRunningCommandlet() || GIsEditor)
+	{
+		ForceFeature = MakeShared<FForceTempTargetFeature>();
+		IModularFeatures::Get().RegisterModularFeature(PROJECT_BUILD_MUTATOR_FEATURE, ForceFeature.Get());
+		UE_LOG(LogTemp, Warning, TEXT("Registered ForceTempTargetFeature in %s"), GIsEditor ? TEXT("Editor") : TEXT("Commandlet"));
+	}
 
 #if WITH_EDITOR
+
+
 	if (GIsEditor)
 	{
+#if UNREAL_5_4_OR_NEWER
+		const FString SectionName = TEXT("/Script/UnrealEd.ProjectPackagingSettings");
+		const FString Key = TEXT("+DirectoriesToAlwaysCook");
+		const FString Entry = TEXT("(Path=\"/ZLCloudPlugin\")");
+
+		const FString IniPath = FPaths::Combine(FPaths::ProjectConfigDir(), TEXT("DefaultGame.ini"));
+
+		const FString NormalizedIniPath = FConfigCacheIni::NormalizeConfigIniPath(IniPath);
+
+		FConfigFile ConfigFile;
+		ConfigFile.Read(NormalizedIniPath);
+
+		FConfigSection* Section = ConfigFile.Find(SectionName);
+		if (!Section)
+		{
+			Section = &ConfigFile.Add(SectionName, FConfigSection());
+		}
+
+		bool bAlreadyExists = false;
+		for (const auto& Pair : *Section)
+		{
+			if (Pair.Key.ToString() == Key && Pair.Value.GetValue() == Entry)
+			{
+				bAlreadyExists = true;
+				break;
+			}
+		}
+
+		if (!bAlreadyExists)
+		{
+			ConfigFile.AddToSection(*SectionName, FName(Key), Entry);
+			ConfigFile.Dirty = true;
+			ConfigFile.Write(NormalizedIniPath);
+			UE_LOG(LogTemp, Log, TEXT("Appended DirectoriesToAlwaysCook: %s"), *Entry);
+		}
+#endif
+
 		MainButton = MakeShared<FZeroLightMainButton>();
 		MainButton->Initialize();
 
@@ -426,6 +472,13 @@ void ZLCloudPlugin::FZLCloudPluginModule::ShutdownModule()
 	CloudStream2::FreePlugin();	
 
 	IModularFeatures::Get().UnregisterModularFeature(GetModularFeatureName(), this);
+
+#if WITH_EDITOR
+	if (ForceFeature.IsValid())
+	{
+		IModularFeatures::Get().UnregisterModularFeature(PROJECT_BUILD_MUTATOR_FEATURE, ForceFeature.Get());
+	}
+#endif
 }
 
 void ZLCloudPlugin::FZLCloudPluginModule::RegisterCustomizations()

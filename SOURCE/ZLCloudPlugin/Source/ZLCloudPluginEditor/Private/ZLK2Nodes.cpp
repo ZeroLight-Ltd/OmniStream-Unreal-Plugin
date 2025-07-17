@@ -48,9 +48,44 @@ TArray<TSharedPtr<FString>> SGraphPin_KeySelector::GatherKeyOptions() const
 	const UStateKeyInfoAsset* Asset = Cast<UStateKeyInfoAsset>(AssetPin->DefaultObject);
 	if (!Asset) return Keys;
 
+	bool displaySubKeyedJSONObjects = false;
+	UEdGraphPin* SubKeysPin = Node->FindPin(TEXT("SubKeys"));
+	if (SubKeysPin)
+		displaySubKeyedJSONObjects = true;
+
+	TSet<FString> UniqueKeys;
+
 	for (const auto& Pair : Asset->KeyInfos)
 	{
-		Keys.Add(MakeShared<FString>(Pair.Key));
+		const FString& FullKey = Pair.Key;
+
+		if (displaySubKeyedJSONObjects)
+		{
+			if (FullKey.Contains(TEXT(".")))
+			{
+				TArray<FString> Parts;
+				FullKey.ParseIntoArray(Parts, TEXT("."), true);
+
+				FString Path;
+				for (int32 i = 0; i < Parts.Num() - 1; ++i)
+				{
+					if (!Path.IsEmpty())
+					{
+						Path += TEXT(".");
+					}
+					Path += Parts[i];
+
+					UniqueKeys.Add(Path);
+				}
+			}
+		}
+		else
+			UniqueKeys.Add(FullKey);
+	}
+
+	for (const FString& Key : UniqueKeys)
+	{
+		Keys.Add(MakeShared<FString>(Key));
 	}
 
 	return Keys;
@@ -96,13 +131,22 @@ FText UZLK2Node_GetRequestedStateValue::GetNodeTitle(ENodeTitleType::Type TitleT
 
 void UZLK2Node_GetRequestedStateValue::PinDefaultValueChanged(UEdGraphPin* ChangedPin)
 {
+	if (GIsReconstructingBlueprintInstances || GIsDuplicatingClassForReinstancing)
+	{
+		return;
+	}
+
 	Super::PinDefaultValueChanged(ChangedPin);
 
 	if (ChangedPin && ChangedPin->PinName == TEXT("Asset"))
 	{
+		UStateKeyInfoAsset* Asset = Cast<UStateKeyInfoAsset>(ChangedPin->DefaultObject);
+		if (!Asset || Asset->KeyInfos.IsEmpty())
+			return;
+
 		ReconstructNode();
 
-		UEdGraphPin* KeyNamePin = FindPin(TEXT("Key"));
+		UEdGraphPin* KeyNamePin = FindPin(TEXT("Key"), EGPD_Input);
 		if (KeyNamePin)
 		{
 			KeyNamePin->DefaultValue = TEXT("Select Key");
@@ -115,7 +159,7 @@ void UZLK2Node_GetRequestedStateValue::PinDefaultValueChanged(UEdGraphPin* Chang
 		if (AssetPin || AssetPin->DefaultObject)
 		{
 			const UStateKeyInfoAsset* Asset = Cast<UStateKeyInfoAsset>(AssetPin->DefaultObject);
-			if (!Asset)
+			if (!Asset || Asset->KeyInfos.IsEmpty())
 				return;
 	
 			if (Asset->KeyInfos.Contains(ChangedPin->DefaultValue))
@@ -222,6 +266,7 @@ void UZLK2Node_GetRequestedStateValue::AllocateDefaultPins()
 	}
 
 	CreatePin(EGPD_Output, UEdGraphSchema_K2::PC_Boolean, TEXT("Success"));
+	CreatePin(EGPD_Output, UEdGraphSchema_K2::PC_String, TEXT("Key"));
 }
 
 void UZLK2Node_GetRequestedStateValue::ReallocatePinsDuringReconstruction(TArray<UEdGraphPin*>& OldPins)
@@ -289,8 +334,10 @@ void UZLK2Node_GetRequestedStateValue::ExpandNode(FKismetCompilerContext& Compil
 	}
 
 	CompilerContext.MovePinLinksToIntermediate(*FindPin(TEXT("Asset")), *CallNode->FindPin(TEXT("Asset")));
-	CompilerContext.MovePinLinksToIntermediate(*FindPin(TEXT("Key")), *CallNode->FindPin(TEXT("KeyName")));
+	CompilerContext.MovePinLinksToIntermediate(*FindPin(TEXT("Key"), EGPD_Input), *CallNode->FindPin(TEXT("KeyName")));
 	CompilerContext.MovePinLinksToIntermediate(*FindPin(TEXT("Instant Confirm")), *CallNode->FindPin(TEXT("InstantConfirm")));
+	CompilerContext.MovePinLinksToIntermediate(*FindPin(TEXT("Key"), EGPD_Output), *CallNode->FindPin(TEXT("KeyOut")));
+	
 
 	// Output selection logic
 	FString ReturnPinName = TEXT("Value");
@@ -358,6 +405,204 @@ FName UZLK2Node_GetRequestedStateValue::GetFunctionName() const
     return FName(TEXT("GetRequestedSchemaValue"));
 }
 
+FText UZLK2Node_GetRequestedStateValueSubKeys::GetNodeTitle(ENodeTitleType::Type TitleType) const
+{
+	return LOCTEXT("SelectKeyNodeTitle", "Get Requested State Value Sub Keys (Schema Asset)");
+}
 
+void UZLK2Node_GetRequestedStateValueSubKeys::PinDefaultValueChanged(UEdGraphPin* ChangedPin)
+{
+	if (GIsReconstructingBlueprintInstances || GIsDuplicatingClassForReinstancing)
+	{
+		return;
+	}
+
+	Super::PinDefaultValueChanged(ChangedPin);
+
+	if (ChangedPin && ChangedPin->PinName == TEXT("Asset"))
+	{
+		UStateKeyInfoAsset* Asset = Cast<UStateKeyInfoAsset>(ChangedPin->DefaultObject);
+		if (!Asset || Asset->KeyInfos.IsEmpty())
+			return;
+
+		ReconstructNode();
+
+		UEdGraphPin* KeyNamePin = FindPin(TEXT("Key"), EGPD_Input);
+		if (KeyNamePin)
+		{
+			KeyNamePin->DefaultValue = TEXT("Select Key");
+		}
+	}
+
+	if (ChangedPin && ChangedPin->PinName == "Key")
+	{
+		UEdGraphPin* AssetPin = FindPin(TEXT("Asset"));
+		if (AssetPin || AssetPin->DefaultObject)
+		{
+			const UStateKeyInfoAsset* Asset = Cast<UStateKeyInfoAsset>(AssetPin->DefaultObject);
+			if (!Asset || Asset->KeyInfos.IsEmpty())
+				return;
+
+			if (Asset->KeyInfos.Contains(ChangedPin->DefaultValue))
+			{
+				ReconstructNode();
+			}
+		}
+	}
+}
+
+void UZLK2Node_GetRequestedStateValueSubKeys::AllocateDefaultPins()
+{
+	CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Exec, UEdGraphSchema_K2::PN_Execute);
+
+	UEdGraphPin* NewAssetPin = CreatePin(
+		EGPD_Input,
+		UEdGraphSchema_K2::PC_Object,
+		NAME_None,
+		TEXT("Asset")
+	);
+	NewAssetPin->PinType.PinSubCategoryObject = UStateKeyInfoAsset::StaticClass();
+
+	if (SavedAssetObject != nullptr)
+	{
+		NewAssetPin->DefaultObject = SavedAssetObject;
+		SavedAssetObject = nullptr;
+	}
+
+	EStateKeyDataType dataType = EStateKeyDataType::Invalid;
+
+	if (UStateKeyInfoAsset* Asset = Cast<UStateKeyInfoAsset>(NewAssetPin->DefaultObject))
+	{
+		if (Asset->KeyInfos.IsEmpty()) // asset is not yet loaded
+		{
+			FSoftObjectPath AssetPath(Asset);
+			FStreamableManager& Streamable = UAssetManager::GetStreamableManager();
+
+			Streamable.RequestAsyncLoad(AssetPath, FStreamableDelegate::CreateUObject(
+				this,
+				&UZLK2Node_GetRequestedStateValueSubKeys::OnAssetLoaded,
+				AssetPath
+			));
+
+			//return;
+		}
+	}
+
+	const FName KeySubCat(TEXT("OmniStreamSchemaKey"));
+	const FName KeyName(TEXT("Key"));
+
+	UEdGraphPin* NewKeyPin = CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_String, KeySubCat, KeyName);
+
+	if (!SavedKeyStr.IsEmpty())
+	{
+		NewKeyPin->DefaultValue = SavedKeyStr;
+		SavedKeyStr = "";
+	}
+
+	CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Boolean, TEXT("Instant Confirm"));
+
+	CreatePin(EGPD_Output, UEdGraphSchema_K2::PC_Exec, UEdGraphSchema_K2::PN_Then);
+
+	UEdGraphPin* ArrayPin;
+
+	ArrayPin = CreatePin(EGPD_Output, UEdGraphSchema_K2::PC_Struct, TEXT("SubKeys"));
+	ArrayPin->PinType.PinSubCategoryObject = FSubKeyValueResult::StaticStruct();
+	ArrayPin->PinType.ContainerType = EPinContainerType::Array;
+
+	CreatePin(EGPD_Output, UEdGraphSchema_K2::PC_Boolean, TEXT("Success"));
+}
+
+void UZLK2Node_GetRequestedStateValueSubKeys::ReallocatePinsDuringReconstruction(TArray<UEdGraphPin*>& OldPins)
+{
+	for (UEdGraphPin* OldPin : OldPins)
+	{
+		if (OldPin->PinName == TEXT("Asset") && OldPin->Direction == EGPD_Input)
+		{
+			SavedAssetObject = Cast<UStateKeyInfoAsset>(OldPin->DefaultObject);
+
+			// Try loading by name if DefaultObject is stale
+			if (SavedAssetObject && SavedAssetObject->KeyInfos.IsEmpty())
+			{
+				FString AssetPathName = SavedAssetObject->GetPathName();
+				UStateKeyInfoAsset* LoadedAssetAlt = Cast<UStateKeyInfoAsset>(StaticLoadObject(UStateKeyInfoAsset::StaticClass(), nullptr, *AssetPathName, nullptr, 0U, nullptr, false));
+				AssetPathStr = FSoftObjectPath(LoadedAssetAlt);
+
+				FStreamableManager& Streamable = UAssetManager::GetStreamableManager();
+
+				Streamable.RequestAsyncLoad(AssetPathStr, FStreamableDelegate::CreateUObject(
+					this,
+					&UZLK2Node_GetRequestedStateValueSubKeys::OnAssetLoaded,
+					AssetPathStr
+				));
+
+				SavedAssetObject = Cast<UStateKeyInfoAsset>(LoadedAssetAlt);
+			}
+		}
+
+		if (OldPin->PinName == TEXT("Key") && OldPin->Direction == EGPD_Input)
+		{
+			SavedKeyStr = OldPin->DefaultValue;
+		}
+	}
+
+	Super::ReallocatePinsDuringReconstruction(OldPins);
+}
+
+void UZLK2Node_GetRequestedStateValueSubKeys::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph* SourceGraph)
+{
+	Super::ExpandNode(CompilerContext, SourceGraph);
+
+	static FName FunctionName = GET_FUNCTION_NAME_CHECKED(UZLCloudPluginStateManagerBlueprints, GetRequestedSchemaValueSubKeys);
+
+	UFunction* TargetFunction = UZLCloudPluginStateManagerBlueprints::StaticClass()->FindFunctionByName(FunctionName);
+	if (!TargetFunction)
+	{
+		CompilerContext.MessageLog.Error(*FString::Printf(TEXT("Function '%s' not found."), *FunctionName.ToString()));
+		return;
+	}
+
+	UK2Node_CallFunction* CallNode = CompilerContext.SpawnIntermediateNode<UK2Node_CallFunction>(this, SourceGraph);
+	CallNode->SetFromFunction(TargetFunction);
+	CallNode->AllocateDefaultPins();
+
+	UEdGraphPin* AssetPin = FindPin(TEXT("Asset"));
+
+	CompilerContext.MovePinLinksToIntermediate(*FindPin(TEXT("Asset")), *CallNode->FindPin(TEXT("Asset")));
+	CompilerContext.MovePinLinksToIntermediate(*FindPin(TEXT("Key"), EGPD_Input), *CallNode->FindPin(TEXT("ParentKey")));
+	CompilerContext.MovePinLinksToIntermediate(*FindPin(TEXT("Instant Confirm")), *CallNode->FindPin(TEXT("InstantConfirm")));
+	CompilerContext.MovePinLinksToIntermediate(*FindPin(TEXT("SubKeys"), EGPD_Output), *CallNode->FindPin(TEXT("Results")));
+
+	UEdGraphPin* execTopPin = GetExecPin();
+	UEdGraphPin* execInternalPin = CallNode->GetExecPin();
+
+	UEdGraphPin* thenTopPin = GetThenPin();
+	UEdGraphPin* thenInternalPin = CallNode->GetThenPin();
+
+	CompilerContext.MovePinLinksToIntermediate(*FindPin(TEXT("Success")), *CallNode->FindPin(TEXT("Success")));
+	CompilerContext.MovePinLinksToIntermediate(*execTopPin, *execInternalPin);
+	CompilerContext.MovePinLinksToIntermediate(*thenTopPin, *thenInternalPin);
+
+	BreakAllNodeLinks();
+}
+
+void UZLK2Node_GetRequestedStateValueSubKeys::GetMenuActions(FBlueprintActionDatabaseRegistrar& ActionRegistrar) const
+{
+	UClass* ActionKey = GetClass();
+	if (ActionRegistrar.IsOpenForRegistration(ActionKey))
+	{
+		UBlueprintNodeSpawner* Spawner = UBlueprintNodeSpawner::Create(GetClass());
+		ActionRegistrar.AddBlueprintAction(ActionKey, Spawner);
+	}
+}
+
+FText UZLK2Node_GetRequestedStateValueSubKeys::GetMenuCategory() const
+{
+	return LOCTEXT("NodeCategory", "Zerolight Omnistream State");
+}
+
+FName UZLK2Node_GetRequestedStateValueSubKeys::GetFunctionName() const
+{
+	return FName(TEXT("GetRequestedSchemaValueSubKeys"));
+}
 
 #undef LOCTEXT_NAMESPACE

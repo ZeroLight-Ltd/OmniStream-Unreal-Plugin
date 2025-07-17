@@ -106,7 +106,7 @@ protected:
 
     TSharedPtr<FJsonObject> ActiveJsonObject = MakeShared<FJsonObject>();
 
-    TMap<FString, StateKeyInfo> keyInfos;
+    inline static TMap<FString, StateKeyInfo> keyInfos;
     FString newKeyStr = "";
     FString lastOpenSchemaAssetPath = "";
 

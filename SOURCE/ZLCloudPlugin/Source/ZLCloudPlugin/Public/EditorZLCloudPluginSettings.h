@@ -184,6 +184,13 @@ public:
 
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+
+	void SaveToCustomIni();
+
+	void SaveConfig(uint64 Flags = CPF_Config, const TCHAR* Filename = nullptr, FConfigCacheIni* Config = GConfig)
+	{
+		SaveToCustomIni();
+	}
 #endif
 };
 

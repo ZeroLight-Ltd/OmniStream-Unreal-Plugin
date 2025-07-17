@@ -23,6 +23,7 @@
 #include "GenericPlatform/GenericPlatformProcess.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Misc/ConfigCacheIni.h"
 #include "HAL/PlatformFilemanager.h"
 #include "Modules/ModuleManager.h"
 #include "Interfaces/IProjectManager.h"
@@ -297,6 +298,67 @@ FText FZeroLightMainButton::UpdateProgress() const
 	return s_progressText;
 }
 
+void InjectTempTargetFiles()
+{
+	FString ProjectName = FApp::GetProjectName();
+	FString TargetFile = FPaths::ProjectIntermediateDir() / TEXT("Source") / (ProjectName + TEXT(".Target.cs"));
+	UE_LOG(LogPortalCLI, Log, TEXT("Target.cs file path: %s"), *TargetFile);
+	if (!FPaths::FileExists(TargetFile))
+	{
+		FFileHelper::SaveStringToFile(TEXT("using UnrealBuildTool;\npublic class ") + ProjectName + TEXT("Target : TargetRules\n{\npublic ") + ProjectName + TEXT("Target(TargetInfo Target) : base(Target) { DefaultBuildSettings = BuildSettingsVersion.Latest; \n IncludeOrderVersion = EngineIncludeOrderVersion.Latest; \n Type = TargetType.Game; \n ExtraModuleNames.Add(\"" + ProjectName + "\"); }\n}"), *TargetFile);
+	}
+	FString TargetEditorFile = FPaths::ProjectIntermediateDir() / TEXT("Source") / (ProjectName + TEXT("Editor.Target.cs"));
+	if (!FPaths::FileExists(TargetEditorFile))
+	{
+		FFileHelper::SaveStringToFile(TEXT("using UnrealBuildTool;\npublic class ") + ProjectName + TEXT("EditorTarget : TargetRules\n{\npublic ") + ProjectName + TEXT("EditorTarget(TargetInfo Target) : base(Target) { DefaultBuildSettings = BuildSettingsVersion.Latest; \n IncludeOrderVersion = EngineIncludeOrderVersion.Latest; \n Type = TargetType.Editor; \n ExtraModuleNames.Add(\"" + ProjectName + "\"); }\n}"), *TargetEditorFile);
+	}
+	FString TargetCppFile = FPaths::ProjectIntermediateDir() / TEXT("Source") / (ProjectName + TEXT(".cpp"));
+	if (!FPaths::FileExists(TargetCppFile))
+	{
+		FFileHelper::SaveStringToFile(TEXT("#include \"CoreTypes.h\" \n #include \"Modules/ModuleManager.h\" \n IMPLEMENT_PRIMARY_GAME_MODULE(FDefaultModuleImpl, " + ProjectName + ", \"" + ProjectName + "\");"), *TargetCppFile);
+	}
+	FString TargetBuildFile = FPaths::ProjectIntermediateDir() / TEXT("Source") / (ProjectName + TEXT(".Build.cs"));
+	if (!FPaths::FileExists(TargetBuildFile))
+	{
+		FFileHelper::SaveStringToFile(TEXT("using UnrealBuildTool;\npublic class ") + ProjectName + TEXT(" : ModuleRules\n{\npublic ") + ProjectName + TEXT("(ReadOnlyTargetRules Target) : base(Target) { PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs; \n PrivateDependencyModuleNames.Add(\"Core\"); }\n}"), *TargetBuildFile);
+	}
+
+	//Unclean info but given uat has inherent issues with editor-dependency nested plugins and we dont actually build a real editor target here, this is fine for now
+	static const FString DummyEditorTargetTemplate = TEXT(R"JSON(
+	{
+		"Version": 
+		{
+			"MajorVersion": 5,
+			"MinorVersion": 5,
+			"PatchVersion": 4,
+			"Changelist": 40574608,
+			"CompatibleChangelist": 37670630,
+			"IsLicenseeVersion": 0,
+			"IsPromotedBuild": 0,
+			"BranchName": "++UE5+Release-5.5",
+			"BuildId": "37670630"
+		},
+		"TargetName": "{PROJECT_NAME}Editor",
+		"TargetType": "Editor",
+		"Platform": "Win64",
+		"Configuration": "Development",
+		"TargetRules": {},
+		"BuildProducts": [],
+		"Modules": [],
+		"Plugins": [],
+		"AdditionalProperties": {}
+	}
+	)JSON");
+	FString FinalJSON = DummyEditorTargetTemplate.Replace(TEXT("{PROJECT_NAME}"), *ProjectName);
+
+	FString EdTargetOutputFile = FPaths::ProjectDir() / TEXT("Binaries") / TEXT("Win64") / (ProjectName + TEXT("Editor.target"));
+	if (!FPaths::FileExists(EdTargetOutputFile))
+	{
+		FFileHelper::SaveStringToFile(FinalJSON, *EdTargetOutputFile);
+	}
+
+}
+
 void FZeroLightMainButton::StartBuildAndDeployTask() const
 {
 	if(s_isCIBuild)
@@ -326,8 +388,40 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 
 	FString outFolderName = GetBuildFolder();
 
-	FString commandArgs("BuildCookRun -platform=Win64 -nop4 -skipbuildeditor -nocompileeditor -cook -build -stage -allmaps -archive -pak -package ");
+	FString commandArgs;
 
+	if (IsCodeProject())
+	{
+		commandArgs = "BuildCookRun -platform=Win64 -nop4 -skipbuildeditor -nocompileeditor -cook -build -stage -allmaps -archive -pak -package ";
+	}
+	else
+	{
+		InjectTempTargetFiles();
+
+
+		FString TurnkeyParams = TEXT("-command=VerifySdk -platform=Win64 -UpdateIfNeeded");
+
+		TurnkeyParams.Appendf(TEXT(" -project=\"%s\""), *projectPath);
+
+		UE_LOG(LogPortalCLI, Log, TEXT("Turnkey commands generated"));
+
+		commandArgs = FString::Printf(TEXT(" -ScriptsForProject=\"%s\" "), *projectPath);
+		commandArgs.Appendf(TEXT("Turnkey %s"), *TurnkeyParams);
+		commandArgs += " BuildCookRun -platform=Win64 -nop4 -SkipOnlyEditorOnly -skipbuildeditor -nocompileeditor -cook -build -stage -allmaps -archive -pak -package -UpdateIfNeeded -installed -nocompile -nocompileuat";
+
+		//BP project needs to always specify unrealexe or it tries to read it from [projectname]Editor.target which doesnt exist
+		FString unrealExePath = FPaths::ConvertRelativePathToFull(engineDir + "Binaries/Win64/UnrealEditor-Cmd.exe");
+		FString unrealExeArg = FString::Printf(TEXT("-unrealexe=\"%s\" "), *unrealExePath);
+		commandArgs += unrealExeArg;
+
+		FString projectStr = FPaths::GetBaseFilename(FPaths::GetProjectFilePath());
+
+		commandArgs += FString("-target=\"" + projectStr + "\" ");
+
+		UE_LOG(LogPortalCLI, Log, TEXT("Full build command: %s"), *commandArgs);
+
+		needsExeArg = false;
+	}
 	commandArgs += FString("-project=\"" + projectPath + "\" ");
 	commandArgs += FString("-clientconfig=Development ");
 
@@ -525,6 +619,7 @@ void FZeroLightMainButton::SetDeployName(const FText& name)
 		s_cloudstreamSettings->deployName = name.ToString();
 		FApp::SetProjectName(*name.ToString());
 		s_cloudstreamSettings->SaveConfig(NULL, *s_savedIniPath);
+		s_cloudstreamSettings->SaveToCustomIni();
 	}
 }
 
@@ -534,6 +629,7 @@ void FZeroLightMainButton::SetPortalDisplayName(const FString& name)
 	{
 		s_cloudstreamSettings->displayName = name;
 		s_cloudstreamSettings->SaveConfig(NULL, *s_savedIniPath);
+		s_cloudstreamSettings->SaveToCustomIni();
 	}
 }
 
@@ -549,6 +645,7 @@ void FZeroLightMainButton::SetDeployName(const FString& name)
 		s_cloudstreamSettings->deployName = name;
 		//FApp::SetProjectName(*name);
 		s_cloudstreamSettings->SaveConfig(NULL, *s_savedIniPath);
+		s_cloudstreamSettings->SaveToCustomIni();
 	}
 }
 
@@ -614,25 +711,25 @@ FReply FZeroLightMainButton::AutoResolveProjectWarnings()
 {
 	bool needsRestart = false;
 
-	if (!IsCodeProject())
-	{
-		/*FString HeaderPath = FPaths::GameSourceDir() / TEXT("OmniStreamAutoGeneratedClass.h");
-		FString SourcePath = FPaths::GameSourceDir() / TEXT("OmniStreamAutoGeneratedClass.cpp");
+	//if (!IsCodeProject())
+	//{
+	//	/*FString HeaderPath = FPaths::GameSourceDir() / TEXT("OmniStreamAutoGeneratedClass.h");
+	//	FString SourcePath = FPaths::GameSourceDir() / TEXT("OmniStreamAutoGeneratedClass.cpp");
 
-		FString HeaderContent = TEXT("#pragma once\n\nclass FOmniStreamAutoGeneratedClass\n{\npublic:\n\tFOmniStreamAutoGeneratedClass();\n};\n");
-		FString SourceContent = TEXT("#include \"OmniStreamAutoGeneratedClass.h\"\n\nFOmniStreamAutoGeneratedClass::FOmniStreamAutoGeneratedClass()\n{\n}\n");
+	//	FString HeaderContent = TEXT("#pragma once\n\nclass FOmniStreamAutoGeneratedClass\n{\npublic:\n\tFOmniStreamAutoGeneratedClass();\n};\n");
+	//	FString SourceContent = TEXT("#include \"OmniStreamAutoGeneratedClass.h\"\n\nFOmniStreamAutoGeneratedClass::FOmniStreamAutoGeneratedClass()\n{\n}\n");
 
-		FFileHelper::SaveStringToFile(HeaderContent, *HeaderPath);
-		FFileHelper::SaveStringToFile(SourceContent, *SourcePath);
+	//	FFileHelper::SaveStringToFile(HeaderContent, *HeaderPath);
+	//	FFileHelper::SaveStringToFile(SourceContent, *SourcePath);
 
-		FText outFailReason, outFailLog;
-		FGameProjectGenerationModule::Get().UpdateCodeProject(outFailReason, outFailLog);
-		needsRestart = true;*/
+	//	FText outFailReason, outFailLog;
+	//	FGameProjectGenerationModule::Get().UpdateCodeProject(outFailReason, outFailLog);
+	//	needsRestart = true;*/
 
-		FGameProjectGenerationModule::Get().OpenAddCodeToProjectDialog(
-			FAddToProjectConfig().DefaultClassName("OmniStreamAutoGeneratedClass")
-		);
-	}
+	//	FGameProjectGenerationModule::Get().OpenAddCodeToProjectDialog(
+	//		FAddToProjectConfig().DefaultClassName("OmniStreamAutoGeneratedClass")
+	//	);
+	//}
 
 	if (IsPixelStreamingEnabled())
 	{
@@ -669,6 +766,7 @@ void FZeroLightMainButton::SetPortalAssetLineID(const FText& id)
 		s_cloudstreamSettings->portalAssetLineId = id.ToString();
 		s_cloudstreamSettings->buildId = id.ToString();
 		s_cloudstreamSettings->SaveConfig(NULL, *s_savedIniPath);
+		s_cloudstreamSettings->SaveToCustomIni();
 	}
 }
 
@@ -680,6 +778,7 @@ void FZeroLightMainButton::SetBuildID(const FText& id)
 		s_cloudstreamSettings->buildId = id.ToString();
 		
 		s_cloudstreamSettings->SaveConfig(NULL, *s_savedIniPath);
+		s_cloudstreamSettings->SaveToCustomIni();
 	}
 }
 
@@ -689,6 +788,7 @@ void FZeroLightMainButton::SetBuildFolder(const FString& path)
 	{
 		s_cloudstreamSettings->buildFolder = path;
 		s_cloudstreamSettings->SaveConfig(NULL, *s_savedIniPath);
+		s_cloudstreamSettings->SaveToCustomIni();
 	}
 }
 
@@ -1628,7 +1728,7 @@ FZeroLightMainButton::FZeroLightMainButton()
 	FZeroLightMainButton::SetUsePortalUpload(ECheckBoxState::Checked);
 
 	s_CIMainButtonPtr = this;
-	s_savedIniPath = FPaths::GeneratedConfigDir() + TEXT("WindowsEditor/ZLCloudPluginSettings.ini");
+	s_savedIniPath = FConfigCacheIni::NormalizeConfigIniPath(FPaths::ProjectConfigDir() + TEXT("DefaultZLCloudPluginSettings.ini"));
 }
 
 FZeroLightMainButton::~FZeroLightMainButton()
@@ -1895,14 +1995,14 @@ void FZeroLightMainButton::ShowBuildAndDeployDialog()
 										.Text_Lambda([this]() {
 										if (ProjectHasWarnings())
 										{
-											FString codeProjWarning = FString("-C++ Project required. Create C++ class in project");
+											//FString codeProjWarning = FString("-C++ Project required. Create C++ class in project");
 											FString pixelStreamWarning = FString("-Pixel Streaming plugin should be disabled");
 											FString pixelCaptureWarning = FString("-Pixel Capture plugin should be enabled");
 											FString openXRWarning = FString("-VR support requires OpenXR plugin");
 
 											FString warningsStr = FString("");
-											if (!IsCodeProject())
-												warningsStr += codeProjWarning + "\n";
+											//if (!IsCodeProject())
+											//	warningsStr += codeProjWarning + "\n";
 
 											if (IsPixelStreamingEnabled())
 												warningsStr += pixelStreamWarning;

@@ -11,6 +11,9 @@
 #include "LauncherComms.h"
 #include "ZeroLightMainButton.h"
 #include "ZLCloudPluginProtocol.h"
+#include "Modules/ModuleManager.h"
+#include "Features/IModularFeatures.h"
+#include "Interfaces/IProjectBuildMutatorFeature.h"
 
 class AController;
 class AGameModeBase;
@@ -23,6 +26,20 @@ namespace ZLCloudPlugin
 {
 	class FVideoInputBackBuffer;
 	class FVideoSourceGroup;
+
+	class FForceTempTargetFeature : public IProjectBuildMutatorFeature
+	{
+	public:
+		virtual bool RequiresProjectBuild(const FName& InPlatformInfoName, FText& OutReason) const override
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Return true for RequiresProjectBuild"));
+
+			OutReason = FText::FromString(TEXT("Forced by ZLCloudPlugin"));
+			return true; // Always force for BP only projects
+		}
+	};
+
+	static TSharedPtr<FForceTempTargetFeature> ForceFeature;
 
 	/*
 	* This plugin allows the back buffer to be sent as a compressed video across

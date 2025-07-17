@@ -1621,8 +1621,7 @@ void UZLCloudPluginStateManager::SendCurrentStateToWeb(bool completeState)
 		currentStateJson->SetObjectField("current_state", (completeState) ? JsonObject_currentState : JsonObject_web_currentState);
 
 		TSharedPtr<FJsonObject> jsonForWebObject = MakeShareable(new FJsonObject);
-		jsonForWebObject->SetObjectField("state_processing_ended", currentStateJson);
-		jsonForWebObject->SetStringField(s_requestIdStr, "0");
+		jsonForWebObject->SetObjectField("state_notify_web", currentStateJson);
 
 		FString JsonString_forWeb;
 		TSharedRef<TJsonWriter<TCHAR>> JsonWriter = TJsonWriterFactory<TCHAR>::Create(&JsonString_forWeb, 1);

@@ -9,6 +9,9 @@
 #include "ZLScreenshot.h"
 #include "ZLCloudPluginModule.h"
 #include "ZLSpotLightDataDrivenUIManager.h"
+#if WITH_EDITOR
+#include "EditorZLCloudPluginSettings.h"
+#endif
 
 DEFINE_LOG_CATEGORY(LogMessageCallbacks);
 
@@ -199,12 +202,22 @@ void MessageCallbacks::SetOmnistreamSettings(MessageWithData* msg)
 		//Any omnistream advanced config options from runinfo parsed here, as we dont store pluign ini file in staged builds.
 		if (JsonParsed != nullptr)
 		{
+
+#if WITH_EDITOR
+			const UZLCloudPluginSettings* Settings = GetMutableDefault<UZLCloudPluginSettings>();
+			check(Settings);
+
+			UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->m_stateRequestWarningTime = Settings->stateRequestWarningTime;
+			UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->m_stateRequestTimeout = Settings->stateRequestTimeout;
+#else
+
 			float stateWarningTime, stateTimeout;
 			if (JsonParsed->TryGetNumberField(FString("stateWarningTime"), stateWarningTime))
 				UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->m_stateRequestWarningTime = stateWarningTime;
 
 			if(JsonParsed->TryGetNumberField(FString("stateTimeout"), stateTimeout))
 				UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->m_stateRequestTimeout = stateTimeout;
+#endif
 		}
 	}
 
