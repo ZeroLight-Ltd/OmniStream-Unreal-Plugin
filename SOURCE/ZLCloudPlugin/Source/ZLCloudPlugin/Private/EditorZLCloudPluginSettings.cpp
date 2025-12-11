@@ -3,6 +3,7 @@
 #include "EditorZLCloudPluginSettings.h"
 #include "JavaScriptKeyCodes.inl"
 #include "Misc/ConfigCacheIni.h"
+#include "ZLCloudPluginVersion.h"
 
 #if WITH_EDITOR
 #include <Developer/SettingsEditor/Public/ISettingsEditorModule.h>
@@ -100,6 +101,13 @@ void UZLCloudPluginSettings::SaveToCustomIni()
 
 	const FString Section = TEXT("/Script/ZLCloudPlugin.ZLCloudPluginSettings");
 
+	FString RelativeBuildFolder = buildFolder;
+	FPaths::MakePathRelativeTo(RelativeBuildFolder, *FPaths::ProjectDir());
+
+	FString RelativeThumbnailPath = thumbnailImagePath.FilePath;
+	FPaths::MakePathRelativeTo(RelativeThumbnailPath, *FPaths::ProjectDir());
+
+
 	// Helper macro to write key-value pairs
 #define WRITE_CONFIG(Key, Value) \
 	ConfigFile.SetString(*Section, TEXT(Key), Value)
@@ -117,19 +125,26 @@ void UZLCloudPluginSettings::SaveToCustomIni()
 	WRITE_CONFIG("deployName", *deployName);
 	WRITE_CONFIG("displayName", *displayName);
 	WRITE_CONFIG("buildId", *buildId);
-	WRITE_CONFIG("buildFolder", *buildFolder);
+	WRITE_CONFIG("buildFolder", *RelativeBuildFolder);
 	WRITE_CONFIG("portalAssetLineId", *portalAssetLineId);
 	WRITE_CONFIG("portalServerUrl", *portalServerUrl);
 	WRITE_CONFIG("httpProxyOverride", *httpProxyOverride);
+	WRITE_CONFIG("showExperimentalFeatures", showExperimentalFeatures ? TEXT("True") : TEXT("False"));
 
-	FString NormalizedPath = thumbnailImagePath.FilePath;
+	FString NormalizedPath = RelativeThumbnailPath;
 	NormalizedPath.ReplaceInline(TEXT("/"), TEXT("\\"));
 
 	const FString FinalFormatted = FString::Printf(TEXT("(FilePath=\"%s\")"), *NormalizedPath);
 
+#if UNREAL_5_7_OR_NEWER
+	const FConfigSection* ConfigSection = ConfigFile.FindOrAddConfigSection(Section);
+	ConfigFile.RemoveKeyFromSection(*Section, TEXT("thumbnailImagePath"));
+	ConfigFile.AddToSection(*Section, TEXT("thumbnailImagePath"), FinalFormatted);
+#else
 	FConfigSection* ConfigSection = ConfigFile.Find(Section);
 	ConfigSection->Remove(TEXT("thumbnailImagePath"));
 	ConfigSection->Add(TEXT("thumbnailImagePath"), FConfigValue(FinalFormatted));
+#endif
 
 #undef WRITE_CONFIG
 

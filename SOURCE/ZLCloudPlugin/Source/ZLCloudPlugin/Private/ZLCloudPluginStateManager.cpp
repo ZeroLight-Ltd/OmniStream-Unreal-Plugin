@@ -5,25 +5,51 @@
 #include "Interfaces/IPluginManager.h"
 #include <Runtime/Core/Public/Misc/FileHelper.h>
 #include <ZLTrackedStateBlueprint.h>
+#include "EditorZLCloudPluginSettings.h"
+
+#if WITH_EDITOR
+#include "Framework/Docking/TabManager.h"
+#include "Widgets/Docking/SDockTab.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/Input/SSpinBox.h"
+#include "Widgets/Text/STextBlock.h"
+#include "SlateBasics.h"
+#include "LevelEditor.h"
+#endif
 
 UZLCloudPluginStateManager* UZLCloudPluginStateManager::Singleton = nullptr;
 
-template void UZLCloudPluginStateManager::GetRequestedStateValue<FString>(FString, bool, FString&, bool&);
-template void UZLCloudPluginStateManager::GetRequestedStateValue<bool>(FString, bool, bool&, bool&);
-template void UZLCloudPluginStateManager::GetRequestedStateValue<double>(FString, bool, double&, bool&);
-template void UZLCloudPluginStateManager::GetRequestedStateValue<float>(FString, bool, float&, bool&);
-template void UZLCloudPluginStateManager::GetRequestedStateValue<TArray<FString>>(FString, bool, TArray<FString>&, bool&);
-template void UZLCloudPluginStateManager::GetRequestedStateValue<TArray<bool>>(FString, bool, TArray<bool>&, bool&);
-template void UZLCloudPluginStateManager::GetRequestedStateValue<TArray<double>>(FString, bool, TArray<double>&, bool&);
-template void UZLCloudPluginStateManager::GetRequestedStateValue<TArray<float>>(FString, bool, TArray<float>&, bool&);
-template void UZLCloudPluginStateManager::GetRequestedStateValue<TSharedPtr<FJsonValue>>(FString, bool, TSharedPtr<FJsonValue>&, bool&);
-template void UZLCloudPluginStateManager::GetCurrentStateValue<FString>(FString, FString&, bool&);
-template void UZLCloudPluginStateManager::GetCurrentStateValue<double>(FString, double&, bool&);
-template void UZLCloudPluginStateManager::GetCurrentStateValue<bool>(FString, bool&, bool&);
-template void UZLCloudPluginStateManager::GetCurrentStateValue<TArray<FString>>(FString, TArray<FString>&, bool&);
-template void UZLCloudPluginStateManager::GetCurrentStateValue<TArray<bool>>(FString, TArray<bool>&, bool&);
-template void UZLCloudPluginStateManager::GetCurrentStateValue<TArray<double>>(FString, TArray<double>&, bool&);
-template void UZLCloudPluginStateManager::GetCurrentStateValue<TSharedPtr<FJsonValue>>(FString, TSharedPtr<FJsonValue>&, bool&);
+#if WITH_EDITOR
+const FName UZLCloudPluginStateManager::DebugUITabId = FName(TEXT("ZLDebugUITab"));
+#endif
+
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetRequestedStateValue<FString>(FString, bool, FString&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetRequestedStateValue<bool>(FString, bool, bool&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetRequestedStateValue<double>(FString, bool, double&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetRequestedStateValue<float>(FString, bool, float&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetRequestedStateValue<TArray<FString>>(FString, bool, TArray<FString>&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetRequestedStateValue<TArray<bool>>(FString, bool, TArray<bool>&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetRequestedStateValue<TArray<double>>(FString, bool, TArray<double>&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetRequestedStateValue<TArray<float>>(FString, bool, TArray<float>&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetRequestedStateValue<TSharedPtr<FJsonValue, ESPMode::ThreadSafe>>(FString, bool, TSharedPtr<FJsonValue, ESPMode::ThreadSafe>&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetCurrentStateValue<FString>(FString, FString&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetCurrentStateValue<double>(FString, double&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetCurrentStateValue<bool>(FString, bool&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetCurrentStateValue<TArray<FString>>(FString, TArray<FString>&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetCurrentStateValue<TArray<bool>>(FString, TArray<bool>&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetCurrentStateValue<TArray<double>>(FString, TArray<double>&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetCurrentStateValue<TSharedPtr<FJsonValue>>(FString, TSharedPtr<FJsonValue>&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::SetCurrentStateValue<FString>(FString, FString, bool);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::SetCurrentStateValue<double>(FString, double, bool);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::SetCurrentStateValue<float>(FString, float, bool);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::SetCurrentStateValue<bool>(FString, bool, bool);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::SetCurrentStateValue<TArray<FString>>(FString, TArray<FString>, bool);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::SetCurrentStateValue<TArray<bool>>(FString, TArray<bool>, bool);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::SetCurrentStateValue<TArray<double>>(FString, TArray<double>, bool);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::SetCurrentStateValue<TArray<float>>(FString, TArray<float>, bool);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::SetCurrentStateValue<TSharedPtr<FJsonValue>>(FString, TSharedPtr<FJsonValue>, bool);
+
 
 UZLCloudPluginStateManager* UZLCloudPluginStateManager::CreateInstance()
 {
@@ -31,6 +57,15 @@ UZLCloudPluginStateManager* UZLCloudPluginStateManager::CreateInstance()
 	{
 		Singleton = NewObject<UZLCloudPluginStateManager>();
 		Singleton->AddToRoot();
+		Singleton->ActiveSchema = NewObject<UStateKeyInfoAsset>(Singleton);
+
+		const UZLCloudPluginSettings* Settings = GetMutableDefault<UZLCloudPluginSettings>();
+
+		if (Settings)
+		{
+			FString schemaName = Settings->displayName + "_ActiveSchema";
+			Singleton->ActiveSchema->Rename(*schemaName);
+		}
 		return Singleton;
 	}
 	return Singleton;
@@ -74,26 +109,126 @@ void UZLCloudPluginStateManager::RebuildDebugUI(UStateKeyInfoAsset* schemaAsset)
 
 		if (WidgetClass)
 		{
+			// Check if we should use editor tab (only in editor)
+			bool bUseEditorTab = false;
+#if WITH_EDITOR
+			bUseEditorTab = m_showDebugUIInEditorTab;
+#endif
+
 			if (!DebugUIWidget)
 			{
 				UZLDebugUIWidget* Widget = CreateWidget<UZLDebugUIWidget>(World, WidgetClass);
 				if (Widget)
 				{
-					Widget->AddToViewport();
-
-					FInputModeUIOnly InputMode;
-					InputMode.SetWidgetToFocus(Widget->TakeWidget());
-					InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
-
 					DebugUIWidget = Widget;
-
-					DebugUIWidget->SetVisibility(m_debugUIVisible ? ESlateVisibility::Visible : ESlateVisibility::Hidden);
-
+					m_lastSetSchema = schemaAsset;
 					DebugUIWidget->SetTargetSchema(schemaAsset);
+					
+					// Set visibility based on mode
+					// If using editor tab, make it visible by default
+					bool bShouldBeVisible = m_debugUIVisible;
+#if WITH_EDITOR
+					if (bUseEditorTab)
+					{
+						bShouldBeVisible = true;
+						m_debugUIVisible = true;
+					}
+#endif
+					DebugUIWidget->SetVisibility(bShouldBeVisible ? ESlateVisibility::Visible : ESlateVisibility::Hidden);
+
+#if WITH_EDITOR
+					if (bUseEditorTab)
+					{
+						// Create a shared state for the scale value
+						TSharedRef<float> ScaleValue = MakeShared<float>(0.5f);
+						TSharedRef<SWidget> WidgetRef = Widget->TakeWidget();
+						
+						// Register tab spawner (safe to call multiple times)
+						FGlobalTabmanager::Get()->RegisterNomadTabSpawner(DebugUITabId, FOnSpawnTab::CreateLambda([this, WidgetRef, ScaleValue](const FSpawnTabArgs& SpawnTabArgs)
+						{
+							return CreateDebugUITabContent(WidgetRef, ScaleValue);
+						}))
+						.SetDisplayName(FText::FromString(TEXT("ZL Debug UI")))
+						.SetMenuType(ETabSpawnerMenuType::Hidden);
+
+						// Invoke the tab
+						DebugUITab = FGlobalTabmanager::Get()->TryInvokeTab(DebugUITabId);
+					}
+					else
+#endif
+					{
+						// Viewport mode (always used in non-editor builds)
+						if (bShouldBeVisible)
+						{
+							SetupViewportMode();
+						}
+					}
 				}
 			}
 			else
-				DebugUIWidget->SetTargetSchema(schemaAsset);
+			{
+				// Only update schema if it changed to avoid triggering widget reconstruction
+				// SetTargetSchema calls RebuildDebugUI() which can trigger NativeConstruct again
+				if (m_lastSetSchema != schemaAsset)
+				{
+					m_lastSetSchema = schemaAsset;
+					DebugUIWidget->SetTargetSchema(schemaAsset);
+				}
+				
+#if WITH_EDITOR
+				// If switching modes, we need to move the widget between viewport and editor tab
+				if (bUseEditorTab && !DebugUITab.IsValid())
+				{
+					// Remove from viewport if it was there
+					DebugUIWidget->RemoveFromParent();
+					
+					// Make visible when switching to editor tab
+					m_debugUIVisible = true;
+					DebugUIWidget->SetVisibility(ESlateVisibility::Visible);
+					
+					// Create a shared state for the scale value
+					TSharedRef<float> ScaleValue = MakeShared<float>(0.5f);
+					TSharedRef<SWidget> WidgetRef = DebugUIWidget->TakeWidget();
+					
+					// Register tab spawner (safe to call multiple times - will update existing spawner)
+					FGlobalTabmanager::Get()->RegisterNomadTabSpawner(DebugUITabId, FOnSpawnTab::CreateLambda([this, WidgetRef, ScaleValue](const FSpawnTabArgs& SpawnTabArgs)
+					{
+						return CreateDebugUITabContent(WidgetRef, ScaleValue);
+					}))
+					.SetDisplayName(FText::FromString(TEXT("ZL Debug UI")))
+					.SetMenuType(ETabSpawnerMenuType::Hidden);
+					
+					DebugUITab = FGlobalTabmanager::Get()->TryInvokeTab(DebugUITabId);
+				}
+				else if (!bUseEditorTab && DebugUITab.IsValid())
+				{
+					// Close tab and add to viewport
+					DebugUITab->RequestCloseTab();
+					DebugUITab.Reset();
+					
+					// Remove from parent first to ensure clean state
+					DebugUIWidget->RemoveFromParent();
+					
+					if (m_debugUIVisible)
+					{
+						SetupViewportMode();
+					}
+				}
+				else if (!bUseEditorTab && !DebugUITab.IsValid())
+				{
+					// Already in viewport mode, just ensure visibility is correct
+					if (m_debugUIVisible)
+					{
+						// Remove and re-add to ensure it's properly in viewport
+						SetupViewportMode();
+					}
+					else
+					{
+						DebugUIWidget->RemoveFromParent();
+					}
+				}
+#endif
+			}
 		}
 	}
 }
@@ -239,36 +374,106 @@ TSharedPtr<FJsonObject> MergeJsonObjectsRecursive(const TSharedPtr<FJsonObject>&
 		return nullptr;
 	}
 
-	// Create a copy of the first JsonObject to modify
-	TSharedPtr<FJsonObject> MergedJsonObject = MakeShareable(new FJsonObject(*JsonObject1));
+	TSharedPtr<FJsonObject> MergedJsonObject = MakeShared<FJsonObject>(*JsonObject1);
 
-	// Iterate through all fields in the second JsonObject
+	auto AreJsonValuesEqual = [](const TSharedPtr<FJsonValue>& ValueA, const TSharedPtr<FJsonValue>& ValueB) -> bool
+	{
+		if (ValueA->Type != ValueB->Type) return false;
+
+		switch (ValueA->Type)
+		{
+		case EJson::String:
+			return ValueA->AsString() == ValueB->AsString();
+		case EJson::Number:
+			return FMath::IsNearlyEqual(ValueA->AsNumber(), ValueB->AsNumber());
+		case EJson::Boolean:
+			return ValueA->AsBool() == ValueB->AsBool();
+		case EJson::Null:
+			return true;
+		default:
+			FString StringA, StringB;
+			TSharedRef<TJsonWriter<>> WriterA = TJsonWriterFactory<>::Create(&StringA);
+			TSharedRef<TJsonWriter<>> WriterB = TJsonWriterFactory<>::Create(&StringB);
+			FJsonSerializer::Serialize(ValueA.ToSharedRef(), "", WriterA);
+			FJsonSerializer::Serialize(ValueB.ToSharedRef(), "", WriterB);
+			WriterA->Close();
+			WriterB->Close();
+			return StringA == StringB;
+		}
+	};
+
 	for (const auto& Pair : JsonObject2->Values)
 	{
-		if (Pair.Value->Type == EJson::Object)
-		{
-			// If the value is another JsonObject, recursively merge
-			const TSharedPtr<FJsonObject>* SubObject1 = &JsonObject1->GetObjectField(Pair.Key);
-			const TSharedPtr<FJsonObject>* SubObject2 = &JsonObject2->GetObjectField(Pair.Key);
+		const FString& Key = Pair.Key;
+		const TSharedPtr<FJsonValue>& Val2 = Pair.Value;
 
-			if (SubObject1 && SubObject2)
+		if (Val2->Type == EJson::Object)
+		{
+			const TSharedPtr<FJsonObject>* SubObject1;
+			if (MergedJsonObject->TryGetObjectField(Key, SubObject1))
 			{
-				MergedJsonObject->SetObjectField(Pair.Key, MergeJsonObjectsRecursive(*SubObject1, *SubObject2));
+				MergedJsonObject->SetObjectField(Key, MergeJsonObjectsRecursive(*SubObject1, Val2->AsObject()));
 			}
 			else
 			{
-				MergedJsonObject->SetField(Pair.Key, Pair.Value);
+				MergedJsonObject->SetField(Key, Val2);
 			}
+		}
+		else if (Val2->Type == EJson::Array)
+		{
+			const TArray<TSharedPtr<FJsonValue>>& Array2 = Val2->AsArray();
+
+			TArray<TSharedPtr<FJsonValue>> MergedArray;
+			const TArray<TSharedPtr<FJsonValue>>* Array1Ptr;
+
+			if (MergedJsonObject->TryGetArrayField(Key, Array1Ptr))
+			{
+				MergedArray = *Array1Ptr;
+			}
+
+			for (const TSharedPtr<FJsonValue>& Item2 : Array2)
+			{
+				bool bIsDuplicate = false;
+
+				for (const TSharedPtr<FJsonValue>& Item1 : MergedArray)
+				{
+					if (AreJsonValuesEqual(Item1, Item2))
+					{
+						bIsDuplicate = true;
+						break;
+					}
+				}
+
+				if (!bIsDuplicate)
+				{
+					MergedArray.Add(Item2);
+				}
+			}
+
+			MergedJsonObject->SetArrayField(Key, MergedArray);
+
 		}
 		else
 		{
-			// For other types, simply set the value from the second JsonObject
-			MergedJsonObject->SetField(Pair.Key, Pair.Value);
+			MergedJsonObject->SetField(Key, Val2);
 		}
 	}
 
 	return MergedJsonObject;
 }
+
+
+void UZLCloudPluginStateManager::OnMoviePipelineFinishedNotifyZLScreenshot(FMoviePipelineOutputData Results)
+{
+#if UNREAL_5_3_OR_NEWER
+	TSharedPtr<ZLCloudPlugin::ZLScreenshot> screenshotManager = ZLCloudPlugin::ZLScreenshot::Get();
+	if (screenshotManager)
+	{
+		screenshotManager->OnMoviePipelineFinished(Results);
+	}
+#endif
+}
+
 
 FString UZLCloudPluginStateManager::MergeDefaultInitialState(FString overrideInitialStateJSONString)
 {
@@ -619,33 +824,97 @@ int32 UZLCloudPluginStateManager::CountLeavesInJsonObject(TSharedPtr<FJsonObject
 	return LeafCount;
 }
 
+
+void SanitizeJsonObject(TSharedPtr<FJsonObject> JsonObject)
+{
+	if (!JsonObject.IsValid())
+	{
+		return;
+	}
+
+	TArray<FString> KeysToRemove;
+
+	for (const auto& Pair : JsonObject->Values)
+	{
+		const FString& Key = Pair.Key;
+		const TSharedPtr<FJsonValue>& Value = Pair.Value;
+
+		if (!Value.IsValid() || Value->Type == EJson::Null)
+		{
+			KeysToRemove.Add(Key);
+		}
+		else if (Value->Type == EJson::Object)
+		{
+			SanitizeJsonObject(Value->AsObject());
+		}
+		else if (Value->Type == EJson::Array)
+		{
+			const TArray<TSharedPtr<FJsonValue>>& JsonArray = Value->AsArray();
+			for (const TSharedPtr<FJsonValue>& ArrayValue : JsonArray)
+			{
+				if (ArrayValue.IsValid() && ArrayValue->Type == EJson::Object)
+				{
+					SanitizeJsonObject(ArrayValue->AsObject());
+				}
+			}
+		}
+	}
+
+	for (const FString& Key : KeysToRemove)
+	{
+		JsonObject->RemoveField(Key);
+	}
+}
+
 static FString s_LogSchemaData = "ZEROLIGHT_GET_SCHEMA_DATA";
+static FString s_LogJsonCompliantSchemaData = "GET_JSON_SCHEMA";
+static FString s_GetVersion = "ZEROLIGHT_GET_VERSION";
 
 void UZLCloudPluginStateManager::ProcessState(FString jsonString, bool doCurrentStateCompare, bool& Success)
 {
 	UE_LOG(LogZLCloudPlugin, Display, TEXT("Received State request to process: %s"), *jsonString);
 
-	if (jsonString.Contains(s_LogSchemaData) && currentSchemaAsset != nullptr)
+	if ((jsonString.Contains(s_LogJsonCompliantSchemaData) || jsonString.Contains(s_LogSchemaData)) && ActiveSchema)
 	{
-		TSharedPtr<FJsonObject> JsonSchemaData = currentSchemaAsset->SerializeStateKeyAssetToJson();
+		TSharedPtr<FJsonObject> JsonSchemaData;
 
-		FString JsonString_forWeb;
-		TSharedRef<TJsonWriter<TCHAR>> JsonWriter = TJsonWriterFactory<TCHAR>::Create(&JsonString_forWeb, 1);
-		FJsonSerializer::Serialize(JsonSchemaData.ToSharedRef(), JsonWriter);
-		JsonWriter->Close();
+		if (jsonString.Contains(s_LogSchemaData))
+			JsonSchemaData = ActiveSchema->SerializeStateKeyAssetToJson();
+		else
+			JsonSchemaData = ActiveSchema->SerializeStateKeyAsset_JsonSchemaCompliant();
 
-		IZLCloudPluginModule* Module = ZLCloudPlugin::FZLCloudPluginModule::GetModule();
-		if (Module)
+		SendFJsonObjectToWeb(JsonSchemaData);
+		return;
+	}
+
+	if (jsonString.Contains(s_GetVersion))
+	{
+		FString pluginVersion = "1.0.0";
+		IPluginManager& PluginManager = IPluginManager::Get();
+		TSharedPtr<IPlugin> ZlCloudStreamPlugin = PluginManager.FindPlugin("ZLCloudPlugin");
+		if (ZlCloudStreamPlugin)
 		{
-			Module->SendData(JsonString_forWeb);
-			return;
+			const FPluginDescriptor& Descriptor = ZlCloudStreamPlugin->GetDescriptor();
+			pluginVersion = *Descriptor.VersionName;
 		}
+
+		TSharedPtr<FJsonObject> JsonVersionData = MakeShareable(new FJsonObject);
+		JsonVersionData->SetStringField("ZLCloudPlugin version", pluginVersion);
+
+		// Broadcast delegate to allow other plugins to add their version info
+		if (UZLCloudPluginDelegates* Delegates = UZLCloudPluginDelegates::GetZLCloudPluginDelegates())
+		{
+			Delegates->OnGetVersionInfoNative.Broadcast(JsonVersionData);
+		}
+
+		SendFJsonObjectToWeb(JsonVersionData);
+		return;
 	}
 
 	//If currently processing an existing state request
 	//add this request to the queue, when the previous one finishes/times out
 	//broadcast the OnRecieveData from Update to pop from queue into processing
-	if (IsProcessingStateRequest()) 
+	if (IsProcessingStateRequest())
 	{
 		FString inFlightRequestId = JsonObject_processingState->GetStringField(s_requestIdStr);
 		UE_LOG(LogZLCloudPlugin, Display, TEXT("ProcessState queueing request while waiting for RequestId %s to finish..."), *inFlightRequestId);
@@ -654,6 +923,7 @@ void UZLCloudPluginStateManager::ProcessState(FString jsonString, bool doCurrent
 		TSharedRef<TJsonReader<>> JsonReader = TJsonReaderFactory<>::Create(jsonString);
 		if (FJsonSerializer::Deserialize(JsonReader, JsonObject_requestedState))
 		{
+			SanitizeJsonObject(JsonObject_requestedState);
 			JsonString_in_requestQueue.Enqueue(jsonString);
 			s_requestQueueLength++;
 
@@ -667,12 +937,7 @@ void UZLCloudPluginStateManager::ProcessState(FString jsonString, bool doCurrent
 				//For some reason TQueue doesnt have a length member func, use a counter for queue length
 				jsonForWebObject->SetNumberField("queue_length", s_requestQueueLength);
 
-				FString JsonString_forWeb;
-				TSharedRef<TJsonWriter<TCHAR>> JsonWriter = TJsonWriterFactory<TCHAR>::Create(&JsonString_forWeb, 1);
-				FJsonSerializer::Serialize(jsonForWebObject.ToSharedRef(), JsonWriter);
-				JsonWriter->Close();
-
-				Module->SendData(JsonString_forWeb);
+				SendFJsonObjectToWeb(jsonForWebObject);
 			}
 		}
 
@@ -687,6 +952,7 @@ void UZLCloudPluginStateManager::ProcessState(FString jsonString, bool doCurrent
 		TSharedRef<TJsonReader<>> JsonReader = TJsonReaderFactory<>::Create(jsonString);
 		if (FJsonSerializer::Deserialize(JsonReader, JsonObject_in_requestedState))
 		{
+			SanitizeJsonObject(JsonObject_in_requestedState);
 			//Debug Value
 			FString requestId = FString::FromInt(request_recieved_id++);
 			JsonObject_in_requestedState->SetStringField(s_requestIdStr, requestId);
@@ -720,7 +986,7 @@ void UZLCloudPluginStateManager::ProcessState(FString jsonString, bool doCurrent
 			{
 				UE_LOG(LogZLCloudPlugin, Display, TEXT("Leaf count in request: %d"), JsonObject_requestedStateLeafCount);
 			}
-			
+
 
 			//Send to Web
 			IZLCloudPluginModule* Module = ZLCloudPlugin::FZLCloudPluginModule::GetModule();
@@ -744,12 +1010,7 @@ void UZLCloudPluginStateManager::ProcessState(FString jsonString, bool doCurrent
 					jsonForWebObject->SetObjectField("state_processing_ended", currentJson);
 					jsonForWebObject->SetStringField(s_requestIdStr, requestId); //add in request Id	
 
-					FString JsonString_forWeb;
-					TSharedRef<TJsonWriter<TCHAR>> JsonWriter = TJsonWriterFactory<TCHAR>::Create(&JsonString_forWeb, 1);
-					FJsonSerializer::Serialize(jsonForWebObject.ToSharedRef(), JsonWriter);
-					JsonWriter->Close();
-
-					Module->SendData(JsonString_forWeb);
+					SendFJsonObjectToWeb(jsonForWebObject);
 
 					if (stateRequestedContentJob)
 					{
@@ -773,12 +1034,7 @@ void UZLCloudPluginStateManager::ProcessState(FString jsonString, bool doCurrent
 
 					//jsonForWebObject->SetNumberField("total_leaves", JsonObject_requestedStateLeafCount);
 
-					FString JsonString_forWeb;
-					TSharedRef<TJsonWriter<TCHAR>> JsonWriter = TJsonWriterFactory<TCHAR>::Create(&JsonString_forWeb, 1);
-					FJsonSerializer::Serialize(jsonForWebObject.ToSharedRef(), JsonWriter);
-					JsonWriter->Close();
-
-					Module->SendData(JsonString_forWeb);
+					SendFJsonObjectToWeb(jsonForWebObject);
 				}
 			}
 
@@ -819,52 +1075,33 @@ void UZLCloudPluginStateManager::PopStateRequestQueue()
 void UZLCloudPluginStateManager::Update(LauncherComms* launcherComms)
 {
 	FString requestId = "";
+	bool clearProcessing = false;
+	bool popStateRequestList = false;
 
+	bool stateRequestedContentJob = false;
+	TSharedPtr<ZLCloudPlugin::ZLScreenshot> screenshotManager = ZLCloudPlugin::ZLScreenshot::Get();
+	if (screenshotManager)
+	{
+		stateRequestedContentJob = screenshotManager->HasCurrentRender();
+	}
 
 	if (IsProcessingStateRequest())
 	{
 		requestId = JsonObject_processingState->GetStringField(s_requestIdStr);
 
-		bool stateRequestedContentJob = false;
-		TSharedPtr<ZLCloudPlugin::ZLScreenshot> screenshotManager = ZLCloudPlugin::ZLScreenshot::Get();
-		if (screenshotManager)
-		{
-			stateRequestedContentJob = screenshotManager->HasCurrentRender();
-		}
-
 		//All requested states processed, send completion message
 		if (JsonObject_requestedStateLeafCount == JsonObject_processingStateFinishedLeaves)
 		{
-			//Send to Web
-			IZLCloudPluginModule* Module = ZLCloudPlugin::FZLCloudPluginModule::GetModule();
-			if (Module)
+			SetStateDirty(EStateDirtyReason::state_processing_ended);
+
+			if (stateRequestedContentJob)
 			{
-				//Return current state to the web
-				TSharedPtr<FJsonObject> currentJson = MakeShareable(new FJsonObject);
-				currentJson->SetStringField("status", "complete");
-				currentJson->SetObjectField("current_state", JsonObject_currentState);
-
-				TSharedPtr<FJsonObject> jsonForWebObject = MakeShareable(new FJsonObject);
-				jsonForWebObject->SetObjectField("state_processing_ended", currentJson);
-				jsonForWebObject->SetStringField(s_requestIdStr, requestId); //add in request Id	
-
-				FString JsonString_forWeb;
-				TSharedRef<TJsonWriter<TCHAR>> JsonWriter = TJsonWriterFactory<TCHAR>::Create(&JsonString_forWeb, 1);
-				FJsonSerializer::Serialize(jsonForWebObject.ToSharedRef(), JsonWriter);
-				JsonWriter->Close();
-
-				Module->SendData(JsonString_forWeb);
-
-				if (stateRequestedContentJob)
-				{
-					screenshotManager->SetCurrentRenderStateData(JsonObject_currentState);
-					screenshotManager->UpdateCurrentRenderStateRequestProgress(true, true);
-				}
-
-				ClearProcessingState();
-
-				PopStateRequestQueue(); //Process next request if any queued
+				screenshotManager->SetCurrentRenderStateData(JsonObject_currentState);
+				screenshotManager->UpdateCurrentRenderStateRequestProgress(true, true);
 			}
+
+			clearProcessing = true;
+			popStateRequestList = true;
 		}
 		else 
 		{
@@ -892,149 +1129,92 @@ void UZLCloudPluginStateManager::Update(LauncherComms* launcherComms)
 				}
 				else if (elapsedTime > m_stateRequestTimeout)
 				{
-					JsonObject_processingState->RemoveField(s_requestIdStr); //Remove this request
-
-					//Send to Web
-					IZLCloudPluginModule* Module = ZLCloudPlugin::FZLCloudPluginModule::GetModule();
-					if (Module)
+					TSharedPtr<FJsonObject> timeoutState = CurrentStateCompareDiffs(JsonObject_processingState);
+					TSharedPtr<FJsonObject> unprocessed = nullptr;
+					if (JsonObject_processingStateLeafCount < JsonObject_requestedStateLeafCount) //Some requested states were ignored
 					{
-						//Return current state + unprocessed to the web
-						TSharedPtr<FJsonObject> currentJson = MakeShareable(new FJsonObject);
-						TSharedPtr<FJsonObject> timeoutState = CurrentStateCompareDiffs(JsonObject_processingState);
-
-						currentJson->SetStringField("status", "timeout");
-						currentJson->SetObjectField("current_state", JsonObject_currentState);
-						currentJson->SetObjectField("timeout_state", timeoutState);
-
-						TSharedPtr<FJsonObject> unprocessed = nullptr;
-						if (JsonObject_processingStateLeafCount < JsonObject_requestedStateLeafCount) //Some requested states were ignored
+						unprocessed = CurrentStateCompareDiffs(JsonObject_out_requestedState);
+						TArray<FString> diffKeys = CurrentStateCompareDiffs_Keys(JsonObject_processingState);
+						for (FString key : diffKeys) //Strip timed out values to report any unprocessed
 						{
-							unprocessed = CurrentStateCompareDiffs(JsonObject_out_requestedState);
-							TArray<FString> diffKeys = CurrentStateCompareDiffs_Keys(JsonObject_processingState);
-							for (FString key : diffKeys) //Strip timed out values to report any unprocessed
+							if (unprocessed->TryGetField(key))
 							{
-								if (unprocessed->TryGetField(key))
-								{
-									unprocessed->RemoveField(key);
-								}
+								unprocessed->RemoveField(key);
 							}
-							if (unprocessed->HasField(s_requestIdStr))
-								unprocessed->RemoveField(s_requestIdStr);
-
-							currentJson->SetObjectField("unprocessed_state", unprocessed);
 						}
-
-						TSharedPtr<FJsonObject> jsonForWebObject = MakeShareable(new FJsonObject);
-						jsonForWebObject->SetObjectField("state_processing_ended", currentJson);
-						jsonForWebObject->SetStringField(s_requestIdStr, requestId); //add in request Id	
-
-						FString JsonString_forWeb;
-						TSharedRef<TJsonWriter<TCHAR>> JsonWriter = TJsonWriterFactory<TCHAR>::Create(&JsonString_forWeb, 1);
-						FJsonSerializer::Serialize(jsonForWebObject.ToSharedRef(), JsonWriter);
-						JsonWriter->Close();
-
-						Module->SendData(JsonString_forWeb);
-
-						if (stateRequestedContentJob)
-						{
-							screenshotManager->SetCurrentRenderStateData(JsonObject_currentState, timeoutState, unprocessed);
-							screenshotManager->UpdateCurrentRenderStateRequestProgress(true, false);
-						}
-
-						ClearProcessingState();
-
-						PopStateRequestQueue();
+						if (unprocessed->HasField(s_requestIdStr))
+							unprocessed->RemoveField(s_requestIdStr);
 					}
+
+					if (stateRequestedContentJob)
+					{
+						screenshotManager->SetCurrentRenderStateData(JsonObject_currentState, timeoutState, unprocessed);
+						screenshotManager->UpdateCurrentRenderStateRequestProgress(true, false);
+					}
+
+					SetStateDirty(EStateDirtyReason::state_processing_ended);
+
+					clearProcessing = true;
+					popStateRequestList = true;
 				}
 			}
 			else if(JsonObject_processingStateLeafCount < JsonObject_requestedStateLeafCount) //Some requested states were ignored
 			{
-				JsonObject_processingState->RemoveField(s_requestIdStr); //Remove this request
+				//Return current state + unprocessed to the web
+				TSharedPtr<FJsonObject> unprocessedJson = CurrentStateCompareDiffs(JsonObject_out_requestedState);
+				if (unprocessedJson->HasField(s_requestIdStr))
+					unprocessedJson->RemoveField(s_requestIdStr);
 
-				//Send to Web
-				IZLCloudPluginModule* Module = ZLCloudPlugin::FZLCloudPluginModule::GetModule();
-				if (Module)
+				FString JsonString_Unprocessed;
+				TSharedRef<TJsonWriter<TCHAR>> JsonWriterUnprocessed = TJsonWriterFactory<TCHAR>::Create(&JsonString_Unprocessed, 1);
+				FJsonSerializer::Serialize(unprocessedJson.ToSharedRef(), JsonWriterUnprocessed);
+				JsonWriterUnprocessed->Close();
+
+				UE_LOG(LogZLCloudPlugin, Display, TEXT("Unprocessed State in previous request: %s"), *JsonString_Unprocessed);
+
+				SetStateDirty(EStateDirtyReason::state_processing_ended);
+
+				if (stateRequestedContentJob)
 				{
-					//Return current state + unprocessed to the web
-					TSharedPtr<FJsonObject> currentJson = MakeShareable(new FJsonObject);
-					TSharedPtr<FJsonObject> unprocessedJson = CurrentStateCompareDiffs(JsonObject_out_requestedState);
-					if (unprocessedJson->HasField(s_requestIdStr))
-						unprocessedJson->RemoveField(s_requestIdStr);
-	
-					currentJson->SetStringField("status", "unmatched");
-					currentJson->SetObjectField("current_state", JsonObject_currentState);
-					currentJson->SetObjectField("unprocessed_state", unprocessedJson);
-
-					TSharedPtr<FJsonObject> jsonForWebObject = MakeShareable(new FJsonObject);
-					jsonForWebObject->SetObjectField("state_processing_ended", currentJson);
-					jsonForWebObject->SetStringField(s_requestIdStr, requestId);
-
-					FString JsonString_forWeb;
-					TSharedRef<TJsonWriter<TCHAR>> JsonWriter = TJsonWriterFactory<TCHAR>::Create(&JsonString_forWeb, 1);
-					FJsonSerializer::Serialize(jsonForWebObject.ToSharedRef(), JsonWriter);
-					JsonWriter->Close();
-
-					Module->SendData(JsonString_forWeb);
-
-					if (stateRequestedContentJob)
-					{
-						screenshotManager->SetCurrentRenderStateData(JsonObject_currentState, nullptr, unprocessedJson);
-						screenshotManager->UpdateCurrentRenderStateRequestProgress(true, false);
-					}
-
-					ClearProcessingState();
-
-					PopStateRequestQueue();
+					screenshotManager->SetCurrentRenderStateData(JsonObject_currentState, nullptr, unprocessedJson);
+					screenshotManager->UpdateCurrentRenderStateRequestProgress(true, false);
 				}
+
+				clearProcessing = true;
+				popStateRequestList = true;
 			}
 		}
 	}
-	else if(JsonObject_requestedStateLeafCount != JsonObject_processingStateFinishedLeaves) //Also need to acocunt for any requests that never entered processing due to invalid fields or instant confirms but were incomplete
+	else if(JsonObject_requestedStateLeafCount != JsonObject_processingStateFinishedLeaves) //Also need to account for any requests that never entered processing due to invalid fields or instant confirms but were incomplete
 	{
-		bool stateRequestedContentJob = false;
-		TSharedPtr<ZLCloudPlugin::ZLScreenshot> screenshotManager = ZLCloudPlugin::ZLScreenshot::Get();
-		if (screenshotManager)
-		{
-			stateRequestedContentJob = screenshotManager->HasCurrentRender();
-		}
-
 		requestId = JsonObject_out_requestedState->GetStringField(s_requestIdStr);
-		//Send to Web
-		IZLCloudPluginModule* Module = ZLCloudPlugin::FZLCloudPluginModule::GetModule();
-		if (Module)
+
+		//Return current state + unprocessed to the web
+		TSharedPtr<FJsonObject> currentJson = MakeShareable(new FJsonObject);
+		TSharedPtr<FJsonObject> unprocessedJson = CurrentStateCompareDiffs(JsonObject_out_requestedState);
+		if (unprocessedJson->HasField(s_requestIdStr))
+			unprocessedJson->RemoveField(s_requestIdStr);
+
+		SetStateDirty(EStateDirtyReason::state_processing_ended);
+
+		if (stateRequestedContentJob)
 		{
-			//Return current state + unprocessed to the web
-			TSharedPtr<FJsonObject> currentJson = MakeShareable(new FJsonObject);
-			TSharedPtr<FJsonObject> unprocessedJson = CurrentStateCompareDiffs(JsonObject_out_requestedState);
-			if (unprocessedJson->HasField(s_requestIdStr))
-				unprocessedJson->RemoveField(s_requestIdStr);
-
-			currentJson->SetStringField("status", "unmatched");
-			currentJson->SetObjectField("current_state", JsonObject_currentState);
-			currentJson->SetObjectField("unprocessed_state", unprocessedJson);
-
-			TSharedPtr<FJsonObject> jsonForWebObject = MakeShareable(new FJsonObject);
-			jsonForWebObject->SetObjectField("state_processing_ended", currentJson);
-			jsonForWebObject->SetStringField(s_requestIdStr, requestId);
-
-			FString JsonString_forWeb;
-			TSharedRef<TJsonWriter<TCHAR>> JsonWriter = TJsonWriterFactory<TCHAR>::Create(&JsonString_forWeb, 1);
-			FJsonSerializer::Serialize(jsonForWebObject.ToSharedRef(), JsonWriter);
-			JsonWriter->Close();
-
-			Module->SendData(JsonString_forWeb);
-
-			if (stateRequestedContentJob)
-			{
-				screenshotManager->SetCurrentRenderStateData(JsonObject_currentState, nullptr, unprocessedJson);
-				screenshotManager->UpdateCurrentRenderStateRequestProgress(true, false);
-			}
-
-			ClearProcessingState();
-
-			PopStateRequestQueue();
+			screenshotManager->SetCurrentRenderStateData(JsonObject_currentState, nullptr, unprocessedJson);
+			screenshotManager->UpdateCurrentRenderStateRequestProgress(true, false);
 		}
+
+		clearProcessing = true;
+		popStateRequestList = true;
 	}
+
+	if (m_stateDirty)
+		PushStateEventsToWeb();
+
+	if(clearProcessing)
+		ClearProcessingState();
+
+	if(popStateRequestList)
+		PopStateRequestQueue(); //Process next request if any queued
 
 	if (m_needServerNotify && JsonObject_serverNotifyState.IsValid())
 	{
@@ -1064,18 +1244,11 @@ void UZLCloudPluginStateManager::Update(LauncherComms* launcherComms)
 			}
 			else if (elapsedTime > m_stateRequestTimeout)
 			{
-				TSharedPtr<FJsonObject> responseData = MakeShareable(new FJsonObject);
-				responseData->SetStringField("error", "Timeout reached waiting for state data to match onConnect request.");
-
-				FString responseDataStr;
-
-				TSharedRef<TJsonWriter<>> writer = TJsonWriterFactory<>::Create(&responseDataStr);
-
-				FJsonSerializer::Serialize(responseData.ToSharedRef(), writer);
-
-				launcherComms->SendLauncherMessage("STATE_ERROR", responseDataStr);
+				JsonObject_serverNotifyUnmatchedState = CreateDiffJsonObject(JsonObject_currentState, JsonObject_serverNotifyState);
 
 				m_needServerNotify = false;
+
+				launcherComms->SendLauncherMessage("APPINITIALSTATESET"); //onConnect is ready, allow adoption
 			}
 
 		}
@@ -1113,6 +1286,8 @@ void UZLCloudPluginStateManager::ConfirmStateChange(FString FieldName, bool& Suc
 		{
 			TSharedPtr<FJsonValue> value = JsonObject_processingState->TryGetField(FieldName);
 
+			bool incrementProcessedLeafCount = true;
+			int processedLeaves = 0;
 			if(value != nullptr)
 				Success = true;
 
@@ -1133,12 +1308,27 @@ void UZLCloudPluginStateManager::ConfirmStateChange(FString FieldName, bool& Suc
 				case EJson::Array:
 					JsonObject_currentState->SetArrayField(FieldName, value->AsArray());
 					break;
+				case EJson::Object:
+					incrementProcessedLeafCount = false;
+					processedLeaves = CountLeavesInJsonObject(value->AsObject());
+					if (JsonObject_currentState->HasField(FieldName))
+					{
+						TSharedPtr<FJsonObject> mergedStateToConfirm = MergeJsonObjectsRecursive(JsonObject_currentState->GetObjectField(FieldName), value->AsObject());
+						JsonObject_currentState->SetObjectField(FieldName, mergedStateToConfirm);
+					}
+					else
+					{
+						JsonObject_currentState->SetObjectField(FieldName, value->AsObject());
+					}
+					JsonObject_processingStateFinishedLeaves += processedLeaves;
+					break;
 				default:
 					UE_LOG(LogZLCloudPlugin, Display, TEXT("Unhandled confirmation for EJson type %i"), value->Type);
 					break;
 			}	
 
-			JsonObject_processingStateFinishedLeaves++;
+			if(incrementProcessedLeafCount)
+				JsonObject_processingStateFinishedLeaves++;
 
 			//Remove from processing
 			JsonObject_processingState->RemoveField(FieldName);
@@ -1147,6 +1337,10 @@ void UZLCloudPluginStateManager::ConfirmStateChange(FString FieldName, bool& Suc
 		{
 			Success = false;
 		}
+
+		if (Success && DebugUIWidget && DebugUIWidget->IsVisible())
+			DebugUIWidget->TriggerRefreshUI();
+
 	}
 	else
 	{
@@ -1176,7 +1370,6 @@ void UZLCloudPluginStateManager::CopyRequestId()
 		JsonObject_processingState->SetStringField(s_requestIdStr, requestId);
 	}
 }
-
 
 template <typename T> void UZLCloudPluginStateManager::GetRequestedStateValue(FString FieldName, bool instantConfirm, T& data, bool& Success)
 {
@@ -1548,13 +1741,535 @@ template <typename T> void UZLCloudPluginStateManager::GetCurrentStateValue(FStr
 	}
 }
 
+template <typename T> void UZLCloudPluginStateManager::SetCurrentStateValue(FString FieldName, T data, bool SubmitToProcessState)
+{
+	constexpr bool isArray = (std::is_same<T, TArray<double>>::value)
+		|| (std::is_same<T, TArray<bool>>::value)
+		|| (std::is_same<T, TArray<FString>>::value);
+
+	constexpr bool isNumber = (std::is_same<T, double>::value)
+		|| (std::is_same<T, TArray<double>>::value);
+
+	constexpr bool isBool = (std::is_same<T, bool>::value)
+		|| (std::is_same<T, TArray<bool>>::value);
+
+	constexpr bool isString = (std::is_same<T, FString>::value)
+		|| (std::is_same<T, TArray<FString>>::value);
+
+	if (SubmitToProcessState)
+	{
+		TSharedPtr<FJsonObject> broadcastValueJson = MakeShared<FJsonObject>();
+
+		if (FieldName.Contains("."))
+		{
+			// . delimited nesting (this is mainly because BP does not handle generic types like FJsonValue or FJsonObject)
+			TArray<FString> Keys;
+			FieldName.ParseIntoArray(Keys, TEXT("."), true);
+
+			const FString FinalKey = Keys[Keys.Num() - 1];
+
+			TSharedPtr<FJsonObject> CurrentObject = broadcastValueJson;
+			for (const FString& Key : Keys)
+			{
+				if (Key.Equals(FinalKey, ESearchCase::CaseSensitive))
+				{
+					if constexpr (isArray)
+					{
+						TArray<TSharedPtr<FJsonValue>> ArrayValues;
+						ArrayValues.Reserve(data.Num());
+
+						for (const auto& Value : data)
+						{
+							if constexpr (isNumber)
+							{
+								ArrayValues.Add(MakeShared<FJsonValueNumber>(Value));
+							}
+							else if constexpr (isBool)
+							{
+								ArrayValues.Add(MakeShared<FJsonValueBoolean>(Value));
+							}
+							else if constexpr (isString)
+							{
+								ArrayValues.Add(MakeShared<FJsonValueString>(Value));
+							}
+						}
+
+						CurrentObject->SetArrayField(FinalKey, ArrayValues);
+					}
+					else
+					{
+						if constexpr (isNumber)
+						{
+							CurrentObject->SetNumberField(FinalKey, data);
+						}
+						else if constexpr (isBool)
+						{
+							CurrentObject->SetBoolField(FinalKey, data);
+						}
+						else if constexpr (isString)
+						{
+							CurrentObject->SetStringField(FinalKey, data);
+						}
+					}
+				}
+				else
+				{
+					TSharedPtr<FJsonObject> SubObj = MakeShared<FJsonObject>();
+					CurrentObject->SetObjectField(Key, SubObj);
+					CurrentObject = SubObj;
+				}
+			}
+
+		}
+		else
+		{
+			if constexpr (isArray)
+			{
+				TArray<TSharedPtr<FJsonValue>> ArrayValues;
+				ArrayValues.Reserve(data.Num());
+
+				for (const auto& Value : data)
+				{
+					if constexpr (isNumber)
+					{
+						ArrayValues.Add(MakeShared<FJsonValueNumber>(Value));
+					}
+					else if constexpr (isBool)
+					{
+						ArrayValues.Add(MakeShared<FJsonValueBoolean>(Value));
+					}
+					else if constexpr (isString)
+					{
+						ArrayValues.Add(MakeShared<FJsonValueString>(Value));
+					}
+				}
+
+				broadcastValueJson->SetArrayField(FieldName, ArrayValues);
+			}
+			else
+			{
+				if constexpr (isNumber)
+				{
+					broadcastValueJson->SetNumberField(FieldName, data);
+				}
+				else if constexpr (isBool)
+				{
+					broadcastValueJson->SetBoolField(FieldName, data);
+				}
+				else if constexpr (isString)
+				{
+					broadcastValueJson->SetStringField(FieldName, data);
+				}
+			}
+		}
+
+		if (broadcastValueJson->Values.Num() > 0)
+		{
+			//Broadcast to ProcessState with this
+			if (UZLCloudPluginDelegates* Delegates = UZLCloudPluginDelegates::GetZLCloudPluginDelegates())
+			{
+				FString JsonString_Schema;
+				TSharedRef<TJsonWriter<TCHAR>> JsonWriter = TJsonWriterFactory<TCHAR>::Create(&JsonString_Schema, 1);
+				FJsonSerializer::Serialize(broadcastValueJson.ToSharedRef(), JsonWriter);
+				JsonWriter->Close();
+
+				UE_LOG(LogZLCloudPlugin, Display, TEXT("Trigger Schema State Set Internal Request"));
+				Delegates->OnRecieveData.Broadcast(JsonString_Schema);
+			}
+		}
+	}
+	else
+	{
+		if (FieldName.Contains("."))
+		{
+			// . delimited nesting (this is mainly because BP does not handle generic types like FJsonValue or FJsonObject)
+			TArray<FString> Keys;
+			FieldName.ParseIntoArray(Keys, TEXT("."), true);
+
+			const FString FinalKey = Keys[Keys.Num() - 1];
+
+			TSharedPtr<FJsonObject> CurrentObject = JsonObject_currentState;
+			for (const FString& Key : Keys)
+			{
+				if (Key.Equals(FinalKey, ESearchCase::CaseSensitive))
+				{
+					if constexpr (isArray)
+					{
+						TArray<TSharedPtr<FJsonValue>> ArrayValues;
+						ArrayValues.Reserve(data.Num());
+
+						for (const auto& Value : data)
+						{
+							if constexpr (isNumber)
+							{
+								ArrayValues.Add(MakeShared<FJsonValueNumber>(Value));
+							}
+							else if constexpr (isBool)
+							{
+								ArrayValues.Add(MakeShared<FJsonValueBoolean>(Value));
+							}
+							else if constexpr (isString)
+							{
+								ArrayValues.Add(MakeShared<FJsonValueString>(Value));
+							}
+						}
+
+						CurrentObject->SetArrayField(FinalKey, ArrayValues);
+					}
+					else
+					{
+						if constexpr (isNumber)
+						{
+							CurrentObject->SetNumberField(FinalKey, data);
+						}
+						else if constexpr (isBool)
+						{
+							CurrentObject->SetBoolField(FinalKey, data);
+						}
+						else if constexpr (isString)
+						{
+							CurrentObject->SetStringField(FinalKey, data);
+						}
+					}
+				}
+				else
+				{
+					const TSharedPtr<FJsonObject>* SubObj = nullptr;
+
+					if (CurrentObject->TryGetObjectField(Key, SubObj))
+					{
+						CurrentObject = *SubObj;
+					}
+					else
+					{
+						TSharedPtr<FJsonObject> NewSubObj = MakeShared<FJsonObject>();
+						CurrentObject->SetObjectField(Key, NewSubObj);
+						CurrentObject = NewSubObj;
+					}
+				}
+			}
+
+		}
+		else
+		{
+			if constexpr (isArray)
+			{
+				TArray<TSharedPtr<FJsonValue>> ArrayValues;
+				ArrayValues.Reserve(data.Num());
+
+				for (const auto& Value : data)
+				{
+					if constexpr (isNumber)
+					{
+						ArrayValues.Add(MakeShared<FJsonValueNumber>(Value));
+					}
+					else if constexpr (isBool)
+					{
+						ArrayValues.Add(MakeShared<FJsonValueBoolean>(Value));
+					}
+					else if constexpr (isString)
+					{
+						ArrayValues.Add(MakeShared<FJsonValueString>(Value));
+					}
+				}
+
+				JsonObject_currentState->SetArrayField(FieldName, ArrayValues);
+			}
+			else
+			{
+				if constexpr (isNumber)
+				{
+					JsonObject_currentState->SetNumberField(FieldName, data);
+				}
+				else if constexpr (isBool)
+				{
+					JsonObject_currentState->SetBoolField(FieldName, data);
+				}
+				else if constexpr (isString)
+				{
+					JsonObject_currentState->SetStringField(FieldName, data);
+				}
+			}
+		}
+
+		SetStateDirty(EStateDirtyReason::state_notify_web);
+
+		RebuildDebugUI(ActiveSchema);
+		DebugUIWidget->TriggerRefreshUI();
+	}
+}
+
+
+
 void UZLCloudPluginStateManager::SetCurrentSchema(UStateKeyInfoAsset* Asset)
 {
-	if (Asset != nullptr)
+	if (Asset)
 	{
-		currentSchemaAsset = Asset;
-		RebuildDebugUI(currentSchemaAsset);
+		ActiveSchema->KeyInfos = Asset->KeyInfos;
+
+		RebuildDebugUI(Asset);
 	}
+}
+
+void UZLCloudPluginStateManager::AppendCurrentSchema(UStateKeyInfoAsset* Asset)
+{
+	if (Asset)
+	{
+		for (const TPair<FString, FStateKeyInfo>& Entry : Asset->KeyInfos)
+		{
+			const FString& Key = Entry.Key;
+			const FStateKeyInfo& IncomingInfo = Entry.Value;
+
+			FStateKeyInfo* ExistingInfo = ActiveSchema->KeyInfos.Find(Key);
+
+			if (ExistingInfo)
+			{
+				for (const FString& Val : IncomingInfo.AcceptedStringValues)
+				{
+					ExistingInfo->AcceptedStringValues.AddUnique(Val);
+				}
+
+				for (const double& Val : IncomingInfo.AcceptedNumberValues)
+				{
+					ExistingInfo->AcceptedNumberValues.AddUnique(Val);
+				}
+			}
+			else
+			{
+				ActiveSchema->KeyInfos.Add(Key, IncomingInfo);
+			}
+		}
+
+		RebuildDebugUI(ActiveSchema);
+		DebugUIWidget->TriggerRefreshUI();
+	}
+}
+
+void UZLCloudPluginStateManager::RemoveFromCurrentSchema(UStateKeyInfoAsset* Asset)
+{
+	if (Asset)
+	{
+		for (const TPair<FString, FStateKeyInfo>& InputEntry : Asset->KeyInfos)
+		{
+			const FString& Key = InputEntry.Key;
+			const FStateKeyInfo& InputInfo = InputEntry.Value;
+
+			FStateKeyInfo* ActiveInfo = ActiveSchema->KeyInfos.Find(Key);
+
+			if (ActiveInfo)
+			{
+				for (const FString& Val : InputInfo.AcceptedStringValues)
+				{
+					ActiveInfo->AcceptedStringValues.Remove(Val);
+				}
+
+				for (const double& Val : InputInfo.AcceptedNumberValues)
+				{
+					ActiveInfo->AcceptedNumberValues.Remove(Val);
+				}
+
+				bool bHasRemainingArrayValues = ActiveInfo->AcceptedStringValues.Num() > 0 || ActiveInfo->AcceptedNumberValues.Num() > 0;
+
+				if (!bHasRemainingArrayValues)
+					ActiveSchema->KeyInfos.Remove(Key);
+			}
+		}
+		RebuildDebugUI(ActiveSchema);
+		DebugUIWidget->TriggerRefreshUI();
+	}
+}
+
+UStateKeyInfoAsset* UZLCloudPluginStateManager::GetCurrentSchemaAsset()
+{
+	// With UPROPERTY(), the asset should always be valid if set
+	return ActiveSchema;
+}
+
+void UZLCloudPluginStateManager::ClearCurrentSchema()
+{
+	if (ActiveSchema != nullptr)
+	{
+		ActiveSchema->KeyInfos.Empty();
+	}
+}
+
+void UZLCloudPluginStateManager::SetDebugUIVisibility(bool visible)
+{
+	m_debugUIVisible = visible;
+	UE_LOG(LogZLCloudPlugin, Display, TEXT("Debug UI Visibility set to: %s"), m_debugUIVisible ? TEXT("Visible") : TEXT("Hidden"));
+	
+	if (DebugUIWidget)
+	{
+		DebugUIWidget->SetVisibility(m_debugUIVisible ? ESlateVisibility::Visible : ESlateVisibility::Hidden);
+		
+		// Check if we're in editor tab mode
+		bool bUseEditorTab = false;
+#if WITH_EDITOR
+		bUseEditorTab = m_showDebugUIInEditorTab;
+#endif
+		
+		// If in viewport mode, we need to add/remove from viewport
+		if (!bUseEditorTab)
+		{
+			if (m_debugUIVisible)
+			{
+				// Ensure widget is in viewport
+				if (GEngine)
+				{
+							// Remove first to ensure clean state
+					SetupViewportMode();
+				}
+			}
+			else
+			{
+				// Remove from viewport and reset input mode
+				DebugUIWidget->RemoveFromParent();
+			}
+		}
+	}
+}
+
+void UZLCloudPluginStateManager::SetShowDebugUIInEditorTab(bool showInEditorTab)
+{
+	m_showDebugUIInEditorTab = showInEditorTab;
+	
+	// If we have a schema and widget exists, switch modes without rebuilding
+	// This avoids widget reconstruction which would trigger NativeConstruct again
+	if (ActiveSchema && DebugUIWidget)
+	{
+		// Just switch the display mode without rebuilding
+		// RebuildDebugUI will handle the mode switching when called
+		// But we need to manually switch modes here to avoid reconstruction
+#if WITH_EDITOR
+		if (showInEditorTab && !DebugUITab.IsValid())
+		{
+			// Switch to editor tab mode
+			DebugUIWidget->RemoveFromParent();
+			m_debugUIVisible = true;
+			DebugUIWidget->SetVisibility(ESlateVisibility::Visible);
+			
+			// Create a shared state for the scale value
+			TSharedRef<float> ScaleValue = MakeShared<float>(0.5f);
+			TSharedRef<SWidget> WidgetRef = DebugUIWidget->TakeWidget();
+			
+			// Register tab spawner (safe to call multiple times - will update existing spawner)
+			FGlobalTabmanager::Get()->RegisterNomadTabSpawner(DebugUITabId, FOnSpawnTab::CreateLambda([this, WidgetRef, ScaleValue](const FSpawnTabArgs& SpawnTabArgs)
+			{
+				return CreateDebugUITabContent(WidgetRef, ScaleValue);
+			}))
+			.SetDisplayName(FText::FromString(TEXT("ZL Debug UI")))
+			.SetMenuType(ETabSpawnerMenuType::Hidden);
+			
+			DebugUITab = FGlobalTabmanager::Get()->TryInvokeTab(DebugUITabId);
+		}
+		else if (!showInEditorTab && DebugUITab.IsValid())
+		{
+			// Switch to viewport mode
+			DebugUITab->RequestCloseTab();
+			DebugUITab.Reset();
+			
+			DebugUIWidget->RemoveFromParent();
+			
+			if (m_debugUIVisible)
+			{
+				if (GEngine)
+				{
+					SetupViewportMode();
+				}
+			}
+		}
+#endif
+	}
+	else if (ActiveSchema && !DebugUIWidget)
+	{
+		// Widget doesn't exist yet, so rebuild to create it
+		RebuildDebugUI(ActiveSchema);
+	}
+}
+
+void UZLCloudPluginStateManager::SetupViewportMode()
+{
+	if (DebugUIWidget)
+	{
+		DebugUIWidget->RemoveFromParent();
+		DebugUIWidget->AddToViewport();
+	}
+}
+
+#if WITH_EDITOR
+TSharedRef<SDockTab> UZLCloudPluginStateManager::CreateDebugUITabContent(TSharedRef<SWidget> WidgetRef, TSharedRef<float> ScaleValue)
+{
+	return SNew(SDockTab)
+		.TabRole(ETabRole::NomadTab)
+		.Label(FText::FromString(TEXT("ZL Debug UI")))
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(FMargin(4.0f, 4.0f, 4.0f, 2.0f))
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(FMargin(0.0f, 0.0f, 8.0f, 0.0f))
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Scale:")))
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				[
+					SNew(SSpinBox<float>)
+					.MinValue(0.1f)
+					.MaxValue(3.0f)
+					.Value_Lambda([ScaleValue]() { return *ScaleValue; })
+					.OnValueChanged_Lambda([ScaleValue](float NewValue) 
+					{ 
+						*ScaleValue = NewValue;
+						// Slate will automatically redraw when the RenderTransform lambda's captured value changes
+					})
+					.MinDesiredWidth(80.0f)
+				]
+			]
+			+ SVerticalBox::Slot()
+			.FillHeight(1.0f)
+			[
+				SNew(SScrollBox)
+				.Orientation(Orient_Horizontal)
+				+ SScrollBox::Slot()
+				[
+					SNew(SScrollBox)
+					.Orientation(Orient_Vertical)
+					+ SScrollBox::Slot()
+					[
+						SNew(SBox)
+						.HAlign(HAlign_Left)
+						.VAlign(VAlign_Top)
+						[
+							SNew(SBox)
+							.RenderTransform_Lambda([ScaleValue]()
+							{
+								return FSlateRenderTransform(FScale2D(*ScaleValue));
+							})
+							.RenderTransformPivot(FVector2D(0.0f, 0.0f))
+							[
+								WidgetRef
+							]
+						]
+					]
+				]
+			]
+		];
+}
+#endif
+
+
+UZLCloudPluginStateManager::~UZLCloudPluginStateManager()
+{
+	// Ensure proper cleanup of asset references
+	ClearCurrentSchema();
 }
 
 void UZLCloudPluginStateManager::GetCurrentStateValue_String(FString FieldName, FString& StringValue, bool& Success)
@@ -1603,7 +2318,7 @@ void UZLCloudPluginStateManager::MergeTrackedStateIntoCurrentState(const FString
 }
 
 
-void UZLCloudPluginStateManager::SendCurrentStateToWeb(bool completeState)
+void UZLCloudPluginStateManager::SendCurrentStateToWeb(bool completeState, TSharedPtr<FJsonObject> unmatchedRequestState)
 {
 	if (!completeState)
 	{
@@ -1619,9 +2334,14 @@ void UZLCloudPluginStateManager::SendCurrentStateToWeb(bool completeState)
 		TSharedPtr<FJsonObject> currentStateJson = MakeShareable(new FJsonObject);
 		currentStateJson->SetStringField("status", "complete");
 		currentStateJson->SetObjectField("current_state", (completeState) ? JsonObject_currentState : JsonObject_web_currentState);
+		
+		if (unmatchedRequestState != nullptr)
+		{
+			currentStateJson->SetObjectField("unmatched_state", unmatchedRequestState);
+		}
 
 		TSharedPtr<FJsonObject> jsonForWebObject = MakeShareable(new FJsonObject);
-		jsonForWebObject->SetObjectField("state_notify_web", currentStateJson);
+		jsonForWebObject->SetObjectField("state_processing_ended", currentStateJson);
 
 		FString JsonString_forWeb;
 		TSharedRef<TJsonWriter<TCHAR>> JsonWriter = TJsonWriterFactory<TCHAR>::Create(&JsonString_forWeb, 1);
@@ -1633,6 +2353,140 @@ void UZLCloudPluginStateManager::SendCurrentStateToWeb(bool completeState)
 
 	//Copy all data in
 	FJsonObject::Duplicate(JsonObject_currentState, JsonObject_web_currentState);
+}
+
+/// <summary>
+/// Sets state flag to notify that a state update should be sent to the web in the next tick
+/// </summary>
+void UZLCloudPluginStateManager::SetStateDirty(EStateDirtyReason reason)
+{
+	m_stateDirty = true;
+	m_stateDirtyReason = reason;
+}
+
+void UZLCloudPluginStateManager::PushStateEventsToWeb()
+{
+	FString requestId = "";
+	m_stateDirty = false;
+
+	TSharedPtr<FJsonObject> currentJson = MakeShareable(new FJsonObject);
+	TSharedPtr<FJsonObject> jsonForWebObject = MakeShareable(new FJsonObject);
+
+	if (IsProcessingStateRequest())
+	{
+		requestId = JsonObject_processingState->GetStringField(s_requestIdStr);
+
+		//All requested states processed, send completion message
+		if (JsonObject_requestedStateLeafCount == JsonObject_processingStateFinishedLeaves)
+		{
+			//Return current state to the web
+			currentJson->SetStringField("status", "complete");
+			currentJson->SetObjectField("current_state", JsonObject_currentState);
+		}
+		else
+		{
+			if (JsonObject_processingState->Values.Num() > 1) //Still waiting on something in-processing
+			{
+				double currTime = FApp::GetCurrentTime();
+				double elapsedTime = currTime - JsonObject_processingStateStartTime;
+
+				if (elapsedTime > m_stateRequestTimeout)
+				{
+					JsonObject_processingState->RemoveField(s_requestIdStr); //Remove this request
+
+					//Return current state + unprocessed to the web
+					TSharedPtr<FJsonObject> timeoutState = CurrentStateCompareDiffs(JsonObject_processingState);
+
+					currentJson->SetStringField("status", "timeout");
+					currentJson->SetObjectField("current_state", JsonObject_currentState);
+					currentJson->SetObjectField("timeout_state", timeoutState);
+
+					TSharedPtr<FJsonObject> unprocessed = nullptr;
+					if (JsonObject_processingStateLeafCount < JsonObject_requestedStateLeafCount) //Some requested states were ignored
+					{
+						unprocessed = CurrentStateCompareDiffs(JsonObject_out_requestedState);
+						TArray<FString> diffKeys = CurrentStateCompareDiffs_Keys(JsonObject_processingState);
+						for (FString key : diffKeys) //Strip timed out values to report any unprocessed
+						{
+							if (unprocessed->TryGetField(key))
+							{
+								unprocessed->RemoveField(key);
+							}
+						}
+						if (unprocessed->HasField(s_requestIdStr))
+							unprocessed->RemoveField(s_requestIdStr);
+
+						currentJson->SetObjectField("unprocessed_state", unprocessed);
+					}
+				}
+			}
+			else if (JsonObject_processingStateLeafCount < JsonObject_requestedStateLeafCount) //Some requested states were ignored
+			{
+				JsonObject_processingState->RemoveField(s_requestIdStr); //Remove this request
+
+				//Return current state + unprocessed to the web
+				TSharedPtr<FJsonObject> unprocessedJson = CurrentStateCompareDiffs(JsonObject_out_requestedState);
+				if (unprocessedJson->HasField(s_requestIdStr))
+					unprocessedJson->RemoveField(s_requestIdStr);
+
+				currentJson->SetStringField("status", "unmatched");
+				currentJson->SetObjectField("current_state", JsonObject_currentState);
+				currentJson->SetObjectField("unprocessed_state", unprocessedJson);
+
+				FString JsonString_Unprocessed;
+				TSharedRef<TJsonWriter<TCHAR>> JsonWriterUnprocessed = TJsonWriterFactory<TCHAR>::Create(&JsonString_Unprocessed, 1);
+				FJsonSerializer::Serialize(unprocessedJson.ToSharedRef(), JsonWriterUnprocessed);
+				JsonWriterUnprocessed->Close();
+
+				UE_LOG(LogZLCloudPlugin, Display, TEXT("Unprocessed State in previous request: %s"), *JsonString_Unprocessed);
+			}
+		}
+	}
+	else if (JsonObject_requestedStateLeafCount != JsonObject_processingStateFinishedLeaves) //Also need to account for any requests that never entered processing due to invalid fields or instant confirms but were incomplete
+	{
+		requestId = JsonObject_out_requestedState->GetStringField(s_requestIdStr);
+
+		//Return current state + unprocessed to the web
+		TSharedPtr<FJsonObject> unprocessedJson = CurrentStateCompareDiffs(JsonObject_out_requestedState);
+		if (unprocessedJson->HasField(s_requestIdStr))
+			unprocessedJson->RemoveField(s_requestIdStr);
+
+		currentJson->SetStringField("status", "unmatched");
+		currentJson->SetObjectField("current_state", JsonObject_currentState);
+		currentJson->SetObjectField("unprocessed_state", unprocessedJson);
+
+		FString JsonString_Unprocessed;
+		TSharedRef<TJsonWriter<TCHAR>> JsonWriterUnprocessed = TJsonWriterFactory<TCHAR>::Create(&JsonString_Unprocessed, 1);
+		FJsonSerializer::Serialize(unprocessedJson.ToSharedRef(), JsonWriterUnprocessed);
+		JsonWriterUnprocessed->Close();
+
+		UE_LOG(LogZLCloudPlugin, Display, TEXT("Unprocessed State in previous request: %s"), *JsonString_Unprocessed);
+	}
+	else //internal state update, just needs to send complete current state
+	{
+		currentJson->SetStringField("status", "complete");
+		currentJson->SetObjectField("current_state", JsonObject_currentState);
+	}
+
+	jsonForWebObject->SetObjectField("state_processing_ended", currentJson);
+	if(!requestId.IsEmpty())
+		jsonForWebObject->SetStringField(s_requestIdStr, requestId); //add in request Id	
+
+	SendFJsonObjectToWeb(jsonForWebObject);
+}
+
+void UZLCloudPluginStateManager::SendFJsonObjectToWeb(TSharedPtr<FJsonObject> JsonObject)
+{
+	IZLCloudPluginModule* Module = ZLCloudPlugin::FZLCloudPluginModule::GetModule();
+	if (Module)
+	{
+		FString JsonString_forWeb;
+		TSharedRef<TJsonWriter<TCHAR>> JsonWriter = TJsonWriterFactory<TCHAR>::Create(&JsonString_forWeb, 1);
+		FJsonSerializer::Serialize(JsonObject.ToSharedRef(), JsonWriter);
+		JsonWriter->Close();
+
+		Module->SendData(JsonString_forWeb);
+	}
 }
 
 

@@ -5,6 +5,7 @@
 #include "ZLCloudPluginPlayerId.h"
 #include "Containers/UnrealString.h"
 #include "Delegates/DelegateSignatureImpl.inl"
+#include "Dom/JsonObject.h"
 #include "ZLCloudPluginDelegates.generated.h"
 
 
@@ -51,27 +52,35 @@ public:
 
 
 	/**
-	 * Pre-panoramic capture events
+	 * On Content Generation Start 
 	 */
 	 // BP Delegate
-	DECLARE_DYNAMIC_MULTICAST_DELEGATE(FPrePanoCapture);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnContentGenerationBegin, bool, bIsPanoImage);
 	UPROPERTY(BlueprintAssignable, Category = "Zerolight Omnistream Delegates")
-	FPrePanoCapture OnPrePanoCapture;
+	FOnContentGenerationBegin OnContentGenerationBegin;
 	// C++ Delegate
-	DECLARE_MULTICAST_DELEGATE(FPrePanoCaptureNative);
-	FPrePanoCaptureNative OnPrePanoCaptureNative;
-
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnContentGenerationBeginNative, bool);
+	FOnContentGenerationBeginNative OnContentGenerationBeginNative;
 
 	/**
-	 * Post-panoramic capture events
+	 * On Content Generation Finished
 	 */
 	 // BP Delegate
-	DECLARE_DYNAMIC_MULTICAST_DELEGATE(FPostPanoCapture);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnContentGenerationFinished, bool, bIsPanoImage);
 	UPROPERTY(BlueprintAssignable, Category = "Zerolight Omnistream Delegates")
-	FPrePanoCapture OnPostPanoCapture;
+	FOnContentGenerationFinished OnContentGenerationFinished;
 	// C++ Delegate
-	DECLARE_MULTICAST_DELEGATE(FPostPanoCaptureNative);
-	FPostPanoCaptureNative OnPostPanoCaptureNative;
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnContentGenerationFinishedNative, bool);
+	FOnContentGenerationFinishedNative OnContentGenerationFinishedNative;
+
+	/**
+	 * On Get Version Info - allows other plugins to add their version information
+	 */
+	// C++ Delegate - takes a shared JSON object that plugins can modify to add their version info
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnGetVersionInfoNative, TSharedPtr<FJsonObject>);
+	FOnGetVersionInfoNative OnGetVersionInfoNative;
+
+	
 
 
 	/**

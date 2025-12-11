@@ -53,6 +53,9 @@ struct FStateKeyInfo
     UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
     TArray<double> AcceptedNumberValues;
 
+    UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
+    bool bIgnoredInDataHashes = false;
+
     inline bool IsArray()
     {
         return DataType == "StringArray" || DataType == "NumberArray" || DataType == "BoolArray";
@@ -87,4 +90,6 @@ public:
 	TMap<FString, FStateKeyInfo> KeyInfos;
 
     TSharedRef<FJsonObject> SerializeStateKeyAssetToJson();
+
+    TSharedRef<FJsonObject> SerializeStateKeyAsset_JsonSchemaCompliant();
 };

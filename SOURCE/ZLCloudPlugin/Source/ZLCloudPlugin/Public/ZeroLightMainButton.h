@@ -408,7 +408,6 @@ protected:
 	inline bool IsPortalUserLoggedIn() { return s_portalUsername != "Not Logged In"; };
 	FReply OpenFAQDocsWebPage();
 	FReply OpenGithubReleaseWebPage();
-	void ValidateJSONSchema_Async();
 	FString FindOverrideExeName(FString buildDirectory) const;
 	FString FindOverrideProjectName(FString buildDirectory) const;
 	bool AddRunInfoJSONAndMetadataToBuild(FString outputFolderPath, FString overrideProjectName, FString overrideExeName = "") const;

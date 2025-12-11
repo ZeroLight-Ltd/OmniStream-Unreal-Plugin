@@ -5,6 +5,7 @@
 #define ALLOW_GITHUB_RELEASE_CHECKS 1
 
 #include "ZeroLightMainButton.h"
+#include "ZLCloudPluginStateManager.h"
 #include "LevelEditor.h"
 #include "DesktopPlatformModule.h"
 #include "Framework/Application/SlateApplication.h"
@@ -411,7 +412,7 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 
 		//BP project needs to always specify unrealexe or it tries to read it from [projectname]Editor.target which doesnt exist
 		FString unrealExePath = FPaths::ConvertRelativePathToFull(engineDir + "Binaries/Win64/UnrealEditor-Cmd.exe");
-		FString unrealExeArg = FString::Printf(TEXT("-unrealexe=\"%s\" "), *unrealExePath);
+		FString unrealExeArg = FString::Printf(TEXT(" -unrealexe=\"%s\" "), *unrealExePath);
 		commandArgs += unrealExeArg;
 
 		FString projectStr = FPaths::GetBaseFilename(FPaths::GetProjectFilePath());
@@ -571,16 +572,33 @@ TSharedRef<SWidget> FZeroLightMainButton::GetMenu()
 		FText::FromString("Advanced Utilities"),
 		FNewMenuDelegate::CreateLambda([this](FMenuBuilder& SubMenuBuilder) {
 		SubMenuBuilder.AddMenuEntry(
-			FText::FromString("Log State JSON Schema"),
-			FText::FromString("Prints schema of state processed using OmniStream State Manager"),
-			FSlateIcon(),
-			FUIAction(FExecuteAction::CreateSP(this, &FZeroLightMainButton::ValidateJSONSchema_Async)));
-
-		SubMenuBuilder.AddMenuEntry(
 			FText::FromString("State Management Editor"),
 			FText::FromString("Utility for defining and managing application state JSON"),
 			FSlateIcon(),
 			FUIAction(FExecuteAction::CreateSP(this, &FZeroLightMainButton::ShowStateManagementWindow))
+		);
+		SubMenuBuilder.AddMenuEntry(
+			FText::FromString("Show State Debug UI in editor tab"),
+			FText::FromString("Display the debug state UI in an editor tab"),
+			FSlateIcon(),
+			FUIAction(
+				FExecuteAction::CreateLambda([this]() {
+					if (UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager())
+					{
+						StateManager->SetShowDebugUIInEditorTab(!StateManager->GetShowDebugUIInEditorTab());
+					}
+				}),
+				FCanExecuteAction(),
+				FIsActionChecked::CreateLambda([this]() {
+					if (UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager())
+					{
+						return StateManager->GetShowDebugUIInEditorTab();
+					}
+					return false;
+				})
+			),
+			NAME_None,
+			EUserInterfaceActionType::ToggleButton
 		);
 	}));
 
@@ -978,9 +996,14 @@ FReply FZeroLightMainButton::TriggerBuildAndDeploy(FString buildFolderOverride)
 
 			if (buildFolderOverride == "")
 			{
-				SetBuildFolder(projectDir);
+				if (s_cloudstreamSettings->buildFolder == "")
+					SetBuildFolder(projectDir);
 
-				if (!FDesktopPlatformModule::Get()->OpenDirectoryDialog(FSlateApplication::Get().FindBestParentWindowHandleForDialogs(nullptr), TEXT("Package project..."), projectDir, outFolderName))
+				FString ParentBuildFolder = "";
+				if(s_cloudstreamSettings->buildFolder != projectDir)
+					ParentBuildFolder = (s_cloudstreamSettings->buildFolder.EndsWith("Windows")) ? FPaths::GetPath(s_cloudstreamSettings->buildFolder) : s_cloudstreamSettings->buildFolder;
+
+				if (!FDesktopPlatformModule::Get()->OpenDirectoryDialog(FSlateApplication::Get().FindBestParentWindowHandleForDialogs(nullptr), TEXT("Package project..."), FPaths::Combine(projectDir, ParentBuildFolder), outFolderName))
 				{
 					success = false;
 					return FReply::Unhandled();
@@ -1225,7 +1248,7 @@ bool FZeroLightMainButton::TriggerBuildUpload(FString retryPath) const
 			return false;
 		}
 
-		FString thumbnailImageFilePath = GetThumbnailFilePath();
+		FString thumbnailImageFilePath = FPaths::Combine(FPaths::ProjectDir(), GetThumbnailFilePath());
 		std::filesystem::path thumbnailImageFilePathStd = TCHAR_TO_UTF8(*thumbnailImageFilePath);
 		if (FPaths::FileExists(thumbnailImageFilePath))
 		{
@@ -1317,73 +1340,35 @@ bool FZeroLightMainButton::RetryRenameUploadExistingBuild() const
 TSharedPtr<FJsonObject> FZeroLightMainButton::AggregatePredictedJSONSchema() const
 {
 	TSharedPtr<FJsonObject> aggregatedJsonObject = MakeShared<FJsonObject>();
-	static const TArray<FName> functionsToSearch = { "GetRequestedStateValue", "GetRequestedStateValueString", "GetRequestedStateValueBool", "GetRequestedStateValueNumber",
-													 "GetRequestedStateValueStringArray", "GetRequestedStateValueBoolArray", "GetRequestedStateValueNumberArray" };
-	TArray<FString> foundArguments;
 
-	// Get all blueprints in the project
-	FAssetRegistryModule& assetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-	TArray<FAssetData> assetData;
-	FARFilter filter;
-	filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
-	filter.bRecursivePaths = true;
-	assetRegistryModule.Get().GetAssets(filter, assetData);
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
 
-	for (const FAssetData& asset : assetData)
+	TArray<FAssetData> AssetData;
+	const UClass* ClassToFind = UStateKeyInfoAsset::StaticClass();
+	AssetRegistryModule.Get().GetAssetsByClass(ClassToFind->GetClassPathName(), AssetData);
+
+	const FName TargetName = TEXT("ZLVEBaseSchema");
+
+	const int32 FoundIndex = AssetData.IndexOfByPredicate([&](const FAssetData& Item) {
+		return Item.AssetName == TargetName;
+	});
+
+	if (FoundIndex > 0)
 	{
-		UBlueprint* blueprint = Cast<UBlueprint>(asset.GetAsset());
-		if (blueprint)
+		AssetData.Swap(0, FoundIndex);
+	}
+
+	for (const FAssetData& Data : AssetData)
+	{
+		UObject* LoadedAsset = Data.GetAsset();
+		if (LoadedAsset)
 		{
-			for (UEdGraph* graph : blueprint->UbergraphPages)
+			UStateKeyInfoAsset* StateKeyInfoAsset = Cast<UStateKeyInfoAsset>(LoadedAsset);
+			if (StateKeyInfoAsset)
 			{
-				for (UEdGraphNode* node : graph->Nodes)
-				{
-					if (UK2Node_CallFunction* functionNode = Cast<UK2Node_CallFunction>(node))
-					{
-						for (FName function : functionsToSearch)
-						{
-							if (function.IsEqual(functionNode->FunctionReference.GetMemberName()))
-							{
-								UEdGraphPin* keyStringPin = functionNode->FindPin(TEXT("FieldName"));
-								if (keyStringPin && keyStringPin->DefaultValue.Len() > 0)
-								{
-									FString functionNameStr = functionNode->FunctionReference.GetMemberName().ToString();
-									if (functionNameStr.Equals("GetRequestedStateValue")) //legacy original func was only string, handle this
-										functionNameStr = "GetRequestedStateValueString";
-									FString leftPart, returnValueStr;
-
-									functionNameStr.Split(TEXT("GetRequestedStateValue"), &leftPart, &returnValueStr);
-
-									TArray<FString> keys;
-									keyStringPin->DefaultValue.ParseIntoArray(keys, TEXT("."));
-
-									TSharedPtr<FJsonObject> CurrentObject = aggregatedJsonObject;
-									for (int32 i = 0; i < keys.Num(); ++i)
-									{
-										if (i == keys.Num() - 1)
-										{
-											CurrentObject->SetStringField(keys[i], returnValueStr);
-										}
-										else
-										{
-											TSharedPtr<FJsonObject> SubObject;
-											if (CurrentObject->HasField(keys[i]))
-											{
-												SubObject = CurrentObject->GetObjectField(keys[i]);
-											}
-											else
-											{
-												SubObject = MakeShared<FJsonObject>();
-												CurrentObject->SetObjectField(keys[i], SubObject);
-											}
-											CurrentObject = SubObject;
-										}
-									}
-								}
-							}
-						}
-					}
-				}
+				TSharedPtr<FJsonObject> serialisedSchemaData = StateKeyInfoAsset->SerializeStateKeyAsset_JsonSchemaCompliant();
+				serialisedSchemaData->RemoveField("$schema");
+				aggregatedJsonObject = MergeJsonObjectsRecursive(aggregatedJsonObject, serialisedSchemaData);
 			}
 		}
 	}
@@ -1561,6 +1546,7 @@ bool FZeroLightMainButton::AddRunInfoJSONAndMetadataToBuild(FString outputFolder
 		//Estimate JSON Schema 
 		{
 			TSharedPtr<FJsonObject> aggregatedJsonSchema = AggregatePredictedJSONSchema();
+			aggregatedJsonSchema->SetStringField("title", (s_cloudstreamSettings->displayName + " Schema"));
 
 			metadataJsonObj->SetObjectField("state_schema", aggregatedJsonSchema);
 		}
@@ -2519,30 +2505,6 @@ FReply FZeroLightMainButton::OpenGithubReleaseWebPage()
 	FPlatformProcess::LaunchURL(*FullURL, nullptr, nullptr);
 
 	return FReply::Handled();
-}
-
-void FZeroLightMainButton::ValidateJSONSchema_Async()
-{
-	Async(EAsyncExecution::TaskGraphMainThread, [this]()
-	{
-		FScopedSlowTask SlowTask(2, FText::FromString(TEXT("Analyzing state fields in project...")));
-		SlowTask.MakeDialog(true);
-
-		SlowTask.EnterProgressFrame(1);
-
-		TSharedPtr<FJsonObject> stateKeysAggregated = AggregatePredictedJSONSchema();
-
-		FString JsonString_AggregatedSchema;
-		TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> JsonWriter = TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&JsonString_AggregatedSchema, 1);
-		FJsonSerializer::Serialize(stateKeysAggregated.ToSharedRef(), JsonWriter);
-		JsonWriter->Close();
-
-		SlowTask.EnterProgressFrame(1);
-
-		UE_LOG(LogPortalCLI, Log, TEXT("Printing JSON Schema (aggregated from BP nodes using State Manager)"));
-		UE_LOG(LogPortalCLI, Log, TEXT("%s"), *JsonString_AggregatedSchema);
-	});
-
 }
 
 void FZeroLightMainButton::About()

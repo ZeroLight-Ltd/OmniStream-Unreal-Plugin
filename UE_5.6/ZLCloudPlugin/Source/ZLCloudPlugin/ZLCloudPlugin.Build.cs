@@ -29,6 +29,8 @@ public class ZLCloudPlugin : ModuleRules
 				"InputDevice",
 				"Json", 
 				"JsonUtilities",
+				"UMG",
+				"MovieRenderPipelineCore"
 		});
 		
 		if(version_5_1_or_newer)
@@ -70,8 +72,14 @@ public class ZLCloudPlugin : ModuleRules
 				"AVEncoder",
 				"Projects",
 				"Networking",
-				"UMG",
-				"CloudStream2"
+				"CloudStream2",
+				"MovieScene",
+				"MovieSceneTracks",
+				"MovieRenderPipelineCore",
+				"MovieRenderPipelineSettings",
+				"LevelSequence",
+				"MovieRenderPipelineRenderPasses",
+				"ImageWrapper"
 		});
 		
 		if(version_5_1_or_newer)
@@ -102,7 +110,8 @@ public class ZLCloudPlugin : ModuleRules
 					"FileUtilities",
 					"Portal",
 					"GameProjectGeneration",
-					"AssetRegistry"
+					"AssetRegistry",
+					"MovieRenderPipelineEditor"
 			});
 
 			PublicIncludePaths.Add(Path.Combine(PluginDirectory, "Source/ThirdParty/Portal/include"));

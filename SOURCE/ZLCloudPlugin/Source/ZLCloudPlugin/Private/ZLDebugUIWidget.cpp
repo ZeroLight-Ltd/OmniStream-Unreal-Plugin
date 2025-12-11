@@ -21,6 +21,21 @@ void UZLDebugUIWidget::NativeConstruct()
         SubmitStateBtn->OnClicked.AddDynamic(this, &UZLDebugUIWidget::OnSubmitState);
 }
 
+void UZLDebugUIWidget::NativeDestruct()
+{
+    Super::NativeDestruct();
+
+    if (InstantChangeToggle)
+    {
+        InstantChangeToggle->OnCheckStateChanged.RemoveDynamic(this, &UZLDebugUIWidget::OnSubmitStateInstantBoxChanged);
+    }
+
+    if (SubmitStateBtn)
+    {
+        SubmitStateBtn->OnClicked.RemoveDynamic(this, &UZLDebugUIWidget::OnSubmitState);
+    }
+}
+
 void UZLDebugUIWidget::OnSubmitStateInstantBoxChanged(bool bIsChecked)
 {
     instantProcess = bIsChecked;
@@ -284,457 +299,511 @@ void UStateKeyInputTextBox::OnTextValueCommitted(const FText& ComittedText, ETex
 
 void UZLDebugUIWidget::RebuildDebugUI()
 {
-    if (!TargetSchema || !SchemaOptionsVBox) return;
+	RebuildDebugUIWithNesting();
+}
 
-    if (SchemaTitle)
-    {
-        SchemaTitle->SetText(FText::FromString("Schema: " + TargetSchema->GetName()));
-    }
+void UZLDebugUIWidget::RebuildDebugUIWithNesting()
+{
+	if (!TargetSchema || !SchemaOptionsVBox) return;
 
-    ModifiedStateObject = MakeShared<FJsonObject>();
+	if (SchemaTitle)
+	{
+		SchemaTitle->SetText(FText::FromString("Schema: " + TargetSchema->GetName()));
+	}
 
-    UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager();
+	ModifiedStateObject = MakeShared<FJsonObject>();
 
-    SchemaOptionsVBox->ClearChildren();
+	UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager();
 
-    FSlateColor BlackColor = FSlateColor(FLinearColor::Black);
-    FTableRowStyle RowStyle;
-    RowStyle.TextColor = BlackColor;
-    RowStyle.SelectedTextColor = BlackColor;
+	SchemaOptionsVBox->ClearChildren();
+	FoldoutHelpers.Empty();
 
-    //auto MakeArrayButton = [&](const FString& LabelText, TFunction<void()> OnClickLambda)
-    //{
-    //    UButton* Button = WidgetTree->ConstructWidget<UButton>(UButton::StaticClass());
-    //    Button->SetRenderScale(FVector2D(InputScale, InputScale));
+	FSlateColor BlackColor = FSlateColor(FLinearColor::Black);
+	FTableRowStyle RowStyle;
+	RowStyle.TextColor = BlackColor;
+	RowStyle.SelectedTextColor = BlackColor;
 
-    //    UTextBlock* Text = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
-    //    Text->SetText(FText::FromString(LabelText));
-    //    Button->AddChild(Text);
+	TArray<FString> SortedKeys;
+	TargetSchema->KeyInfos.GenerateKeyArray(SortedKeys);
 
-    //    // Use weak lambda approach or delegate-bound function
-    //    Button->OnClicked.AddLambda(OnClickLambda);
-    //    return Button;
-    //};
+	SortedKeys.Sort();
 
-    for (const auto& SchemaKey : TargetSchema->KeyInfos)
-    {
-        const FString& KeyName = SchemaKey.Key;
-        const FStateKeyInfo& StateKeyInfo = SchemaKey.Value;
-        bool CurrValFound = false;
+	TMap<FString, UVerticalBox*> FoldoutSections;
 
-        UGridPanel* RowGrid = WidgetTree->ConstructWidget<UGridPanel>(UGridPanel::StaticClass());
-        RowGrid->SetColumnFill(0, 1.0f); // 50% using whole values instead of 0.6/0.4 because unreal can do odd clamps with small values
-        RowGrid->SetColumnFill(1, 1.0f); // 50%
+	for (const FString& Key : SortedKeys)
+	{
+		if (const FStateKeyInfo* SchemaKey = TargetSchema->KeyInfos.Find(Key))
+		{
+			const FString& KeyName = Key;
+			const FStateKeyInfo& StateKeyInfo = *SchemaKey;
+			bool CurrValFound = false;
 
-        UTextBlock* Label = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
-        Label->SetText(FText::FromString(KeyName));
+			TArray<FString> KeyParts;
+			KeyName.ParseIntoArray(KeyParts, TEXT("."), true);
 
+			UVerticalBox* ParentBox = SchemaOptionsVBox;
+			FString CurrentPath = "";
 
-        FSlateFontInfo FontInfo = Label->GetFont();
-        FontInfo.Size = 14;
-        Label->SetFont(FontInfo);
+			// Create foldouts for nested keys
+			for (int32 i = 0; i < KeyParts.Num() - 1; ++i)
+			{
+				CurrentPath += KeyParts[i];
+				if (!FoldoutSections.Contains(CurrentPath))
+				{
+					// Create the button and title
+					UButton* ToggleButton = WidgetTree->ConstructWidget<UButton>(UButton::StaticClass());
+					
+					// Style the button
+					FButtonStyle ButtonStyle;
+					FSlateColorBrush NormalBrush(FLinearColor(0.1f, 0.1f, 0.1f, 0.5f));
+					FSlateColorBrush HoveredBrush(FLinearColor(0.2f, 0.2f, 0.2f, 0.5f));
+					FSlateColorBrush DarkBrush(FLinearColor(0.05f, 0.05f, 0.05f, 0.5f));
+					ButtonStyle.SetNormal(DarkBrush);
+					ButtonStyle.SetHovered(HoveredBrush);
+					ButtonStyle.SetPressed(NormalBrush);
+					ToggleButton->SetStyle(ButtonStyle);
 
-        UGridSlot* LabelSlot = RowGrid->AddChildToGrid(Label,0,0);
-        LabelSlot->SetPadding(FMargin(0.0f, 5.0f, 5.0f, 5.0f));
-        LabelSlot->SetHorizontalAlignment(HAlign_Left);
-        LabelSlot->SetVerticalAlignment(VAlign_Center);
+					UHorizontalBox* HeaderBox = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass());
+					
+					UTextBlock* ArrowText = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
+					ArrowText->SetText(FText::FromString(TEXT(" >																																")));
+					FSlateFontInfo ArrowFontInfo = ArrowText->GetFont();
+					ArrowFontInfo.Size = 16;
+					ArrowText->SetFont(ArrowFontInfo);
+					
+					
+					UTextBlock* SectionTitle = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
+					SectionTitle->SetText(FText::FromString(KeyParts[i]));
+					FSlateFontInfo FontInfo = SectionTitle->GetFont();
+					FontInfo.Size = 16;
+					SectionTitle->SetFont(FontInfo);
 
-        UWidget* InputWidget = nullptr;
-        EHorizontalAlignment Alignment = HAlign_Fill;
+					HeaderBox->AddChildToHorizontalBox(SectionTitle)->SetPadding(FMargin(0, 0, 0, 0));
+					HeaderBox->AddChildToHorizontalBox(ArrowText)->SetPadding(FMargin(0, 0, 0, 0));
 
-        switch (StateKeyInfo.GetDataTypeEnum())
-        {
-        case EStateKeyDataType::String:
-        {
-            FString CurrentVal = StateKeyInfo.DefaultStringValue;
-            if (StateManager)
-                StateManager->GetCurrentStateValue<FString>(KeyName, CurrentVal, CurrValFound);
+					// Add the horizontal box containing the arrow and title to the button
+					ToggleButton->AddChild(HeaderBox);
 
-            if (StateKeyInfo.bLimitValues)
-            {
-                UStateKeyInputComboBox* ComboBox = WidgetTree->ConstructWidget<UStateKeyInputComboBox>(UStateKeyInputComboBox::StaticClass());
-                ComboBox->KeyName = KeyName;
-                ComboBox->ParentDebugUI = this;
-                ComboBox->InstantBroadcastChange = instantProcess;
-                ComboBox->DataType = EStateKeyDataType::String;
-                ComboBox->StateKeyInfo = StateKeyInfo;
-                for (const FString& Option : StateKeyInfo.AcceptedStringValues)
-                {
-                    ComboBox->AddOption(Option);
-                }
-                
-#if UNREAL_5_3_OR_NEWER
-                ComboBox->SetItemStyle(RowStyle);
-#endif
+					// The content box that will be toggled
+					UVerticalBox* SectionContent = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass());
+					SectionContent->SetVisibility(ESlateVisibility::Collapsed);
 
-                ComboBox->SetSelectedOption(CurrentVal);
-                ComboBox->OnSelectionChanged.AddDynamic(ComboBox, &UStateKeyInputComboBox::OnComboBoxChanged);
-                InputWidget = ComboBox;
-            }
-            else
-            {
-                UStateKeyInputTextBox* TextBox = WidgetTree->ConstructWidget<UStateKeyInputTextBox>(UStateKeyInputTextBox::StaticClass());
-                TextBox->SetText(FText::FromString(CurrentVal));
-#if UNREAL_5_3_OR_NEWER
-                TextBox->WidgetStyle.TextStyle.ColorAndOpacity = BlackColor;
-                TextBox->WidgetStyle.TextStyle.SetFontSize(16.0f);
-#endif
-                TextBox->KeyName = KeyName;
-                TextBox->ParentDebugUI = this;
-                TextBox->InstantBroadcastChange = instantProcess;
-                TextBox->DataType = EStateKeyDataType::String;
-                TextBox->OnTextCommitted.AddDynamic(TextBox, &UStateKeyInputTextBox::OnTextValueCommitted);
-                InputWidget = TextBox;
-            }
+					// Create a helper object to handle the toggle
+					UFoldoutHelper* FoldoutHelper = NewObject<UFoldoutHelper>(this);
+					FoldoutHelper->SectionContent = SectionContent;
+					FoldoutHelper->ArrowText = ArrowText;
+					FoldoutHelper->ParentWidget = this;
+					FoldoutHelper->FoldoutPath = CurrentPath;
+					FoldoutHelpers.Add(FoldoutHelper); // Keep the helper alive
 
-            UpdateJsonObjectKey<FString>(KeyName, CurrentVal, ModifiedStateObject);
-            break;
-        }
-        case EStateKeyDataType::StringArray:
-        {
-            TArray<FString> CurrentVals;
-            if (StateManager)
-                StateManager->GetCurrentStateValue<TArray<FString>>(KeyName, CurrentVals, CurrValFound);
+					if (ExpandedFoldouts.Contains(CurrentPath))
+					{
+						SectionContent->SetVisibility(ESlateVisibility::Visible);
+						ArrowText->SetText(FText::FromString(TEXT(" v																																")));
+					}
 
-            TArray<FString> WorkingArray = CurrValFound ? CurrentVals : StateKeyInfo.DefaultStringArray;
+					// Bind the button's OnClicked event
+					ToggleButton->OnClicked.AddDynamic(FoldoutHelper, &UFoldoutHelper::ToggleVisibility);
 
-            const int32 NumValues = WorkingArray.Num();
-            const int32 ItemsPerRow = (StateKeyInfo.bLimitValues) ? 2 : 4;
-            const float InputScale = 0.85f;
-            const float PaddingBetween = 5.f;
+					// Add the button and the content to the parent box
+					UVerticalBoxSlot* ButtonSlot = ParentBox->AddChildToVerticalBox(ToggleButton);
+					ButtonSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Left);
+					ButtonSlot->SetPadding(FMargin(0, 2));
+					ParentBox->AddChildToVerticalBox(SectionContent);
 
-            int GridIdx = 0;
+					// Add the new section to our map and set it as the new parent
+					FoldoutSections.Add(CurrentPath, SectionContent);
+					ParentBox = SectionContent;
+				}
+				else
+				{
+					ParentBox = *FoldoutSections.Find(CurrentPath);
+				}
+				CurrentPath += ".";
+			}
 
-            for (int32 i = 0; i < NumValues; i += ItemsPerRow)
-            {
-                UHorizontalBox* RowBox = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass());
+			const FString DisplayKeyName = KeyParts.Last();
 
-                for (int32 j = 0; j < ItemsPerRow && (i + j) < NumValues; ++j)
-                {
-                    const FString& Value = WorkingArray[i + j];
-                    InputWidget = nullptr;
+			UGridPanel* RowGrid = WidgetTree->ConstructWidget<UGridPanel>(UGridPanel::StaticClass());
+			RowGrid->SetColumnFill(0, 1.0f);
+			RowGrid->SetColumnFill(1, 1.0f);
 
-                    if (StateKeyInfo.bLimitValues)
-                    {
-                        UStateKeyInputComboBox* ComboBox = WidgetTree->ConstructWidget<UStateKeyInputComboBox>(UStateKeyInputComboBox::StaticClass());
-                        ComboBox->KeyName = KeyName + "_INDEX_" + FString::FromInt(i + j);
-                        ComboBox->ParentDebugUI = this;
-                        ComboBox->InstantBroadcastChange = instantProcess;
-                        ComboBox->DataType = EStateKeyDataType::StringArray;
-                        ComboBox->StateKeyInfo = StateKeyInfo;
-                        for (const FString& Option : StateKeyInfo.AcceptedStringValues)
-                        {
-                            ComboBox->AddOption(Option);
-                        }
+			UTextBlock* Label = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
+			Label->SetText(FText::FromString(DisplayKeyName));
 
-#if UNREAL_5_3_OR_NEWER
-                        ComboBox->SetItemStyle(RowStyle);
-#endif
+			FSlateFontInfo FontInfo = Label->GetFont();
+			FontInfo.Size = 16;
+			Label->SetFont(FontInfo);
 
-                        ComboBox->SetSelectedOption(Value);
-                        ComboBox->OnSelectionChanged.AddDynamic(ComboBox, &UStateKeyInputComboBox::OnComboBoxChanged);
-                        InputWidget = ComboBox;
-                    }
-                    else
-                    {
-                        UStateKeyInputTextBox* TextBox = WidgetTree->ConstructWidget<UStateKeyInputTextBox>(UStateKeyInputTextBox::StaticClass());
-                        TextBox->SetText(FText::FromString(Value));
-#if UNREAL_5_3_OR_NEWER
-                        TextBox->WidgetStyle.TextStyle.ColorAndOpacity = BlackColor;
-                        TextBox->WidgetStyle.TextStyle.SetFontSize(16.0f);
-#endif
-                        TextBox->KeyName = KeyName + "_INDEX_" + FString::FromInt(i + j);
-                        TextBox->ParentDebugUI = this;
-                        TextBox->InstantBroadcastChange = instantProcess;
-                        TextBox->DataType = EStateKeyDataType::StringArray;
-                        TextBox->OnTextCommitted.AddDynamic(TextBox, &UStateKeyInputTextBox::OnTextValueCommitted);
-                        InputWidget = TextBox;
-                    }
+			UGridSlot* LabelSlot = RowGrid->AddChildToGrid(Label, 0, 0);
+			LabelSlot->SetPadding(FMargin(5.0f, 5.0f, 5.0f, 5.0f));
+			LabelSlot->SetHorizontalAlignment(HAlign_Left);
+			LabelSlot->SetVerticalAlignment(VAlign_Center);
 
-                    if (InputWidget)
-                    {
-                        UHorizontalBoxSlot* ArraySlot = RowBox->AddChildToHorizontalBox(InputWidget);
-                        ArraySlot->SetPadding(FMargin(PaddingBetween, 0.0, 0.0, 0.0));
-                        ArraySlot->SetHorizontalAlignment(HAlign_Fill);
-                        ArraySlot->SetVerticalAlignment(VAlign_Center);
-                    }
-                }
+			UWidget* InputWidget = nullptr;
+			EHorizontalAlignment Alignment = HAlign_Fill;
 
-                UGridSlot* InputSlot = RowGrid->AddChildToGrid(RowBox, GridIdx, 1);
-                InputSlot->SetPadding(FMargin(0.f,5.f,5.f,5.f));
-                InputSlot->SetHorizontalAlignment(Alignment);
-                InputSlot->SetVerticalAlignment(VAlign_Center);
-                InputWidget = nullptr;
-                GridIdx++;
-            }
+			switch (StateKeyInfo.GetDataTypeEnum())
+			{
+			case EStateKeyDataType::String:
+			{
+				FString CurrentVal = StateKeyInfo.DefaultStringValue;
+				if (StateManager)
+					StateManager->GetCurrentStateValue<FString>(KeyName, CurrentVal, CurrValFound);
 
-            // Add single Add / Remove buttons row
-            //UHorizontalBox* ButtonBox = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass());
+				if (StateKeyInfo.bLimitValues)
+				{
+					UStateKeyInputComboBox* ComboBox = WidgetTree->ConstructWidget<UStateKeyInputComboBox>(UStateKeyInputComboBox::StaticClass());
+					ComboBox->KeyName = KeyName;
+					ComboBox->ParentDebugUI = this;
+					ComboBox->InstantBroadcastChange = instantProcess;
+					ComboBox->DataType = EStateKeyDataType::String;
+					ComboBox->StateKeyInfo = StateKeyInfo;
+					for (const FString& Option : StateKeyInfo.AcceptedStringValues)
+					{
+						ComboBox->AddOption(Option);
+					}
 
-            //ButtonBox->AddChildToHorizontalBox(MakeArrayButton(TEXT("Add"), [=]()
-            //{
-            //    // Add default value
-            //    // You should rebuild the UI here or support dynamic updates
-            //}));
-
-            //ButtonBox->AddChildToHorizontalBox(MakeArrayButton(TEXT("Remove"), [=]()
-            //{
-            //    // Remove last element
-            //    // You should rebuild the UI here or support dynamic updates
-            //}));
-
-            //SchemaOptionsVBox->AddChildToVerticalBox(ButtonBox);
-
-            UpdateJsonObjectKey<TArray<FString>>(KeyName, WorkingArray, ModifiedStateObject);
-            break;
-        }
-        case EStateKeyDataType::Number:
-        {
-            double CurrentVal = StateKeyInfo.DefaultNumberValue;
-            if (StateManager)
-                StateManager->GetCurrentStateValue<double>(KeyName, CurrentVal, CurrValFound);
-
-            if (StateKeyInfo.bLimitValues)
-            {
-                UStateKeyInputComboBox* ComboBox = WidgetTree->ConstructWidget<UStateKeyInputComboBox>(UStateKeyInputComboBox::StaticClass());
-                ComboBox->KeyName = KeyName;
-                ComboBox->ParentDebugUI = this;
-                ComboBox->InstantBroadcastChange = instantProcess;
-                ComboBox->DataType = EStateKeyDataType::Number;
-                ComboBox->StateKeyInfo = StateKeyInfo;
-                for (double Option : StateKeyInfo.AcceptedNumberValues)
-                {
-                    ComboBox->AddOption(FString::SanitizeFloat(Option));
-                }
+					if (!StateKeyInfo.AcceptedStringValues.Contains(CurrentVal))
+					{
+						ComboBox->AddOption(CurrentVal);
+					}
 
 #if UNREAL_5_3_OR_NEWER
-                ComboBox->SetItemStyle(RowStyle);
+					ComboBox->SetItemStyle(RowStyle);
 #endif
 
-                ComboBox->SetSelectedOption(FString::SanitizeFloat(CurrentVal));
-                ComboBox->OnSelectionChanged.AddDynamic(ComboBox, &UStateKeyInputComboBox::OnComboBoxChanged);
-                InputWidget = ComboBox;
-            }
-            else
-            {
-                UStateKeyInputTextBox* NumberBox = WidgetTree->ConstructWidget<UStateKeyInputTextBox>(UStateKeyInputTextBox::StaticClass());
-                NumberBox->SetText(FText::AsNumber(CurrentVal));
+					ComboBox->SetSelectedOption(CurrentVal);
+					ComboBox->OnSelectionChanged.AddDynamic(ComboBox, &UStateKeyInputComboBox::OnComboBoxChanged);
+					InputWidget = ComboBox;
+				}
+				else
+				{
+					UStateKeyInputTextBox* TextBox = WidgetTree->ConstructWidget<UStateKeyInputTextBox>(UStateKeyInputTextBox::StaticClass());
+					TextBox->SetText(FText::FromString(CurrentVal));
 #if UNREAL_5_3_OR_NEWER
-                NumberBox->WidgetStyle.TextStyle.ColorAndOpacity = BlackColor;
-                NumberBox->WidgetStyle.TextStyle.SetFontSize(16.0f);
+					TextBox->WidgetStyle.TextStyle.ColorAndOpacity = BlackColor;
+					TextBox->WidgetStyle.TextStyle.SetFontSize(16.0f);
 #endif
-                NumberBox->KeyName = KeyName;
-                NumberBox->ParentDebugUI = this;
-                NumberBox->InstantBroadcastChange = instantProcess;
-                NumberBox->DataType = EStateKeyDataType::Number;
-                NumberBox->OnTextCommitted.AddDynamic(NumberBox, &UStateKeyInputTextBox::OnTextValueCommitted);
-                InputWidget = NumberBox;
-            }
+					TextBox->KeyName = KeyName;
+					TextBox->ParentDebugUI = this;
+					TextBox->InstantBroadcastChange = instantProcess;
+					TextBox->DataType = EStateKeyDataType::String;
+					TextBox->OnTextCommitted.AddDynamic(TextBox, &UStateKeyInputTextBox::OnTextValueCommitted);
+					InputWidget = TextBox;
+				}
 
-            UpdateJsonObjectKey<double>(KeyName, CurrentVal, ModifiedStateObject);
-            break;
-        }
-        case EStateKeyDataType::NumberArray:
-        {
-            TArray<double> CurrentVals;
-            if (StateManager)
-                StateManager->GetCurrentStateValue<TArray<double>>(KeyName, CurrentVals, CurrValFound);
+				UpdateJsonObjectKey<FString>(KeyName, CurrentVal, ModifiedStateObject);
+				break;
+			}
+			case EStateKeyDataType::StringArray:
+			{
+				TArray<FString> CurrentVals;
+				if (StateManager)
+					StateManager->GetCurrentStateValue<TArray<FString>>(KeyName, CurrentVals, CurrValFound);
 
-            TArray<double> WorkingArray = CurrValFound ? CurrentVals : StateKeyInfo.DefaultNumberArray;
+				TArray<FString> WorkingArray = CurrValFound ? CurrentVals : StateKeyInfo.DefaultStringArray;
 
-            const int32 NumValues = WorkingArray.Num();
-            const int32 ItemsPerRow = 4;
-            const float InputScale = 0.85f;
-            const float PaddingBetween = 5.f;
+				const int32 NumValues = WorkingArray.Num();
+				const int32 ItemsPerRow = (StateKeyInfo.bLimitValues) ? 2 : 4;
+				const float PaddingBetween = 5.f;
 
-            int GridIdx = 0;
+				int GridIdx = 0;
 
-            for (int32 i = 0; i < NumValues; i += ItemsPerRow) //4 per row seems decent clarity
-            {
-                UHorizontalBox* RowBox = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass());
+				for (int32 i = 0; i < NumValues; i += ItemsPerRow)
+				{
+					UHorizontalBox* RowBox = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass());
 
-                for (int32 j = 0; j < ItemsPerRow && (i + j) < NumValues; ++j)
-                {
-                    const double Value = WorkingArray[i + j];
-                    InputWidget = nullptr;
+					for (int32 j = 0; j < ItemsPerRow && (i + j) < NumValues; ++j)
+					{
+						const FString& Value = WorkingArray[i + j];
+						InputWidget = nullptr;
 
-                    if (StateKeyInfo.bLimitValues)
-                    {
-                        UStateKeyInputComboBox* ComboBox = WidgetTree->ConstructWidget<UStateKeyInputComboBox>(UStateKeyInputComboBox::StaticClass());
-                        ComboBox->KeyName = KeyName + "_INDEX_" + FString::FromInt(i + j);
-                        ComboBox->ParentDebugUI = this;
-                        ComboBox->InstantBroadcastChange = instantProcess;
-                        ComboBox->DataType = EStateKeyDataType::NumberArray;
-                        ComboBox->StateKeyInfo = StateKeyInfo;
-                        for (double Option : StateKeyInfo.AcceptedNumberValues)
-                        {
-                            ComboBox->AddOption(FString::SanitizeFloat(Option));
-                        }
+						if (StateKeyInfo.bLimitValues)
+						{
+							UStateKeyInputComboBox* ComboBox = WidgetTree->ConstructWidget<UStateKeyInputComboBox>(UStateKeyInputComboBox::StaticClass());
+							ComboBox->KeyName = KeyName + "_INDEX_" + FString::FromInt(i + j);
+							ComboBox->ParentDebugUI = this;
+							ComboBox->InstantBroadcastChange = instantProcess;
+							ComboBox->DataType = EStateKeyDataType::StringArray;
+							ComboBox->StateKeyInfo = StateKeyInfo;
+							for (const FString& Option : StateKeyInfo.AcceptedStringValues)
+							{
+								ComboBox->AddOption(Option);
+							}
 
 #if UNREAL_5_3_OR_NEWER
-                        ComboBox->SetItemStyle(RowStyle);
+							ComboBox->SetItemStyle(RowStyle);
 #endif
 
-                        ComboBox->SetSelectedOption(FString::SanitizeFloat(Value));
-                        ComboBox->OnSelectionChanged.AddDynamic(ComboBox, &UStateKeyInputComboBox::OnComboBoxChanged);
-                        InputWidget = ComboBox;
-                    }
-                    else
-                    {
-                        UStateKeyInputTextBox* NumberBox = WidgetTree->ConstructWidget<UStateKeyInputTextBox>(UStateKeyInputTextBox::StaticClass());
-                        NumberBox->SetText(FText::AsNumber(Value));
+							ComboBox->SetSelectedOption(Value);
+							ComboBox->OnSelectionChanged.AddDynamic(ComboBox, &UStateKeyInputComboBox::OnComboBoxChanged);
+							InputWidget = ComboBox;
+						}
+						else
+						{
+							UStateKeyInputTextBox* TextBox = WidgetTree->ConstructWidget<UStateKeyInputTextBox>(UStateKeyInputTextBox::StaticClass());
+							TextBox->SetText(FText::FromString(Value));
 #if UNREAL_5_3_OR_NEWER
-                        NumberBox->WidgetStyle.TextStyle.ColorAndOpacity = BlackColor;
-                        NumberBox->WidgetStyle.TextStyle.SetFontSize(16.0f);
+							TextBox->WidgetStyle.TextStyle.ColorAndOpacity = BlackColor;
+							TextBox->WidgetStyle.TextStyle.SetFontSize(16.0f);
 #endif
-                        NumberBox->KeyName = KeyName + "_INDEX_" + FString::FromInt(i + j);
-                        NumberBox->DataType = EStateKeyDataType::NumberArray;
-                        NumberBox->ParentDebugUI = this;
-                        NumberBox->InstantBroadcastChange = instantProcess;
-                        NumberBox->OnTextCommitted.AddDynamic(NumberBox, &UStateKeyInputTextBox::OnTextValueCommitted);
-                        InputWidget = NumberBox;
-                    }
+							TextBox->KeyName = KeyName + "_INDEX_" + FString::FromInt(i + j);
+							TextBox->ParentDebugUI = this;
+							TextBox->InstantBroadcastChange = instantProcess;
+							TextBox->DataType = EStateKeyDataType::StringArray;
+							TextBox->OnTextCommitted.AddDynamic(TextBox, &UStateKeyInputTextBox::OnTextValueCommitted);
+							InputWidget = TextBox;
+						}
 
-                    if (InputWidget)
-                    {
-                        UHorizontalBoxSlot* ArraySlot = RowBox->AddChildToHorizontalBox(InputWidget);
-                        ArraySlot->SetPadding(FMargin(PaddingBetween, 0.0, 0.0, 0.0));
-                        ArraySlot->SetHorizontalAlignment(HAlign_Fill);
-                        ArraySlot->SetVerticalAlignment(VAlign_Center);
-                    }
-                }
+						if (InputWidget)
+						{
+							UHorizontalBoxSlot* ArraySlot = RowBox->AddChildToHorizontalBox(InputWidget);
+							ArraySlot->SetPadding(FMargin(PaddingBetween, 0.0, 0.0, 0.0));
+							ArraySlot->SetHorizontalAlignment(HAlign_Fill);
+							ArraySlot->SetVerticalAlignment(VAlign_Center);
+						}
+					}
 
-                UGridSlot* InputSlot = RowGrid->AddChildToGrid(RowBox, GridIdx, 1);
-                InputSlot->SetPadding(FMargin(0.f,5.f,5.f,5.f));
-                InputSlot->SetHorizontalAlignment(Alignment);
-                InputSlot->SetVerticalAlignment(VAlign_Center);
-                InputWidget = nullptr;
-                GridIdx++;
-            }
+					UGridSlot* InputSlot = RowGrid->AddChildToGrid(RowBox, GridIdx, 1);
+					InputSlot->SetPadding(FMargin(0.f, 5.f, 5.f, 5.f));
+					InputSlot->SetHorizontalAlignment(Alignment);
+					InputSlot->SetVerticalAlignment(VAlign_Center);
+					InputWidget = nullptr;
+					GridIdx++;
+				}
+				UpdateJsonObjectKey<TArray<FString>>(KeyName, WorkingArray, ModifiedStateObject);
+				break;
+			}
+			case EStateKeyDataType::Number:
+			{
+				double CurrentVal = StateKeyInfo.DefaultNumberValue;
+				if (StateManager)
+					StateManager->GetCurrentStateValue<double>(KeyName, CurrentVal, CurrValFound);
 
-            TArray<TSharedPtr<FJsonValue>> JsonArray;
+				if (StateKeyInfo.bLimitValues)
+				{
+					UStateKeyInputComboBox* ComboBox = WidgetTree->ConstructWidget<UStateKeyInputComboBox>(UStateKeyInputComboBox::StaticClass());
+					ComboBox->KeyName = KeyName;
+					ComboBox->ParentDebugUI = this;
+					ComboBox->InstantBroadcastChange = instantProcess;
+					ComboBox->DataType = EStateKeyDataType::Number;
+					ComboBox->StateKeyInfo = StateKeyInfo;
+					for (double Option : StateKeyInfo.AcceptedNumberValues)
+					{
+						ComboBox->AddOption(FString::SanitizeFloat(Option));
+					}
 
-            for (double Num : WorkingArray)
-            {
-                JsonArray.Add(MakeShared<FJsonValueNumber>(Num));
-            }
-
-            UpdateJsonObjectKey<TArray<double>>(KeyName, WorkingArray, ModifiedStateObject);
-            break;
-        }
-        case EStateKeyDataType::Bool:
-        {
-            bool CurrentVal = StateKeyInfo.DefaultBoolValue;
-            if (StateManager)
-                StateManager->GetCurrentStateValue<bool>(KeyName, CurrentVal, CurrValFound);
-
-            UStateKeyInputCheckBox* CheckBox = WidgetTree->ConstructWidget<UStateKeyInputCheckBox>(UStateKeyInputCheckBox::StaticClass());
-            CheckBox->KeyName = KeyName;
-            CheckBox->ParentDebugUI = this;
-            CheckBox->InstantBroadcastChange = instantProcess;
-            CheckBox->SetIsChecked(CurrentVal);
-            CheckBox->SetRenderTransform(FWidgetTransform(FVector2D(0.f, 0.f), FVector2D(2.0f, 2.0f), FVector2D::ZeroVector, 0.f));
-            CheckBox->OnCheckStateChanged.AddDynamic(CheckBox, &UStateKeyInputCheckBox::OnCheckBoxChanged);
-            // Clone the current style to modify
-            FCheckBoxStyle CheckBoxStyle = CheckBox->GetWidgetStyle();
-
-            CheckBoxStyle.UncheckedImage.TintColor = FSlateColor(FLinearColor(0.05f, 0.05f, 0.05f));
-            CheckBoxStyle.CheckedImage.TintColor = FSlateColor(FLinearColor(0.05f, 0.05f, 0.05f));
-            CheckBoxStyle.UncheckedHoveredImage.TintColor = FSlateColor(FLinearColor::Gray);
-            //CheckBoxStyle.CheckedHoveredImage.TintColor = FSlateColor(FLinearColor(0.75f, 0.75f, 0.75f));
-            CheckBoxStyle.CheckedPressedImage.TintColor = FSlateColor(FLinearColor::White);
 #if UNREAL_5_3_OR_NEWER
-            CheckBox->SetWidgetStyle(CheckBoxStyle);
+					ComboBox->SetItemStyle(RowStyle);
 #endif
-            Alignment = HAlign_Right;
-            InputWidget = CheckBox;
 
-            UpdateJsonObjectKey<bool>(KeyName, CurrentVal, ModifiedStateObject);
-            break;
-        }
-        case EStateKeyDataType::BoolArray:
-        {
-            TArray<bool> CurrentVals;
-            if (StateManager)
-                StateManager->GetCurrentStateValue<TArray<bool>>(KeyName, CurrentVals, CurrValFound);
-
-            TArray<bool> WorkingArray = CurrValFound ? CurrentVals : StateKeyInfo.DefaultBoolArray;
-
-            const int32 NumValues = WorkingArray.Num();
-            const int32 ItemsPerRow = 4;
-            const float PaddingBetween = 20.0f;
-
-            int GridIdx = 0;
-
-            for (int32 i = 0; i < NumValues; i += ItemsPerRow) //4 per row seems decent clarity
-            {
-                UHorizontalBox* RowBox = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass());
-
-                for (int32 j = 0; j < ItemsPerRow && (i + j) < NumValues; ++j)
-                {
-                    bool Value = WorkingArray[i + j];
-                    InputWidget = nullptr;
-
-                    UStateKeyInputCheckBox* CheckBox = WidgetTree->ConstructWidget<UStateKeyInputCheckBox>(UStateKeyInputCheckBox::StaticClass());
-                    CheckBox->KeyName = KeyName + "_INDEX_" + FString::FromInt(i + j);
-                    CheckBox->ParentDebugUI = this;
-                    CheckBox->InstantBroadcastChange = instantProcess;
-                    CheckBox->SetIsChecked(Value);
-                    CheckBox->SetRenderTransform(FWidgetTransform(FVector2D(0.f, 0.f), FVector2D(2.0f, 2.0f), FVector2D::ZeroVector, 0.f));
-                    CheckBox->OnCheckStateChanged.AddDynamic(CheckBox, &UStateKeyInputCheckBox::OnCheckBoxChanged);
-                    FCheckBoxStyle CheckBoxStyle = CheckBox->GetWidgetStyle();
-
-                    CheckBoxStyle.UncheckedImage.TintColor = FSlateColor(FLinearColor(0.05f, 0.05f, 0.05f));
-                    CheckBoxStyle.CheckedImage.TintColor = FSlateColor(FLinearColor(0.05f, 0.05f, 0.05f));
-                    CheckBoxStyle.UncheckedHoveredImage.TintColor = FSlateColor(FLinearColor::Gray);
-                    CheckBoxStyle.CheckedPressedImage.TintColor = FSlateColor(FLinearColor::White);
+					ComboBox->SetSelectedOption(FString::SanitizeFloat(CurrentVal));
+					ComboBox->OnSelectionChanged.AddDynamic(ComboBox, &UStateKeyInputComboBox::OnComboBoxChanged);
+					InputWidget = ComboBox;
+				}
+				else
+				{
+					UStateKeyInputTextBox* NumberBox = WidgetTree->ConstructWidget<UStateKeyInputTextBox>(UStateKeyInputTextBox::StaticClass());
+					NumberBox->SetText(FText::AsNumber(CurrentVal));
 #if UNREAL_5_3_OR_NEWER
-                    CheckBox->SetWidgetStyle(CheckBoxStyle);
+					NumberBox->WidgetStyle.TextStyle.ColorAndOpacity = BlackColor;
+					NumberBox->WidgetStyle.TextStyle.SetFontSize(16.0f);
 #endif
-                    Alignment = HAlign_Right;
-                    InputWidget = CheckBox;
+					NumberBox->KeyName = KeyName;
+					NumberBox->ParentDebugUI = this;
+					NumberBox->InstantBroadcastChange = instantProcess;
+					NumberBox->DataType = EStateKeyDataType::Number;
+					NumberBox->OnTextCommitted.AddDynamic(NumberBox, &UStateKeyInputTextBox::OnTextValueCommitted);
+					InputWidget = NumberBox;
+				}
 
-                    if (InputWidget)
-                    {
-                        UHorizontalBoxSlot* ArraySlot = RowBox->AddChildToHorizontalBox(InputWidget);
-                        ArraySlot->SetPadding(FMargin(PaddingBetween, 0.0, 0.0, 0.0));
-                        ArraySlot->SetHorizontalAlignment(HAlign_Right);
-                        ArraySlot->SetVerticalAlignment(VAlign_Center);
-                    }
-                }
+				UpdateJsonObjectKey<double>(KeyName, CurrentVal, ModifiedStateObject);
+				break;
+			}
+			case EStateKeyDataType::NumberArray:
+			{
+				TArray<double> CurrentVals;
+				if (StateManager)
+					StateManager->GetCurrentStateValue<TArray<double>>(KeyName, CurrentVals, CurrValFound);
 
-                UGridSlot* InputSlot = RowGrid->AddChildToGrid(RowBox, GridIdx, 1);
-                InputSlot->SetPadding(FMargin(20.f,5.f,5.f,5.f));
-                InputSlot->SetHorizontalAlignment(Alignment);
-                InputSlot->SetVerticalAlignment(VAlign_Center);
-                InputWidget = nullptr;
-                GridIdx++;
-            }
+				TArray<double> WorkingArray = CurrValFound ? CurrentVals : StateKeyInfo.DefaultNumberArray;
 
-            TArray<TSharedPtr<FJsonValue>> JsonArray;
+				const int32 NumValues = WorkingArray.Num();
+				const int32 ItemsPerRow = 4;
+				const float PaddingBetween = 5.f;
 
-            for (bool isTicked : WorkingArray)
-            {
-                JsonArray.Add(MakeShared<FJsonValueBoolean>(isTicked));
-            }
+				int GridIdx = 0;
 
-            UpdateJsonObjectKey<TArray<bool>>(KeyName, WorkingArray, ModifiedStateObject);
-            break;
-        }
-        default:
-            break;
-        }
+				for (int32 i = 0; i < NumValues; i += ItemsPerRow)
+				{
+					UHorizontalBox* RowBox = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass());
 
-        // Add input widget to row
-        if (InputWidget)
-        {
-            UGridSlot* InputSlot = RowGrid->AddChildToGrid(InputWidget, 0, 1);
-            InputSlot->SetPadding(FMargin(5.f));
-            InputSlot->SetHorizontalAlignment(Alignment);
-            InputSlot->SetVerticalAlignment(VAlign_Center);
-        }
+					for (int32 j = 0; j < ItemsPerRow && (i + j) < NumValues; ++j)
+					{
+						const double Value = WorkingArray[i + j];
+						InputWidget = nullptr;
 
-        // Add row to main vertical box
-        SchemaOptionsVBox->AddChildToVerticalBox(RowGrid);
-    }
+						if (StateKeyInfo.bLimitValues)
+						{
+							UStateKeyInputComboBox* ComboBox = WidgetTree->ConstructWidget<UStateKeyInputComboBox>(UStateKeyInputComboBox::StaticClass());
+							ComboBox->KeyName = KeyName + "_INDEX_" + FString::FromInt(i + j);
+							ComboBox->ParentDebugUI = this;
+							ComboBox->InstantBroadcastChange = instantProcess;
+							ComboBox->DataType = EStateKeyDataType::NumberArray;
+							ComboBox->StateKeyInfo = StateKeyInfo;
+							for (double Option : StateKeyInfo.AcceptedNumberValues)
+							{
+								ComboBox->AddOption(FString::SanitizeFloat(Option));
+							}
+
+#if UNREAL_5_3_OR_NEWER
+							ComboBox->SetItemStyle(RowStyle);
+#endif
+
+							ComboBox->SetSelectedOption(FString::SanitizeFloat(Value));
+							ComboBox->OnSelectionChanged.AddDynamic(ComboBox, &UStateKeyInputComboBox::OnComboBoxChanged);
+							InputWidget = ComboBox;
+						}
+						else
+						{
+							UStateKeyInputTextBox* NumberBox = WidgetTree->ConstructWidget<UStateKeyInputTextBox>(UStateKeyInputTextBox::StaticClass());
+							NumberBox->SetText(FText::AsNumber(Value));
+#if UNREAL_5_3_OR_NEWER
+							NumberBox->WidgetStyle.TextStyle.ColorAndOpacity = BlackColor;
+							NumberBox->WidgetStyle.TextStyle.SetFontSize(16.0f);
+#endif
+							NumberBox->KeyName = KeyName + "_INDEX_" + FString::FromInt(i + j);
+							NumberBox->DataType = EStateKeyDataType::NumberArray;
+							NumberBox->ParentDebugUI = this;
+							NumberBox->InstantBroadcastChange = instantProcess;
+							NumberBox->OnTextCommitted.AddDynamic(NumberBox, &UStateKeyInputTextBox::OnTextValueCommitted);
+							InputWidget = NumberBox;
+						}
+
+						if (InputWidget)
+						{
+							UHorizontalBoxSlot* ArraySlot = RowBox->AddChildToHorizontalBox(InputWidget);
+							ArraySlot->SetPadding(FMargin(PaddingBetween, 0.0, 0.0, 0.0));
+							ArraySlot->SetHorizontalAlignment(HAlign_Fill);
+							ArraySlot->SetVerticalAlignment(VAlign_Center);
+						}
+					}
+
+					UGridSlot* InputSlot = RowGrid->AddChildToGrid(RowBox, GridIdx, 1);
+					InputSlot->SetPadding(FMargin(0.f, 5.f, 5.f, 5.f));
+					InputSlot->SetHorizontalAlignment(Alignment);
+					InputSlot->SetVerticalAlignment(VAlign_Center);
+					InputWidget = nullptr;
+					GridIdx++;
+				}
+
+				UpdateJsonObjectKey<TArray<double>>(KeyName, WorkingArray, ModifiedStateObject);
+				break;
+			}
+			case EStateKeyDataType::Bool:
+			{
+				bool CurrentVal = StateKeyInfo.DefaultBoolValue;
+				if (StateManager)
+					StateManager->GetCurrentStateValue<bool>(KeyName, CurrentVal, CurrValFound);
+
+				UStateKeyInputCheckBox* CheckBox = WidgetTree->ConstructWidget<UStateKeyInputCheckBox>(UStateKeyInputCheckBox::StaticClass());
+				CheckBox->KeyName = KeyName;
+				CheckBox->ParentDebugUI = this;
+				CheckBox->InstantBroadcastChange = instantProcess;
+				CheckBox->SetIsChecked(CurrentVal);
+				CheckBox->SetRenderTransform(FWidgetTransform(FVector2D(0.f, 0.f), FVector2D(2.0f, 2.0f), FVector2D::ZeroVector, 0.f));
+				CheckBox->OnCheckStateChanged.AddDynamic(CheckBox, &UStateKeyInputCheckBox::OnCheckBoxChanged);
+				FCheckBoxStyle CheckBoxStyle = CheckBox->GetWidgetStyle();
+
+				CheckBoxStyle.UncheckedImage.TintColor = FSlateColor(FLinearColor(0.05f, 0.05f, 0.05f));
+				CheckBoxStyle.CheckedImage.TintColor = FSlateColor(FLinearColor(0.05f, 0.05f, 0.05f));
+				CheckBoxStyle.UncheckedHoveredImage.TintColor = FSlateColor(FLinearColor::Gray);
+				CheckBoxStyle.CheckedPressedImage.TintColor = FSlateColor(FLinearColor::White);
+#if UNREAL_5_3_OR_NEWER
+				CheckBox->SetWidgetStyle(CheckBoxStyle);
+#endif
+				Alignment = HAlign_Right;
+				InputWidget = CheckBox;
+
+				UpdateJsonObjectKey<bool>(KeyName, CurrentVal, ModifiedStateObject);
+				break;
+			}
+			case EStateKeyDataType::BoolArray:
+			{
+				TArray<bool> CurrentVals;
+				if (StateManager)
+					StateManager->GetCurrentStateValue<TArray<bool>>(KeyName, CurrentVals, CurrValFound);
+
+				TArray<bool> WorkingArray = CurrValFound ? CurrentVals : StateKeyInfo.DefaultBoolArray;
+
+				const int32 NumValues = WorkingArray.Num();
+				const int32 ItemsPerRow = 4;
+				const float PaddingBetween = 20.0f;
+
+				int GridIdx = 0;
+
+				for (int32 i = 0; i < NumValues; i += ItemsPerRow)
+				{
+					UHorizontalBox* RowBox = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass());
+
+					for (int32 j = 0; j < ItemsPerRow && (i + j) < NumValues; ++j)
+					{
+						bool Value = WorkingArray[i + j];
+						InputWidget = nullptr;
+
+						UStateKeyInputCheckBox* CheckBox = WidgetTree->ConstructWidget<UStateKeyInputCheckBox>(UStateKeyInputCheckBox::StaticClass());
+						CheckBox->KeyName = KeyName + "_INDEX_" + FString::FromInt(i + j);
+						CheckBox->ParentDebugUI = this;
+						CheckBox->InstantBroadcastChange = instantProcess;
+						CheckBox->SetIsChecked(Value);
+						CheckBox->SetRenderTransform(FWidgetTransform(FVector2D(0.f, 0.f), FVector2D(2.0f, 2.0f), FVector2D::ZeroVector, 0.f));
+						CheckBox->OnCheckStateChanged.AddDynamic(CheckBox, &UStateKeyInputCheckBox::OnCheckBoxChanged);
+						FCheckBoxStyle CheckBoxStyle = CheckBox->GetWidgetStyle();
+
+						CheckBoxStyle.UncheckedImage.TintColor = FSlateColor(FLinearColor(0.05f, 0.05f, 0.05f));
+						CheckBoxStyle.CheckedImage.TintColor = FSlateColor(FLinearColor(0.05f, 0.05f, 0.05f));
+						CheckBoxStyle.UncheckedHoveredImage.TintColor = FSlateColor(FLinearColor::Gray);
+						CheckBoxStyle.CheckedPressedImage.TintColor = FSlateColor(FLinearColor::White);
+#if UNREAL_5_3_OR_NEWER
+						CheckBox->SetWidgetStyle(CheckBoxStyle);
+#endif
+						Alignment = HAlign_Right;
+						InputWidget = CheckBox;
+
+						if (InputWidget)
+						{
+							UHorizontalBoxSlot* ArraySlot = RowBox->AddChildToHorizontalBox(InputWidget);
+							ArraySlot->SetPadding(FMargin(PaddingBetween, 0.0, 0.0, 0.0));
+							ArraySlot->SetHorizontalAlignment(HAlign_Right);
+							ArraySlot->SetVerticalAlignment(VAlign_Center);
+						}
+					}
+
+					UGridSlot* InputSlot = RowGrid->AddChildToGrid(RowBox, GridIdx, 1);
+					InputSlot->SetPadding(FMargin(20.f, 5.f, 5.f, 5.f));
+					InputSlot->SetHorizontalAlignment(Alignment);
+					InputSlot->SetVerticalAlignment(VAlign_Center);
+					InputWidget = nullptr;
+					GridIdx++;
+				}
+
+				UpdateJsonObjectKey<TArray<bool>>(KeyName, WorkingArray, ModifiedStateObject);
+				break;
+			}
+			default:
+				break;
+			}
+
+			if (InputWidget)
+			{
+				UGridSlot* InputSlot = RowGrid->AddChildToGrid(InputWidget, 0, 1);
+				InputSlot->SetPadding(FMargin(5.f));
+				InputSlot->SetHorizontalAlignment(Alignment);
+				InputSlot->SetVerticalAlignment(VAlign_Center);
+			}
+
+			ParentBox->AddChildToVerticalBox(RowGrid);
+		}
+	}
 }

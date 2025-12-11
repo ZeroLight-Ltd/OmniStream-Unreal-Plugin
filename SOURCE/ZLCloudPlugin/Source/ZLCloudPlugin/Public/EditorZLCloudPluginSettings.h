@@ -92,7 +92,7 @@ public:
 	 * When a state request is processing for more than the specified value (in seconds) the request times out and reports a timeout to the web
 	 */
 	UPROPERTY(config, EditAnywhere, Category = Cloud)
-	float stateRequestTimeout = 30.0;
+	float stateRequestTimeout = 20.0;
 
 	/**
 	 * Project override for the number of frames waited before capturing content generation screenshot jobs after state is matched. If set to 0, plugin defaults are used (8 frames by default, 32 frames by default for projects with r.RayTracing enabled.)
@@ -154,6 +154,12 @@ public:
 	*/
 	UPROPERTY(config, EditAnywhere, Category = "Thumbnail", meta = (FilePathFilter = "Image Files (*.jpg, *.png, *.jpeg)|*.jpg;*.png;*.jpeg"))
 	FFilePath thumbnailImagePath;
+
+	/**
+	 * Enables beta + experimental features in OmniStream
+	 */
+	UPROPERTY(config, EditAnywhere, Category = Experimental)
+	bool showExperimentalFeatures = false;
 
 	FString GetDeployName()
 	{
@@ -254,7 +260,7 @@ public:
 			{
 				FFilePath* imageFilePath = static_cast<FFilePath*>(RawDataPtrs[0]);
 
-				FString thumbnailImagePath = imageFilePath->FilePath;
+				FString thumbnailImagePath = FPaths::Combine(FPaths::ProjectDir(), imageFilePath->FilePath);
 
 				if (thumbnailImagePath == lastLoadedThumbnailPath)
 				{

@@ -17,7 +17,11 @@ public:
 	virtual ~FZLCloudPluginVideoInputRHI() = default;
 
 protected:
+#if UNREAL_5_7_OR_NEWER
+	virtual TSharedPtr<FPixelCaptureCapturer> CreateCapturer(int32 FinalFormat, FIntPoint OutputResolution) override;
+#else
 	virtual TSharedPtr<FPixelCaptureCapturer> CreateCapturer(int32 FinalFormat, float FinalScale) override;
+#endif
 };
 
 #endif

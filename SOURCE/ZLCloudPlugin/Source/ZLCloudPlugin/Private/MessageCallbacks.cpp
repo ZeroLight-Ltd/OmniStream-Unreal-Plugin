@@ -8,6 +8,7 @@
 #include "ZLCloudPluginStateManager.h"
 #include "ZLScreenshot.h"
 #include "ZLCloudPluginModule.h"
+#include "ZLJobTrace.h"
 #include "ZLSpotLightDataDrivenUIManager.h"
 #if WITH_EDITOR
 #include "EditorZLCloudPluginSettings.h"
@@ -29,6 +30,10 @@ void MessageCallbacks::RegisterCallbacks(LauncherComms* launcherComms)
 	m_LauncherComms->RegisterMessageCallback(TEXT("CLOUDSTREAMSETTINGS"), &CloudStreamSettings);
 	m_LauncherComms->RegisterMessageCallback(TEXT("CLOUD_CONNECTED"), &CloudStreamConnected);
 	m_LauncherComms->RegisterMessageCallback(TEXT("CAPTUREIMAGE"), &CaptureScreenshot);
+	m_LauncherComms->RegisterMessageCallback(TEXT("START_VE_JOBTRACE"), &StartCaptureTrace);
+	m_LauncherComms->RegisterMessageCallback(TEXT("END_VE_JOBTRACE"), &EndCaptureTrace);
+
+
 	m_LauncherComms->RegisterMessageCallback(TEXT("SETINITIALSTATE"), &SetConnectState);
 	m_LauncherComms->RegisterMessageCallback(TEXT("SET2DODMODE"), &SetOnDemandProcessingState);
 	m_LauncherComms->RegisterMessageCallback(TEXT("OMNISTREAM_SETTINGS"), &SetOmnistreamSettings);
@@ -315,6 +320,23 @@ void MessageCallbacks::CaptureScreenshot(MessageWithData* msg)
 	{
 		msg->SetReply("IMAGE_REQUEST_ERROR", FString::Printf(TEXT("{\"error\":\"%s\"}"), *requestErrorMsg));
 	}
+}
+
+void MessageCallbacks::StartCaptureTrace(MessageWithData* msg)
+{
+	UE_LOG(LogZLCloudPlugin, Display, TEXT("MessageCallbacks::StartCaptureTrace"));
+
+	ZLJobTrace::ON_START_JOBTRACE(msg->m_messageData);
+
+	msg->SetReply("VE_JOBTRACE_STARTED");
+}
+
+void MessageCallbacks::EndCaptureTrace(MessageWithData* msg)
+{
+	UE_LOG(LogZLCloudPlugin, Display, TEXT("MessageCallbacks::EndCaptureTrace"));
+
+	FString JobTraceDataJson = ZLJobTrace::ON_END_JOBTRACE(msg->m_messageData);
+	msg->SetReply("RETURN_VE_JOBTRACE_DATA", JobTraceDataJson);
 }
 
 void MessageCallbacks::SetConnectState(MessageWithData* msg)

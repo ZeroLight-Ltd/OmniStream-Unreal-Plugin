@@ -40,7 +40,9 @@ namespace ZLCloudPluginUtils
 			TextureDesc.AddFlags(ETextureCreateFlags::Shared);
 		}
 
-#if UNREAL_5_4_OR_NEWER
+#if UNREAL_5_7_OR_NEWER
+		return RHICreateTexture(TextureDesc);
+#elif UNREAL_5_4_OR_NEWER
 		return GDynamicRHI->RHICreateTexture(FRHICommandListExecutor::GetImmediateCommandList(), TextureDesc);
 #else
 		return GDynamicRHI->RHICreateTexture(TextureDesc);
@@ -75,7 +77,7 @@ namespace ZLCloudPluginUtils
 
 			// source and destination are different. rendered copy
 			FRHIRenderPassInfo RPInfo(DestTexture, ERenderTargetActions::Load_Store);
-			RHICmdList.BeginRenderPass(RPInfo, TEXT("PixelStreaming::CopyTexture"));
+			RHICmdList.BeginRenderPass(RPInfo, TEXT("ZLCloudPlugin::CopyTexture"));
 			{
 				FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
 				TShaderMapRef<FScreenVS> VertexShader(ShaderMap);

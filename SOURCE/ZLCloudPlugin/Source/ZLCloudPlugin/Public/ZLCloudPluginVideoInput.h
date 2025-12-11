@@ -34,7 +34,11 @@ public:
 	/**
 	 * 
 	 */
+#if UNREAL_5_7_OR_NEWER
+	TSharedPtr<IPixelCaptureOutputFrame> RequestFormat(int32 Format, TOptional<FIntPoint> Resolution = TOptional<FIntPoint>());
+#else
 	TSharedPtr<IPixelCaptureOutputFrame> RequestFormat(int32 Format, int32 LayerIndex = -1);
+#endif
 
 	/**
 	 * This is broadcast each time a frame exits the adapt process. Used to synchronize framerates with input rates.

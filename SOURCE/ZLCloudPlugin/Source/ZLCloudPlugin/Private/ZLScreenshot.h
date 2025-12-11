@@ -5,15 +5,23 @@
 #include "CoreFwd.h"
 #include "ZLStopwatch.h"
 #include "GenericPlatform/GenericPlatformProcess.h"
+#include "IImageWrapper.h"
+#include "IImageWrapperModule.h"
+#include "Misc/FileHelper.h"
 #include "ZLCloudPluginApplicationWrapper.h"
 #include "ZLCloudPluginInputHandler.h"
+#include "MoviePipelineExecutor.h"
 #include "InputDevice.h"
 #include <fstream>
 #include <vector>
 #include <string>
 #include "ZLCloudPluginDelegates.h"
+#include "ZLCloudPluginVersion.h"
 
 class LauncherComms;
+class UZLCloudPluginStateManager;
+
+
 namespace ZLCloudPlugin
 {
 	enum ScreenshotType
@@ -37,13 +45,18 @@ namespace ZLCloudPlugin
 		FString format;
 		FString path;
 		FString uid;
+		bool useMRQPipeline = false;
+		TArray<FString> cVarOverrides;
 		TSharedPtr<FJsonObject> stateData = nullptr;
 		bool stateRequestSent = false;
 		double jobStartTime = 0.0f;
 		double captureStartTime = 0.0f;
+		bool needsCameraPostprocessAdjustmentPerFace = false;
+
 
 		ScreenshotType type = ScreenshotType::DEFAULT2D;
 		int32 faceID = -1;
+		int32 lastFaceCompletedID = -1;
 
 		TSharedPtr<FJsonObject> postJobCurrentState = nullptr;
 		TSharedPtr<FJsonObject> postJobTimeoutState = nullptr;
@@ -51,6 +64,8 @@ namespace ZLCloudPlugin
 		bool jobStateRequestFinished = false;
 		bool jobStateRequestSuccess = false;
 		bool jobCaptureStarted = false;
+
+		TObjectPtr<UMoviePipelineExecutorJob> ActiveRenderJob;
 	};
 
 	class ZLScreenshot
@@ -81,10 +96,26 @@ namespace ZLCloudPlugin
 		void SetCurrentRenderStateData(TSharedPtr<FJsonObject> currentState, TSharedPtr<FJsonObject> timeoutState = nullptr, TSharedPtr<FJsonObject> unmatchedState = nullptr);
 		inline bool HasCurrentRender() { return m_CurrentRender.IsValid(); }
 		void Set2DODMode(bool is2DOD);
+		bool LoadImageAsFColorArray(const FString& ImagePath, TArray<FColor>& OutColorData, int32& OutWidth, int32& OutHeight);
+
+#if UNREAL_5_3_OR_NEWER
+		void OnMoviePipelineFinished(FMoviePipelineOutputData Results);
+#endif
 
 	private:
 		void OnScreenshotComplete(int32 InSizeX, int32 InSizeY, const TArray<FColor>& InImageData);
+
 		void SendImageFailureResponse(FString& errorMsg);
+
+		void PauseGameTime();
+		void ResumeGameTime();
+
+		bool s_rejectUnmatchedStateJobs = false;
+
+		float m_cacheTimeDilation = 1.0f;
+
+		ACameraActor* CameraActor = nullptr;
+		bool bCreatedCamera = false;
 
 		TSharedPtr<ZLScreenshotJob> m_NextRender;
 		TSharedPtr<ZLScreenshotJob> m_CurrentRender;

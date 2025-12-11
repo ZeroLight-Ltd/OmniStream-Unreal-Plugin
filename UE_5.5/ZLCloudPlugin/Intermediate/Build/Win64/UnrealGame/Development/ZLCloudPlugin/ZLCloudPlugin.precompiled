@@ -31,6 +31,7 @@
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLCloudPluginVideoInputRHI.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLCloudPluginVideoInputViewport.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLDebugUIWidget.cpp.obj",
+		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLJobTrace.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLScreenshot.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLSpotLightCameraComponent.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLSpotLightDataDrivenUIManager.cpp.obj",

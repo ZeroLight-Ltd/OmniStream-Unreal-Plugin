@@ -356,12 +356,15 @@ void ZLCloudPlugin::FZLCloudPluginModule::StartupModule()
 
 		FConfigFile ConfigFile;
 		ConfigFile.Read(NormalizedIniPath);
-
+#if UNREAL_5_7_OR_NEWER
+		const FConfigSection* Section = ConfigFile.FindOrAddConfigSection(SectionName);
+#else
 		FConfigSection* Section = ConfigFile.Find(SectionName);
 		if (!Section)
 		{
 			Section = &ConfigFile.Add(SectionName, FConfigSection());
 		}
+#endif
 
 		bool bAlreadyExists = false;
 		for (const auto& Pair : *Section)
@@ -389,6 +392,13 @@ void ZLCloudPlugin::FZLCloudPluginModule::StartupModule()
 		bool IsPortalUpload = true;
 
 		FString CommandLine(FCommandLine::Get());
+
+		FString DbgSymbolPrefix(TEXT("-keepDebugSymbols"));
+		int32 DbgSymbolIndex = CommandLine.Find(DbgSymbolPrefix);
+		if (DbgSymbolIndex != INDEX_NONE)
+		{
+			MainButton->s_removeDebugSymbols = false;
+		}
 
 		FString Prefix(TEXT("-omnistreamBuildAndDeploy"));
 		int32 Index = CommandLine.Find(Prefix);
@@ -885,7 +895,8 @@ void ZLCloudPlugin::FZLCloudPluginModule::Tick(float DeltaTime)
 			Delegates->OnConnectedStream.Broadcast();
 		}
 
-		UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->SendCurrentStateToWeb(true);
+		UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->SendCurrentStateToWeb(true, UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->GetServerUnmatchedNotifyState());
+		UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->ResetServerUnmatchedNotifyState();
 
 		m_connectionState = connectedState::CONNECTED;
 	}

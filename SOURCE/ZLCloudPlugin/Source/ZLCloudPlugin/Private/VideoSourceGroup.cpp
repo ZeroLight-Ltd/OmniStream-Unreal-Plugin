@@ -133,14 +133,29 @@ namespace ZLCloudPlugin
 		{
 			Tick();
 		}
+#if UNREAL_5_7_OR_NEWER
+		else
+		{
+			// We are in decoupled render/streaming mode - we should wake our VideoSourceGroup::FFrameThread (if it is sleeping)
+			if(FrameRunnable && FrameRunnable->FrameEvent.Get())
+			{
+				FrameRunnable->FrameEvent.Get()->Trigger();
+			}
+		}
+#endif
 	}
 
 	void FVideoSourceGroup::StartThread()
 	{
 		if (!bCoupleFramerate && !bThreadRunning)
 		{
+#if UNREAL_5_7_OR_NEWER
+			FrameRunnable = MakeUnique<FFrameThread>(AsWeak());
+			FrameThread = FRunnableThread::Create(FrameRunnable.Get(), TEXT("FVideoSourceGroup Thread"), 0, TPri_TimeCritical);
+#else
 			FrameRunnable = MakeUnique<FFrameThread>(this);
-			FrameThread = FRunnableThread::Create(FrameRunnable.Get(), TEXT("FVideoSourceGroup Thread"));
+			FrameThread = FRunnableThread::Create(FrameRunnable.Get(), TEXT("FVideoSourceGroup Thread"));	
+#endif
 			bThreadRunning = true;
 		}
 	}
@@ -182,6 +197,42 @@ namespace ZLCloudPlugin
 
 		while (bIsRunning)
 		{
+#if UNREAL_5_7_OR_NEWER
+			if(TSharedPtr<FVideoSourceGroup> VideoSourceGroup = OuterVideoSourceGroup.Pin())
+			{
+				const double TimeSinceLastSubmitMs = FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - LastSubmitCycles);
+
+				// Decrease this value to make expected frame delivery more precise, however may result in more old frames being sent
+				const double PrecisionFactor = 0.1;
+				// ZL: Using a default wait factor since we don't have the PixelStreaming CVar
+				const double WaitFactor = 1.0;
+
+				// In "auto" mode vary this value based on historical average
+				const double TargetSubmitMs = 1000.0 / VideoSourceGroup->FramesPerSecond;
+				const double TargetSubmitMsWithPadding = TargetSubmitMs * WaitFactor;
+				const double CloseEnoughMs = TargetSubmitMs * PrecisionFactor;
+				const bool bFrameOverdue = TimeSinceLastSubmitMs >= TargetSubmitMsWithPadding;
+
+				// Check frame arrived in time
+				if(!bFrameOverdue)
+				{
+					// Frame arrived in a timely fashion, but is it too soon to maintain our target rate? If so, sleep.
+					double WaitTimeRemainingMs = TargetSubmitMsWithPadding - TimeSinceLastSubmitMs;
+					if(WaitTimeRemainingMs > CloseEnoughMs)
+					{
+						bool bGotNewFrame = FrameEvent.Get()->Wait(WaitTimeRemainingMs);
+						if(!bGotNewFrame)
+						{
+							UE_LOG(LogZLCloudPlugin, VeryVerbose, TEXT("Old frame submitted"));
+						}
+					}
+				}
+
+				// Push frame immediately
+				PushFrame(VideoSourceGroup);
+
+			}
+#else
 			uint64 PreTickCycles = FPlatformTime::Cycles64();
 
 			PushFrame();
@@ -196,8 +247,9 @@ namespace ZLCloudPlugin
 			{
 				FPlatformProcess::Sleep(static_cast<float>(SleepMs / 1000.0));
 			}
+#endif
 		}
-
+		
 		return 0;
 	}
 
@@ -210,6 +262,42 @@ namespace ZLCloudPlugin
 	{
 		bIsRunning = false;
 	}
+
+#if UNREAL_5_7_OR_NEWER
+
+	/*
+	* Note this function is required as part of `FSingleThreadRunnable` and only gets called when engine is run in single-threaded mode, 
+	* so the logic is much less complex as this is not a case we particularly optimize for, a simple tick on an interval will be acceptable.
+	*/
+	void FVideoSourceGroup::FFrameThread::Tick()
+	{
+		if(TSharedPtr<FVideoSourceGroup> VideoSourceGroup = OuterVideoSourceGroup.Pin())
+		{
+			const uint64 NowCycles = FPlatformTime::Cycles64();
+			const double DeltaMs = FPlatformTime::ToMilliseconds64(NowCycles - LastSubmitCycles);
+			const double TargetSubmitMs = 1000.0 / VideoSourceGroup->FramesPerSecond;
+			if (DeltaMs >= TargetSubmitMs)
+			{
+				PushFrame(VideoSourceGroup);
+			}
+		}
+	}
+
+	void FVideoSourceGroup::FFrameThread::PushFrame(TSharedPtr<FVideoSourceGroup> VideoSourceGroup)
+	{
+		VideoSourceGroup->Tick();
+		LastSubmitCycles = FPlatformTime::Cycles64();
+	}
+
+	double FVideoSourceGroup::FFrameThread::CalculateSleepOffsetMs(double TargetSubmitMs, uint64 LastCaptureCycles, uint64 CyclesBetweenCaptures, bool& bResetOffset) const
+	{
+		// This method is defined for API compatibility but not currently used in the Run() method
+		// It could be used for more advanced timing adjustments in the future
+		bResetOffset = false;
+		return 0.0;
+	}
+	
+#else
 
 	void FVideoSourceGroup::FFrameThread::Tick()
 	{
@@ -227,6 +315,8 @@ namespace ZLCloudPlugin
 		TickGroup->Tick();
 		LastTickCycles = FPlatformTime::Cycles64();
 	}
+		
+#endif
 } // namespace ZLCloudPlugin
 
 #endif

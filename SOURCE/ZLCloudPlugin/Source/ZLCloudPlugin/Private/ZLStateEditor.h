@@ -25,7 +25,22 @@
 #include "Framework/Application/SlateApplication.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 
+#endif
+
+#include "ZLStateEditor.generated.h"
+
 DECLARE_LOG_CATEGORY_EXTERN(LogZLStateEditor, Log, All);
+
+UENUM(BlueprintType)
+enum class EAutoPopulateType : uint8
+{
+    Locations,
+    Animations,
+    Cameras,
+    ZLNodes
+};
+
+#if WITH_EDITOR
 
 class StateKeyInfo
 {
@@ -36,6 +51,8 @@ public:
     TArray<TSharedPtr<FJsonValue>> acceptedValues = TArray<TSharedPtr<FJsonValue>>();
 
     TArray<TSharedPtr<FJsonValue>> defaultValueArray = TArray<TSharedPtr<FJsonValue>>();
+
+    bool ignoredInDataHash = false;
 
     inline void ResetDefaultValue()
     {
@@ -87,6 +104,7 @@ public:
     void Construct(const FArguments& InArgs);
     void SaveAssetFromMap();
     void LoadFromUAsset();
+    void LoadFromJsonSchema(TSharedPtr<FJsonObject> Schema);
 
 protected:
 	TSharedPtr<SMultiLineEditableTextBox> JsonTextBox;
@@ -100,6 +118,8 @@ protected:
     void UpdateJsonData(const FString& JsonString);
     void UpdateJsonStr();
     void GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObject, const FString& Prefix, const bool SetActiveObject = true);
+    void AutoPopulateSchema(TArray<EAutoPopulateType> PopFlags);
+    TArray<EAutoPopulateType> GetAutoPopulateTypeSelection() { return SelectedAutoPopulateOptions; }
     TMap<FString, FStateKeyInfo> ConvertToSerializableMap(const TMap<FString, StateKeyInfo>& StateKeyInfoMap);
     TMap<FString, StateKeyInfo> ConvertToEditorMap(const TMap<FString, FStateKeyInfo>& SavedAsset, TSharedPtr<FJsonObject>& OutJsonObject);
     inline static TArray<TSharedPtr<FString>> s_DataTypes = { MakeShared<FString>("String"), MakeShared<FString>("Number"), MakeShared<FString>("Bool"), MakeShared<FString>("StringArray"), MakeShared<FString>("NumberArray"), MakeShared<FString>("BoolArray") };
@@ -109,6 +129,25 @@ protected:
     inline static TMap<FString, StateKeyInfo> keyInfos;
     FString newKeyStr = "";
     FString lastOpenSchemaAssetPath = "";
+
+    TArray<TSharedPtr<EAutoPopulateType>> AutoPopulateOptions;
+    TArray<EAutoPopulateType> SelectedAutoPopulateOptions;
+
+    void PopulateAutoPopulateOptions()
+    {
+        AutoPopulateOptions.Empty();
+        for (int32 i = 0; i < StaticEnum<EAutoPopulateType>()->NumEnums() - 1; ++i)
+        {
+            AutoPopulateOptions.Add(MakeShared<EAutoPopulateType>(static_cast<EAutoPopulateType>(i)));
+            SelectedAutoPopulateOptions.Add(*AutoPopulateOptions[i]);
+        }
+    }
+
+    FText GetAutoPopulateTypeAsText(TSharedPtr<EAutoPopulateType> InOption) const
+    {
+        FString Name = StaticEnum<EAutoPopulateType>()->GetNameStringByValue(static_cast<int64>(*InOption));
+        return FText::FromString(Name);
+    }
 
     inline static FString s_currentJsonStr = "{\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n}";
 };

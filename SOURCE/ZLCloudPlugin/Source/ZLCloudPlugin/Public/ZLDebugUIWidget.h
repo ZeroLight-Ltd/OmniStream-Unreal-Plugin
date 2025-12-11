@@ -16,8 +16,11 @@
 #include "Components/CheckBox.h"
 #include "Components/Slider.h"
 #include "Components/HorizontalBoxSlot.h"
-//#include "Styling/SlateTypes.h"
-//#include "Brushes/SlateColorBrush.h"
+#include "Components/VerticalBoxSlot.h"
+#include "Components/SizeBox.h"
+#include "Components/Image.h"
+#include "Styling/SlateTypes.h"
+#include "Brushes/SlateColorBrush.h"
 #include "ZLStateKeyInfo.h"
 #include "ZLDebugUIWidget.generated.h"
 
@@ -207,6 +210,11 @@ public:
 		RebuildDebugUI();
 	}
 
+	inline void TriggerRefreshUI()
+	{
+		RebuildDebugUI();
+	}
+
 	UPROPERTY(meta = (BindWidget))
 	UCheckBox* InstantChangeToggle;
 
@@ -215,8 +223,11 @@ public:
 
 	TSharedPtr<FJsonObject> ModifiedStateObject = MakeShared<FJsonObject>();
 
+	TSet<FString> ExpandedFoldouts;
+
 protected:
 	virtual void NativeConstruct() override;
+	virtual void NativeDestruct() override;
 
 	UFUNCTION()
 	void OnSubmitStateInstantBoxChanged(bool bIsChecked);
@@ -228,6 +239,10 @@ protected:
 	void OnRemoveArrayEntry(UWidget* EntryToRemove);
 
 	void RebuildDebugUI();
+	void RebuildDebugUIWithNesting();
+
+	UPROPERTY()
+	TArray<TObjectPtr<UObject>> FoldoutHelpers;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Schema", meta = (BindWidget))
 	TObjectPtr<UTextBlock> SchemaTitle;
@@ -238,4 +253,43 @@ protected:
 	UStateKeyInfoAsset* TargetSchema = nullptr;
 
 	bool instantProcess = true;
+};
+
+UCLASS()
+class UFoldoutHelper : public UObject
+{
+	GENERATED_BODY()
+public:
+	UPROPERTY()
+	TObjectPtr<UVerticalBox> SectionContent;
+
+	UPROPERTY()
+	TObjectPtr<UTextBlock> ArrowText;
+
+	UPROPERTY()
+	TObjectPtr<UZLDebugUIWidget> ParentWidget;
+
+	FString FoldoutPath;
+
+	UFUNCTION()
+	void ToggleVisibility()
+	{
+		if (SectionContent && ArrowText && ParentWidget)
+		{
+			const bool bIsVisible = SectionContent->GetVisibility() == ESlateVisibility::Visible;
+			SectionContent->SetVisibility(bIsVisible ? ESlateVisibility::Collapsed : ESlateVisibility::Visible);
+			ArrowText->SetText(FText::FromString(bIsVisible ? 
+				TEXT(" >																																") : 
+				TEXT(" v																																")));
+
+			if (bIsVisible)
+			{
+				ParentWidget->ExpandedFoldouts.Remove(FoldoutPath);
+			}
+			else
+			{
+				ParentWidget->ExpandedFoldouts.Add(FoldoutPath);
+			}
+		}
+	}
 };

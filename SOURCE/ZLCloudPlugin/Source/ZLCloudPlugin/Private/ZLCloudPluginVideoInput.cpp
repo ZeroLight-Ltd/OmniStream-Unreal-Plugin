@@ -27,12 +27,27 @@ void FZLCloudPluginVideoInput::OnFrame(const IPixelCaptureInputFrame& InputFrame
 	}
 
 	Ready = true;
-	FrameCapturer->Capture(InputFrame);
+	
 	LastFrameWidth = InputFrame.GetWidth();
 	LastFrameHeight = InputFrame.GetHeight();
+
+	FrameCapturer->Capture(InputFrame);
 }
 
-
+#if UNREAL_5_7_OR_NEWER
+TSharedPtr<IPixelCaptureOutputFrame> FZLCloudPluginVideoInput::RequestFormat(int32 Format, TOptional<FIntPoint> Resolution)
+{
+	if (FrameCapturer != nullptr)
+	{
+		if (!Resolution.IsSet())
+		{
+			Resolution = { LastFrameWidth, LastFrameHeight };
+		}
+		return FrameCapturer->RequestFormat(Format, *Resolution);
+	}
+	return nullptr;
+}
+#else
 TSharedPtr<IPixelCaptureOutputFrame> FZLCloudPluginVideoInput::RequestFormat(int32 Format, int32 LayerIndex)
 {
 	if (FrameCapturer != nullptr)
@@ -41,6 +56,7 @@ TSharedPtr<IPixelCaptureOutputFrame> FZLCloudPluginVideoInput::RequestFormat(int
 	}
 	return nullptr;
 }
+#endif
 
 void FZLCloudPluginVideoInput::CreateFrameCapturer()
 {

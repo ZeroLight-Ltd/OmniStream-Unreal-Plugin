@@ -1,7 +1,7 @@
 {
     "FileVersion": 3,
-    "Version": 138,
-    "VersionName": "1.0.138",
+    "Version": 174,
+    "VersionName": "1.0.174",
     "FriendlyName": "ZeroLight OmniStream Plugin",
     "Description": "Cloud Streaming plugin used to stream real-time content from the cloud",
     "Category": "Cloud",
@@ -20,7 +20,8 @@
         "5.3",
         "5.4",
         "5.5",
-        "5.6"
+        "5.6",
+        "5.7"
     ],
     "WhitelistPlatforms": [
         "Win64"
@@ -46,6 +47,10 @@
     "Plugins": [
         {
             "Name": "PixelCapture",
+            "Enabled": true
+        },
+        {
+            "Name": "MovieRenderPipeline",
             "Enabled": true
         }
     ]

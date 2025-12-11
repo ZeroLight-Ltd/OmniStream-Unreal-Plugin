@@ -12,6 +12,10 @@
 #include "VideoSource.h"
 #include "ZLCloudpluginVideoInput.h"
 
+#if UNREAL_5_7_OR_NEWER
+#include "HAL/Event.h"
+#endif
+
 namespace ZLCloudPlugin
 {
 	class FVideoSourceGroup : public TSharedFromThis<FVideoSourceGroup>
@@ -47,10 +51,17 @@ namespace ZLCloudPlugin
 		class FFrameThread : public FRunnable, public FSingleThreadRunnable
 		{
 		public:
-			FFrameThread(FVideoSourceGroup* InTickGroup)
-				: TickGroup(InTickGroup)
+#if UNREAL_5_7_OR_NEWER
+			FFrameThread(TWeakPtr<FVideoSourceGroup> InVideoSourceGroup)
+				: OuterVideoSourceGroup(InVideoSourceGroup)
 			{
 			}
+#else
+			FFrameThread(FVideoSourceGroup* InTickGroup)
+			: TickGroup(InTickGroup)
+			{
+			}		
+#endif
 			virtual ~FFrameThread() = default;
 
 			virtual bool Init() override;
@@ -65,12 +76,25 @@ namespace ZLCloudPlugin
 			}
 
 			virtual void Tick() override;
+			
+#if UNREAL_5_7_OR_NEWER
+			void PushFrame(TSharedPtr<FVideoSourceGroup> VideoSourceGroup);
+			double CalculateSleepOffsetMs(double TargetSubmitMs, uint64 LastCaptureCycles, uint64 CyclesBetweenCaptures, bool& bResetOffset) const;
 
+			bool bIsRunning = false;
+			TWeakPtr<FVideoSourceGroup> OuterVideoSourceGroup = nullptr;
+			uint64 LastSubmitCycles = 0;
+
+			/* Use this event to signal when we should wake and also how long we should sleep for between transmitting a frame. */
+			FEventRef FrameEvent;
+			
+#else
 			void PushFrame();
 
 			bool bIsRunning = false;
 			FVideoSourceGroup* TickGroup = nullptr;
 			uint64 LastTickCycles = 0;
+#endif
 		};
 
 		bool bRunning = false;

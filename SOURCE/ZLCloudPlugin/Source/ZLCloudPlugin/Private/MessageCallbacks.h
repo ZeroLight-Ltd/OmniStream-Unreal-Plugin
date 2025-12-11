@@ -17,6 +17,8 @@ class MessageCallbacks
 		static void CloudStreamSettings(MessageWithData* msg);
 		static void CloudStreamConnected(MessageWithData* msg);
 		static void CaptureScreenshot(MessageWithData* msg);
+		static void StartCaptureTrace(MessageWithData* msg);
+		static void EndCaptureTrace(MessageWithData* msg);
 		static void SetConnectState(MessageWithData* msg);
 		static void SetOnDemandProcessingState(MessageWithData* msg);
 		static void SetOmnistreamSettings(MessageWithData* msg);
