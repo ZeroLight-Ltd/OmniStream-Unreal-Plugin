@@ -91,6 +91,7 @@ namespace ZLCloudPlugin
 
 		void Init(LauncherComms* launcherComms);
 		void Update();
+		bool PerformMRQCapture(int width, int height, FString outputPath, FString jobName);
 		bool RequestScreenshot(const char* settingsJson, UWorld* InWorld, FString& errorMsgOut);
 		void UpdateCurrentRenderStateRequestProgress(bool completed, bool matchSuccess);
 		void SetCurrentRenderStateData(TSharedPtr<FJsonObject> currentState, TSharedPtr<FJsonObject> timeoutState = nullptr, TSharedPtr<FJsonObject> unmatchedState = nullptr);

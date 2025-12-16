@@ -250,6 +250,7 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Schema", meta = (BindWidget))
 	TObjectPtr<UVerticalBox> SchemaOptionsVBox;
 
+	UPROPERTY()
 	UStateKeyInfoAsset* TargetSchema = nullptr;
 
 	bool instantProcess = true;

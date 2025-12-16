@@ -6,6 +6,9 @@
 #include <Runtime/Core/Public/Misc/FileHelper.h>
 #include <ZLTrackedStateBlueprint.h>
 #include "EditorZLCloudPluginSettings.h"
+#if WITH_ZLPLUGINVERSION
+#include "ZLPluginVersion.h"
+#endif
 
 #if WITH_EDITOR
 #include "Framework/Docking/TabManager.h"
@@ -889,6 +892,14 @@ void UZLCloudPluginStateManager::ProcessState(FString jsonString, bool doCurrent
 
 	if (jsonString.Contains(s_GetVersion))
 	{
+		TSharedPtr<FJsonObject> JsonVersionData;
+		
+#if WITH_ZLPLUGINVERSION
+		// Get all plugin versions from ZLPluginVersion (includes all registered plugins)
+		// GetAllZLPluginVersionsAsJson will broadcast the delegate internally to collect additional version info
+		JsonVersionData = GetAllZLPluginVersionsAsJson(true);
+#else
+		// Fallback: manually get ZLCloudPlugin version if ZLPluginVersion is not available
 		FString pluginVersion = "1.0.0";
 		IPluginManager& PluginManager = IPluginManager::Get();
 		TSharedPtr<IPlugin> ZlCloudStreamPlugin = PluginManager.FindPlugin("ZLCloudPlugin");
@@ -897,15 +908,16 @@ void UZLCloudPluginStateManager::ProcessState(FString jsonString, bool doCurrent
 			const FPluginDescriptor& Descriptor = ZlCloudStreamPlugin->GetDescriptor();
 			pluginVersion = *Descriptor.VersionName;
 		}
-
-		TSharedPtr<FJsonObject> JsonVersionData = MakeShareable(new FJsonObject);
-		JsonVersionData->SetStringField("ZLCloudPlugin version", pluginVersion);
-
+		
+		JsonVersionData = MakeShareable(new FJsonObject);
+		JsonVersionData->SetStringField("ZLCloudPlugin ", pluginVersion);
+		
 		// Broadcast delegate to allow other plugins to add their version info
 		if (UZLCloudPluginDelegates* Delegates = UZLCloudPluginDelegates::GetZLCloudPluginDelegates())
 		{
 			Delegates->OnGetVersionInfoNative.Broadcast(JsonVersionData);
 		}
+#endif
 
 		SendFJsonObjectToWeb(JsonVersionData);
 		return;

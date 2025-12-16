@@ -1,6 +1,11 @@
 // Copyright ZeroLight ltd. All Rights Reserved.
 
 #include "ZLCloudPluginModule.h"
+#if WITH_ZLPLUGINVERSION
+#include "ZLPluginVersion.h"
+#else
+#define REGISTER_ZL_PLUGIN_VERSION(PluginName, VersionDefine)
+#endif
 //ZL #include "Streamer.h"
 #include "InputDevice.h"
 #include "ZLCloudPluginInputComponent.h"
@@ -229,6 +234,20 @@ void ZLCloudPlugin::FZLCloudPluginModule::OnEndPIE(bool bIsSimulating)
 /** IModuleInterface implementation */
 void ZLCloudPlugin::FZLCloudPluginModule::StartupModule()
 {
+	// Register this plugin's version
+	REGISTER_ZL_PLUGIN_VERSION("ZLCloudPlugin", ZLCLOUDPLUGIN_VERSION);
+	
+#if WITH_ZLPLUGINVERSION
+	// Register callback to broadcast version info via delegate
+	RegisterZLVersionBroadcastCallback([](TSharedPtr<FJsonObject> JsonVersionData)
+	{
+		if (UZLCloudPluginDelegates* Delegates = UZLCloudPluginDelegates::GetZLCloudPluginDelegates())
+		{
+			Delegates->OnGetVersionInfoNative.Broadcast(JsonVersionData);
+		}
+	});
+#endif
+	
 	RegisterCustomizations();
 	bool noInitCloudPlugin = FParse::Param(FCommandLine::Get(), TEXT("nozlplugin"));
 

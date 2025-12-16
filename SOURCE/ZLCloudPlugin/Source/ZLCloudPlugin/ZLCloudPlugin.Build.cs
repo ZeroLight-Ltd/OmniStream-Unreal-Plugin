@@ -2,6 +2,8 @@
 using System;
 using System.IO;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Text.RegularExpressions;
 using EpicGames.Core;
 using UnrealBuildTool;
 
@@ -11,6 +13,57 @@ public class ZLCloudPlugin : ModuleRules
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 		PrivatePCHHeaderFile = "Private/PCH.h";
+		
+		// Read version from .uplugin file and get git hash
+		string PluginDirectory = Path.Combine(ModuleDirectory, "..", "..");
+		string UPluginPath = Path.Combine(PluginDirectory, "ZLCloudPlugin.uplugin");
+		
+		string VersionName = "0.0.0";
+		if (File.Exists(UPluginPath))
+		{
+			string UPluginContent = File.ReadAllText(UPluginPath);
+			Match VersionMatch = Regex.Match(UPluginContent, @"""VersionName""\s*:\s*""([^""]+)""");
+			if (VersionMatch.Success)
+			{
+				VersionName = VersionMatch.Groups[1].Value;
+			}
+		}
+		
+		// Get git hash
+		string GitHash = "";
+		try
+		{
+			ProcessStartInfo GitInfo = new ProcessStartInfo
+			{
+				FileName = "git",
+				Arguments = "rev-parse --short HEAD",
+				WorkingDirectory = PluginDirectory,
+				UseShellExecute = false,
+				RedirectStandardOutput = true,
+				CreateNoWindow = true
+			};
+			
+			using (Process GitProcess = Process.Start(GitInfo))
+			{
+				if (GitProcess != null)
+				{
+					GitHash = GitProcess.StandardOutput.ReadToEnd().Trim();
+					GitProcess.WaitForExit();
+				}
+			}
+		}
+		catch
+		{
+			// Git not available or not a git repo
+		}
+		
+		// Create version define
+		string VersionDefine = VersionName;
+		if (!string.IsNullOrEmpty(GitHash))
+		{
+			VersionDefine = VersionName + "." + GitHash;
+		}
+		PublicDefinitions.Add("ZLCLOUDPLUGIN_VERSION=\"" + VersionDefine + "\"");
 
 		var EngineDir = Path.GetFullPath(Target.RelativeEnginePath);
 		
@@ -30,6 +83,18 @@ public class ZLCloudPlugin : ModuleRules
 				"UMG",
 				"MovieRenderPipelineCore"
 		});
+		
+		// Add ZLPluginVersion dependency only if the plugin is available
+		string ZLPluginVersionModulePath = Path.Combine(ModuleDirectory, "..", "..", "..", "ZLStats", "Source", "ZLPluginVersion");
+		if (Directory.Exists(ZLPluginVersionModulePath))
+		{
+			PublicDependencyModuleNames.Add("ZLPluginVersion");
+			PublicDefinitions.Add("WITH_ZLPLUGINVERSION=1");
+		}
+		else
+		{
+			PublicDefinitions.Add("WITH_ZLPLUGINVERSION=0");
+		}
 		
 		if(version_5_1_or_newer)
 		{

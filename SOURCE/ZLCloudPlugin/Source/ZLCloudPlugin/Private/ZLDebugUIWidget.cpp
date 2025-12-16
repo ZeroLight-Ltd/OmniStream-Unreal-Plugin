@@ -304,7 +304,7 @@ void UZLDebugUIWidget::RebuildDebugUI()
 
 void UZLDebugUIWidget::RebuildDebugUIWithNesting()
 {
-	if (!TargetSchema || !SchemaOptionsVBox) return;
+	if (!IsValid(TargetSchema) || !SchemaOptionsVBox) return;
 
 	if (SchemaTitle)
 	{

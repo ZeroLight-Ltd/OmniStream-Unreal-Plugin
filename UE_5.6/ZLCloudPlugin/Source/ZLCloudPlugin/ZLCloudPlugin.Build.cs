@@ -11,6 +11,8 @@ public class ZLCloudPlugin : ModuleRules
 	{
           bUsePrecompiled=true;
 
+          bUsePrecompiled=true;
+
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 		PrivatePCHHeaderFile = "Private/PCH.h";
 

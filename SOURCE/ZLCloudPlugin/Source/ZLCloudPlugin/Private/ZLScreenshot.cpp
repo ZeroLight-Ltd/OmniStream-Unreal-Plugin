@@ -276,110 +276,7 @@ void ZLScreenshot::Update()
 
 							if (m_CurrentRender->useMRQPipeline)
 							{
-#if UNREAL_5_3_OR_NEWER
-								UGameInstance* GameInstance = m_CurrentRender->world->GetGameInstance();
-								if (!GameInstance)
-								{
-									// Handle error: No game instance
-									return;
-								}
-								UMoviePipelineQueueEngineSubsystem* Subsystem = GEngine->GetEngineSubsystem<UMoviePipelineQueueEngineSubsystem>();
-								if (!Subsystem)
-								{
-									// Handle error: Subsystem not available
-									return;
-								}
-
-								UMoviePipelineQueue* MoviePipelineQueue = NewObject<UMoviePipelineQueue>();
-
-
-								// Create a new Level Sequence at runtime
-								ULevelSequence* LevelSequence = NewObject<ULevelSequence>(GetTransientPackage(), NAME_None, RF_Transient);
-								LevelSequence->Initialize(); // Important to initialize the sequence
-
-								UMovieScene* MovieScene = LevelSequence->GetMovieScene();
-								if (MovieScene)
-								{
-									//MovieScene->SetFrameRate(FFrameRate(30, 1));
-									MovieScene->SetDisplayRate(FFrameRate(30, 1));
-									MovieScene->SetPlaybackRange(0, 1);
-								}
-
-								UMoviePipelineExecutorJob* Job = Subsystem->AllocateJob(LevelSequence);
-
-								Job->SetSequence(LevelSequence);
-
-#if UNREAL_5_2_OR_NEWER
-								UMoviePipelinePrimaryConfig* MasterConfig = NewObject<UMoviePipelinePrimaryConfig>(GetTransientPackage());
-#else
-								UMoviePipelineMasterConfig* MasterConfig = NewObject<UMoviePipelineMasterConfig>(GetTransientPackage());
-#endif
-
-								MasterConfig->FindOrAddSettingByClass(UMoviePipelineDeferredPassBase::StaticClass());
-
-								//Job->Map = FSoftObjectPath(m_CurrentRender->world);
-
-								// Set the output resolution
-								UMoviePipelineOutputSetting* OutputSetting = MasterConfig->FindSetting<UMoviePipelineOutputSetting>();
-								if (OutputSetting)
-								{
-									OutputSetting->OutputResolution = FIntPoint(m_CurrentRender->width, m_CurrentRender->height);
-									if (m_CurrentRender->path != "")
-										OutputSetting->OutputDirectory.Path = m_CurrentRender->path;
-									else
-									{
-										if (!FPaths::DirectoryExists(ContentGenOutputPath))
-										{
-											IPlatformFile& platformFile = FPlatformFileManager::Get().GetPlatformFile();
-
-											platformFile.CreateDirectory(*ContentGenOutputPath);
-										}
-										OutputSetting->OutputDirectory.Path = ContentGenOutputPath;
-									}
-									OutputSetting->FileNameFormat = m_CurrentRender->uid;
-									OutputSetting->bOverrideExistingOutput = false;
-								}
-								Job->JobName = m_CurrentRender->uid;
-
-
-								// Set the output format
-								if (m_CurrentRender->format.Equals(TEXT("png"), ESearchCase::IgnoreCase))
-								{
-									MasterConfig->FindOrAddSettingByClass(UMoviePipelineImageSequenceOutput_PNG::StaticClass());
-								}
-								else if (m_CurrentRender->format.Equals(TEXT("jpg"), ESearchCase::IgnoreCase))
-								{
-									MasterConfig->FindOrAddSettingByClass(UMoviePipelineImageSequenceOutput_JPG::StaticClass());
-								}
-								else
-								{
-									// Fallback to PNG
-									MasterConfig->FindOrAddSettingByClass(UMoviePipelineImageSequenceOutput_PNG::StaticClass());
-								}
-
-								// Set anti-aliasing settings
-								UMoviePipelineAntiAliasingSetting* AntiAliasingSetting = MasterConfig->FindSetting<UMoviePipelineAntiAliasingSetting>();
-								if (AntiAliasingSetting)
-								{
-									AntiAliasingSetting->SpatialSampleCount = 16;
-									AntiAliasingSetting->TemporalSampleCount = 1;
-									AntiAliasingSetting->bOverrideAntiAliasing = true;
-									AntiAliasingSetting->AntiAliasingMethod = EAntiAliasingMethod::AAM_TemporalAA;
-									AntiAliasingSetting->bUseCameraCutForWarmUp = false;
-								}
-
-								UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager();
-								if (!Subsystem->OnRenderFinished.IsBound())
-								{
-									Subsystem->OnRenderFinished.AddDynamic(StateManager, &UZLCloudPluginStateManager::OnMoviePipelineFinishedNotifyZLScreenshot);
-								}
-								Job->SetConfiguration(MasterConfig);
-								m_CurrentRender->ActiveRenderJob = Job;
-								Subsystem->RenderJob(Job);
-#else
-								UE_LOG(LogZLCloudPlugin, Warning, TEXT("MovieRenderQueue 2DOD Support is only available in UE 5.3+"));
-								return;
-#endif
+								PerformMRQCapture(m_CurrentRender->width, m_CurrentRender->height, ContentGenOutputPath, m_CurrentRender->uid);
 							}
 							else
 							{
@@ -426,13 +323,13 @@ void ZLScreenshot::Update()
 
 									m_playerController->GetPlayerViewPoint(startLoc, startRot);
 									m_initialViewTarget = m_playerController->GetViewTarget();
-									if(m_initialViewTarget)
+									if (m_initialViewTarget)
 										m_initialViewTarget->GetActorEyesViewPoint(startLoc, startRot); //More reliable truth
 
 									m_startRotation = startRot.Quaternion();
 									m_faceSize = 8 * ((uint32)floor(2 * (double)m_CurrentRender->height / PI / 8));
 
-									
+
 									m_panoViewTarget = World->SpawnActor<class ACameraActor>(startLoc, startRot);
 
 									FViewTargetTransitionParams TransitionParams;
@@ -478,7 +375,7 @@ void ZLScreenshot::Update()
 
 								if (m_CurrentRender->faceID == 0)
 								{
-									if(!m_CurrentRender->useMRQPipeline)
+									if (!m_CurrentRender->useMRQPipeline)
 										PauseGameTime();
 
 									FHighResScreenshotConfig& HighResScreenshotConfig = GetHighResScreenshotConfig();
@@ -529,102 +426,7 @@ void ZLScreenshot::Update()
 
 									if (m_CurrentRender->useMRQPipeline)
 									{
-#if UNREAL_5_3_OR_NEWER
-										UGameInstance* GameInstance = m_CurrentRender->world->GetGameInstance();
-										if (!GameInstance)
-										{
-											return;
-										}
-										UMoviePipelineQueueEngineSubsystem* Subsystem = GEngine->GetEngineSubsystem<UMoviePipelineQueueEngineSubsystem>();
-										if (!Subsystem)
-										{
-											return;
-										}
-
-										UMoviePipelineQueue* MoviePipelineQueue = NewObject<UMoviePipelineQueue>();
-
-										ULevelSequence* LevelSequence = NewObject<ULevelSequence>(GetTransientPackage(), NAME_None, RF_Transient);
-										LevelSequence->Initialize(); // Important to initialize the sequence
-
-										UMovieScene* MovieScene = LevelSequence->GetMovieScene();
-										if (MovieScene)
-										{
-											MovieScene->SetDisplayRate(FFrameRate(30, 1));
-											MovieScene->SetPlaybackRange(0, 1);
-										}
-
-										UMoviePipelineExecutorJob* Job = Subsystem->AllocateJob(LevelSequence);
-
-										Job->SetSequence(LevelSequence);
-
-#if UNREAL_5_2_OR_NEWER
-										UMoviePipelinePrimaryConfig* MasterConfig = NewObject<UMoviePipelinePrimaryConfig>(GetTransientPackage());
-#else
-										UMoviePipelineMasterConfig* MasterConfig = NewObject<UMoviePipelineMasterConfig>(GetTransientPackage());
-#endif
-
-										MasterConfig->FindOrAddSettingByClass(UMoviePipelineDeferredPassBase::StaticClass());
-
-										UMoviePipelineOutputSetting* OutputSetting = MasterConfig->FindSetting<UMoviePipelineOutputSetting>();
-										if (OutputSetting)
-										{
-											OutputSetting->OutputResolution = FIntPoint(m_faceSize, m_faceSize);
-											if (m_CurrentRender->path != "")
-												OutputSetting->OutputDirectory.Path = m_CurrentRender->path;
-											else
-											{
-												if (!FPaths::DirectoryExists(ContentGenOutputPath))
-												{
-													IPlatformFile& platformFile = FPlatformFileManager::Get().GetPlatformFile();
-
-													platformFile.CreateDirectory(*ContentGenOutputPath);
-												}
-												OutputSetting->OutputDirectory.Path = ContentGenOutputPath;
-											}
-											OutputSetting->FileNameFormat = m_CurrentRender->uid + "_FACE_" + FString::FromInt(m_CurrentRender->faceID);
-											OutputSetting->bOverrideExistingOutput = false;
-										}
-										Job->JobName = m_CurrentRender->uid + "_FACE_" + FString::FromInt(m_CurrentRender->faceID);
-
-
-										// Set the output format
-										if (m_CurrentRender->format.Equals(TEXT("png"), ESearchCase::IgnoreCase))
-										{
-											MasterConfig->FindOrAddSettingByClass(UMoviePipelineImageSequenceOutput_PNG::StaticClass());
-										}
-										else if (m_CurrentRender->format.Equals(TEXT("jpg"), ESearchCase::IgnoreCase))
-										{
-											MasterConfig->FindOrAddSettingByClass(UMoviePipelineImageSequenceOutput_JPG::StaticClass());
-										}
-										else
-										{
-											// Fallback to PNG
-											MasterConfig->FindOrAddSettingByClass(UMoviePipelineImageSequenceOutput_PNG::StaticClass());
-										}
-
-										// Set anti-aliasing settings
-										UMoviePipelineAntiAliasingSetting* AntiAliasingSetting = MasterConfig->FindSetting<UMoviePipelineAntiAliasingSetting>();
-										if (AntiAliasingSetting)
-										{
-											AntiAliasingSetting->SpatialSampleCount = 16;
-											AntiAliasingSetting->TemporalSampleCount = 1;
-											AntiAliasingSetting->bOverrideAntiAliasing = true;
-											AntiAliasingSetting->AntiAliasingMethod = EAntiAliasingMethod::AAM_TemporalAA;
-											AntiAliasingSetting->bUseCameraCutForWarmUp = false;
-										}
-
-										UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager();
-										if (!Subsystem->OnRenderFinished.IsBound())
-										{
-											Subsystem->OnRenderFinished.AddDynamic(StateManager, &UZLCloudPluginStateManager::OnMoviePipelineFinishedNotifyZLScreenshot);
-										}
-										Job->SetConfiguration(MasterConfig);
-										m_CurrentRender->ActiveRenderJob = Job;
-										Subsystem->RenderJob(Job);
-#else
-										UE_LOG(LogZLCloudPlugin, Warning, TEXT("MovieRenderQueue 2DOD Support is only available in UE 5.3+"));
-										return;
-#endif
+										PerformMRQCapture(m_faceSize, m_faceSize, ContentGenOutputPath, m_CurrentRender->uid + "_FACE_" + FString::FromInt(m_CurrentRender->faceID));
 									}
 									else
 									{
@@ -657,6 +459,112 @@ void ZLScreenshot::Update()
 			}
 		}
 	}
+}
+
+bool ZLScreenshot::PerformMRQCapture(int width, int height, FString outputPath, FString jobName)
+{
+	if (m_CurrentRender->useMRQPipeline)
+	{
+#if UNREAL_5_3_OR_NEWER
+		UGameInstance* GameInstance = m_CurrentRender->world->GetGameInstance();
+		if (!GameInstance)
+		{
+			// Handle error: No game instance
+			return false;
+		}
+		UMoviePipelineQueueEngineSubsystem* Subsystem = GEngine->GetEngineSubsystem<UMoviePipelineQueueEngineSubsystem>();
+		if (!Subsystem)
+		{
+			// Handle error: Subsystem not available
+			return false;
+		}
+
+		// Create a new Level Sequence at runtime
+		ULevelSequence* LevelSequence = NewObject<ULevelSequence>(GetTransientPackage(), NAME_None, RF_Transient);
+		LevelSequence->Initialize(); // Important to initialize the sequence
+
+		UMovieScene* MovieScene = LevelSequence->GetMovieScene();
+		if (MovieScene)
+		{
+			MovieScene->SetDisplayRate(FFrameRate(30, 1));
+			MovieScene->SetPlaybackRange(0, 1);
+		}
+
+		UMoviePipelineExecutorJob* Job = Subsystem->AllocateJob(LevelSequence);
+
+		Job->SetSequence(LevelSequence);
+
+#if UNREAL_5_2_OR_NEWER
+		UMoviePipelinePrimaryConfig* MasterConfig = NewObject<UMoviePipelinePrimaryConfig>(GetTransientPackage());
+#else
+		UMoviePipelineMasterConfig* MasterConfig = NewObject<UMoviePipelineMasterConfig>(GetTransientPackage());
+#endif
+
+		MasterConfig->FindOrAddSettingByClass(UMoviePipelineDeferredPassBase::StaticClass());
+
+		// Set the output resolution
+		UMoviePipelineOutputSetting* OutputSetting = MasterConfig->FindSetting<UMoviePipelineOutputSetting>();
+		if (OutputSetting)
+		{
+			OutputSetting->OutputResolution = FIntPoint(width, height);
+			if (m_CurrentRender->path != "")
+				OutputSetting->OutputDirectory.Path = m_CurrentRender->path;
+			else
+			{
+				if (!FPaths::DirectoryExists(outputPath))
+				{
+					IPlatformFile& platformFile = FPlatformFileManager::Get().GetPlatformFile();
+
+					platformFile.CreateDirectory(*outputPath);
+				}
+				OutputSetting->OutputDirectory.Path = outputPath;
+			}
+			OutputSetting->FileNameFormat = jobName;
+			OutputSetting->bOverrideExistingOutput = false;
+		}
+		Job->JobName = jobName;
+
+
+		// Set the output format
+		if (m_CurrentRender->format.Equals(TEXT("png"), ESearchCase::IgnoreCase))
+		{
+			MasterConfig->FindOrAddSettingByClass(UMoviePipelineImageSequenceOutput_PNG::StaticClass());
+		}
+		else if (m_CurrentRender->format.Equals(TEXT("jpg"), ESearchCase::IgnoreCase))
+		{
+			MasterConfig->FindOrAddSettingByClass(UMoviePipelineImageSequenceOutput_JPG::StaticClass());
+		}
+		else
+		{
+			// Fallback to PNG
+			MasterConfig->FindOrAddSettingByClass(UMoviePipelineImageSequenceOutput_PNG::StaticClass());
+		}
+
+		// Set anti-aliasing settings
+		UMoviePipelineAntiAliasingSetting* AntiAliasingSetting = MasterConfig->FindSetting<UMoviePipelineAntiAliasingSetting>();
+		if (AntiAliasingSetting)
+		{
+			AntiAliasingSetting->SpatialSampleCount = 16;
+			AntiAliasingSetting->TemporalSampleCount = 1;
+			AntiAliasingSetting->bOverrideAntiAliasing = true;
+			AntiAliasingSetting->AntiAliasingMethod = EAntiAliasingMethod::AAM_TemporalAA;
+			AntiAliasingSetting->bUseCameraCutForWarmUp = false;
+		}
+
+		UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager();
+		if (!Subsystem->OnRenderFinished.IsBound())
+		{
+			Subsystem->OnRenderFinished.AddDynamic(StateManager, &UZLCloudPluginStateManager::OnMoviePipelineFinishedNotifyZLScreenshot);
+		}
+		Job->SetConfiguration(MasterConfig);
+		m_CurrentRender->ActiveRenderJob = Job;
+		Subsystem->RenderJob(Job);
+#else
+		UE_LOG(LogZLCloudPlugin, Warning, TEXT("MovieRenderQueue 2DOD Support is only available in UE 5.3+"));
+		return false;
+#endif
+	}
+	return true;
 }
 
 bool ZLScreenshot::RequestScreenshot(const char* settingsJson, UWorld* InWorld, FString& errorMsgOut)
@@ -1248,7 +1156,7 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 
 
 		FString outputDir = OutputSetting->OutputDirectory.Path;
-		FString outputFilePath = FPaths::Combine(outputDir,(m_CurrentRender->type == ScreenshotType::EQUIRECT360) ? m_CurrentRender->uid + TEXT("_FACE_") + FString::FromInt(m_CurrentRender->lastFaceCompletedID) + TEXT(".") + Extension : m_CurrentRender->uid + TEXT(".") + Extension);
+		FString outputFilePath = FPaths::Combine(outputDir, (m_CurrentRender->type == ScreenshotType::EQUIRECT360) ? m_CurrentRender->uid + TEXT("_FACE_") + FString::FromInt(m_CurrentRender->lastFaceCompletedID) + TEXT(".") + Extension : m_CurrentRender->uid + TEXT(".") + Extension);
 
 		bool cleanupFile = m_CurrentRender->path == "";
 
@@ -1259,7 +1167,7 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 				Delegates->OnContentGenerationFinished.Broadcast(m_CurrentRender->type == ScreenshotType::EQUIRECT360);
 				Delegates->OnContentGenerationFinishedNative.Broadcast(m_CurrentRender->type == ScreenshotType::EQUIRECT360);
 			}
-			
+
 			TArray<FString> FoundFiles;
 			IFileManager::Get().FindFiles(FoundFiles, *outputFilePath, true, false);
 
