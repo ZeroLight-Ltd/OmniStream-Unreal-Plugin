@@ -29,7 +29,10 @@ void MessageCallbacks::RegisterCallbacks(LauncherComms* launcherComms)
 	m_LauncherComms->RegisterMessageCallback(TEXT("SERVERVERSION"), &SetServerVersion);
 	m_LauncherComms->RegisterMessageCallback(TEXT("CLOUDSTREAMSETTINGS"), &CloudStreamSettings);
 	m_LauncherComms->RegisterMessageCallback(TEXT("CLOUD_CONNECTED"), &CloudStreamConnected);
+#ifdef SUPPORT_LEGACY_MESSAGES
 	m_LauncherComms->RegisterMessageCallback(TEXT("CAPTUREIMAGE"), &CaptureScreenshot);
+#endif //SUPPORT_LEGACY_MESSAGES
+	m_LauncherComms->RegisterMessageCallback(TEXT("CAPTUREMEDIA"), &CaptureScreenshot);
 	m_LauncherComms->RegisterMessageCallback(TEXT("START_VE_JOBTRACE"), &StartCaptureTrace);
 	m_LauncherComms->RegisterMessageCallback(TEXT("END_VE_JOBTRACE"), &EndCaptureTrace);
 
@@ -67,6 +70,9 @@ void MessageCallbacks::RegisterCallbacks(LauncherComms* launcherComms)
 	m_LauncherComms->RegisterMessageCallback(TEXT("SETCAMERADIRECTLYJSON"), &SETCAMERADIRECTLYJSON);
 	m_LauncherComms->RegisterMessageCallback(TEXT("GET_SCREENSHOT_LAYER_OPTIONS"), &GET_SCREENSHOT_LAYER_OPTIONS);
 
+	//AppDataCache callbacks
+	m_LauncherComms->RegisterMessageCallback(TEXT("RETURN_APPDATACACHE_STATS"), &ReturnAppDataCacheStats);
+	m_LauncherComms->RegisterMessageCallback(TEXT("RETURN_APPDATACACHE_UPLOAD"), &ReturnAppDataCacheUpload);
 
 	m_LauncherComms->RegisterMessageCallback(TEXT("SET_RICH_DATA_STREAM_ENABLED"), &DummyCallback);
 	m_LauncherComms->RegisterMessageCallback(TEXT("MANUALCONTROLACTIVATE"), &DummyCallback);
@@ -267,6 +273,10 @@ void MessageCallbacks::CaptureScreenshot(MessageWithData* msg)
 	const char* charMessage = ansiString.Get();
 	UWorld* World = GEngine->GetCurrentPlayWorld();
 
+#ifdef SUPPORT_LEGACY_MESSAGES
+	bool isLegacyMessage = msg->m_messageName.Equals(TEXT("CAPTUREIMAGE"));
+#endif //SUPPORT_LEGACY_MESSAGES
+
 #if WITH_EDITOR
 	if (World == nullptr) //Fix for running in editor
 	{
@@ -278,13 +288,24 @@ void MessageCallbacks::CaptureScreenshot(MessageWithData* msg)
 
 	if (!ZLCloudPlugin::CloudStream2::IsInputHandling() || World == nullptr)
 	{
-		msg->SetReply("IMAGE_REQUEST_ERROR", "{\"error\":\"Request unhandled, no active Play-In-Editor/Standalone running\"}");
+#ifdef SUPPORT_LEGACY_MESSAGES
+		if (isLegacyMessage)
+		{
+			msg->SetReply("IMAGE_REQUEST_ERROR", "{\"error\":\"Request unhandled, no active Play-In-Editor/Standalone running\"}");
+			return;
+		}
+#endif //SUPPORT_LEGACY_MESSAGES
+		msg->SetReply("MEDIA_REQUEST_ERROR", "{\"error\":\"Request unhandled, no active Play-In-Editor/Standalone running\"}");
 		return;
 	}
 #endif
 
 	FString requestErrorMsg = "";
+#ifdef SUPPORT_LEGACY_MESSAGES
+	bool requestQueued = ZLCloudPlugin::ZLScreenshot::Get()->RequestScreenshot(charMessage, World, requestErrorMsg, isLegacyMessage);
+#else //SUPPORT_LEGACY_MESSAGES
 	bool requestQueued = ZLCloudPlugin::ZLScreenshot::Get()->RequestScreenshot(charMessage, World, requestErrorMsg);
+#endif //SUPPORT_LEGACY_MESSAGES
 
 	if (requestQueued)
 	{
@@ -314,11 +335,25 @@ void MessageCallbacks::CaptureScreenshot(MessageWithData* msg)
 		FJsonSerializer::Serialize(viewerConfigureResponseData.ToSharedRef(), writer);
 
 
-		msg->SetReply("IMAGE_REQUEST_QUEUED", responseDataStr);
+#ifdef SUPPORT_LEGACY_MESSAGES
+		if (isLegacyMessage)
+		{
+			msg->SetReply("IMAGE_REQUEST_QUEUED", responseDataStr);
+			return;
+		}
+#endif //SUPPORT_LEGACY_MESSAGES
+		msg->SetReply("MEDIA_REQUEST_QUEUED", responseDataStr);
 	}
 	else
 	{
-		msg->SetReply("IMAGE_REQUEST_ERROR", FString::Printf(TEXT("{\"error\":\"%s\"}"), *requestErrorMsg));
+#ifdef SUPPORT_LEGACY_MESSAGES
+		if (isLegacyMessage)
+		{
+			msg->SetReply("IMAGE_REQUEST_ERROR", FString::Printf(TEXT("{\"error\":\"%s\"}"), *requestErrorMsg));
+			return;
+		}
+#endif //SUPPORT_LEGACY_MESSAGES
+		msg->SetReply("MEDIA_REQUEST_ERROR", FString::Printf(TEXT("{\"error\":\"%s\"}"), *requestErrorMsg));
 	}
 }
 
@@ -634,6 +669,74 @@ void MessageCallbacks::GET_SCREENSHOT_LAYER_OPTIONS(MessageWithData* msg)
 	msg->SetReply("RETURN_SCREENSHOT_LAYER_OPTIONS", "{\"layers\":{}}");
 }
 
+void MessageCallbacks::ReturnAppDataCacheStats(MessageWithData* msg)
+{
+	UE_LOG(LogZLCloudPlugin, Display, TEXT("MessageCallbacks::ReturnAppDataCacheStats"));
+	
+	TSharedPtr<FJsonObject> JsonParsed;
+	TSharedRef<TJsonReader<TCHAR>> JsonReader = TJsonReaderFactory<TCHAR>::Create(msg->m_messageData);
+	if (FJsonSerializer::Deserialize(JsonReader, JsonParsed))
+	{
+		if (JsonParsed != nullptr)
+		{
+			FString statsString;
+			TSharedRef<TJsonWriter<>> writer = TJsonWriterFactory<>::Create(&statsString);
+			FJsonSerializer::Serialize(JsonParsed.ToSharedRef(), writer);
+			//UE_LOG(LogZLCloudPlugin, Display, TEXT("AppDataCache Stats: %s"), *statsString);
+
+			if (m_LauncherComms)
+			{
+				m_LauncherComms->InvokeAppDataCacheStatsCallback(JsonParsed);
+			}
+		}
+	}
+	else
+	{
+		UE_LOG(LogZLCloudPlugin, Warning, TEXT("Failed to parse AppDataCache stats JSON: %s"), *msg->m_messageData);
+	}
+}
+
+void MessageCallbacks::ReturnAppDataCacheUpload(MessageWithData* msg)
+{
+	UE_LOG(LogZLCloudPlugin, Display, TEXT("MessageCallbacks::ReturnAppDataCacheUpload"));
+	
+	TSharedPtr<FJsonObject> JsonParsed;
+	TSharedRef<TJsonReader<TCHAR>> JsonReader = TJsonReaderFactory<TCHAR>::Create(msg->m_messageData);
+	if (FJsonSerializer::Deserialize(JsonReader, JsonParsed))
+	{
+		if (JsonParsed != nullptr)
+		{
+			// Check for success or error
+			bool success = false;
+			FString message;
+			FString error;
+			
+			if (JsonParsed->TryGetBoolField(TEXT("success"), success))
+			{
+				if (success)
+				{
+					JsonParsed->TryGetStringField(TEXT("message"), message);
+					UE_LOG(LogZLCloudPlugin, Display, TEXT("AppDataCache upload triggered successfully: %s"), *message);
+				}
+			}
+			
+			if (JsonParsed->TryGetStringField(TEXT("error"), error))
+			{
+				UE_LOG(LogZLCloudPlugin, Warning, TEXT("AppDataCache upload error: %s"), *error);
+			}
+
+			// Invoke callback if set
+			if (m_LauncherComms)
+			{
+				m_LauncherComms->InvokeAppDataCacheUploadCallback(JsonParsed);
+			}
+		}
+	}
+	else
+	{
+		UE_LOG(LogZLCloudPlugin, Warning, TEXT("Failed to parse AppDataCache upload response JSON: %s"), *msg->m_messageData);
+	}
+}
 
 void MessageCallbacks::DummyCallback(MessageWithData* msg)
 {

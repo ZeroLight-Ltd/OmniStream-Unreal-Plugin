@@ -387,3 +387,41 @@ void LauncherComms::RegisterMessageCallback(FString name, LauncherCommsCallback 
 {
 	m_MessageCallbacks.Add(name, callback);
 }
+
+void LauncherComms::RequestAppDataCacheStats()
+{
+	SendLauncherMessage("REQUESTAPPDATACACHESTATS");
+}
+
+void LauncherComms::TriggerAppDataCacheUpload()
+{
+	SendLauncherMessage("TRIGGERAPPDATACACHEUPLOAD");
+}
+
+void LauncherComms::SetAppDataCacheStatsCallback(TFunction<void(TSharedPtr<FJsonObject>)> Callback)
+{
+	m_AppDataCacheStatsCallback = Callback;
+}
+
+void LauncherComms::SetAppDataCacheUploadCallback(TFunction<void(TSharedPtr<FJsonObject>)> Callback)
+{
+	m_AppDataCacheUploadCallback = Callback;
+}
+
+void LauncherComms::InvokeAppDataCacheStatsCallback(TSharedPtr<FJsonObject> JsonData)
+{
+	if (m_AppDataCacheStatsCallback)
+	{
+		m_AppDataCacheStatsCallback(JsonData);
+		m_AppDataCacheStatsCallback = nullptr; // Clear callback after invocation
+	}
+}
+
+void LauncherComms::InvokeAppDataCacheUploadCallback(TSharedPtr<FJsonObject> JsonData)
+{
+	if (m_AppDataCacheUploadCallback)
+	{
+		m_AppDataCacheUploadCallback(JsonData);
+		m_AppDataCacheUploadCallback = nullptr; // Clear callback after invocation
+	}
+}

@@ -9,6 +9,9 @@
 #include "Sockets.h"
 #include "MessageReader.h"
 #include "HAL/RunnableThread.h"
+#include "Dom/JsonObject.h"
+#include "Templates/Function.h"
+#include "Templates/SharedPointer.h"
 
 typedef void(*LauncherCommsCallback)(MessageWithData*);
 
@@ -29,6 +32,13 @@ class LauncherComms : FRunnable
 		void RegisterMessageCallback(FString name, LauncherCommsCallback callback);
 
 		void SetZLServerVersion(int version) { m_ServerVersion = version; }
+
+		void SetAppDataCacheStatsCallback(TFunction<void(TSharedPtr<FJsonObject>)> Callback);
+		void SetAppDataCacheUploadCallback(TFunction<void(TSharedPtr<FJsonObject>)> Callback);
+		void InvokeAppDataCacheStatsCallback(TSharedPtr<FJsonObject> JsonData);
+		void InvokeAppDataCacheUploadCallback(TSharedPtr<FJsonObject> JsonData);
+		void RequestAppDataCacheStats();
+		void TriggerAppDataCacheUpload();
 
 	public:
 
@@ -62,5 +72,8 @@ class LauncherComms : FRunnable
 		TMap<FString, LauncherCommsCallback> m_MessageCallbacks;
 
 		MessageReader* m_MessageReader = nullptr;
+
+		TFunction<void(TSharedPtr<FJsonObject>)> m_AppDataCacheStatsCallback;
+		TFunction<void(TSharedPtr<FJsonObject>)> m_AppDataCacheUploadCallback;
 };
 

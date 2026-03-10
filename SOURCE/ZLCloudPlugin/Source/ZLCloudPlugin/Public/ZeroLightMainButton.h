@@ -202,8 +202,11 @@ public:
 	inline static bool s_triggerBuildTask = false;
 	inline static bool s_triggerBuildUpload = false;
 	inline static bool s_isCIBuild = false;
+	/** Path just selected in the folder dialog for this build; used so LoadConfig() does not overwrite it. */
+	inline static FString s_pendingBuildFolder;
 
 	static void SetProgressText(const FText& text);
+	static void SetPendingBuildFolder(const FString& path);
 	static void SetIsBuilding(bool state);
 	static void SetIsPortalAuthorised(bool state);
 	static void SetPortalUsername(FString username);
@@ -315,6 +318,8 @@ public:
 	inline static FString GetCurrentUploadAssetVersionId() { return s_currentAssetVersionId; }
 	inline static void SetCurrentUploadAssetVersionId(FString assetVersionId) { s_currentAssetVersionId = assetVersionId; }
 	inline static void RefocusWindowOnRefresh() { s_needsRefocusWindow = true; }
+	static void PrintBuildAndUploadSummary();
+	inline static FDateTime s_uploadEndTime;
 	inline static FString FormatFStringFilenameSafe(FString str)
 	{
 		std::string inStr(TCHAR_TO_UTF8(*str));
@@ -394,12 +399,15 @@ protected:
 	void SetBuildMetadata(const FString& metadata);
 	void SetDeployName(const FString& name);
 	void SetBuildID(const FText& id);
+	void SetRunInfoCommandLineParams(const FText& text);
 	void SetUseExistingBuild(const ECheckBoxState state);
 	void SetUseExistingRunInfoJson(const ECheckBoxState state);
 	void SetRemoveDebugSymbols(const ECheckBoxState state);
 	inline static ECheckBoxState GetRemoveDebugSymbols() { return s_removeDebugSymbols ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; };
 	void SetUsePortalUpload(const ECheckBoxState state);
 	void SetPortalStorageProvider(TSharedPtr<FString> NewValue, ESelectInfo::Type SelectInfo);
+	void SetBuildConfiguration(TSharedPtr<FString> NewValue, ESelectInfo::Type SelectInfo);
+	static FString GetBuildConfiguration();
 	bool OnBuildPackageSuccess() const;
 	FReply AbortCurrentProcessOrReauth();
 	FReply PauseOrResumeUpload();
@@ -434,6 +442,11 @@ protected:
 	inline static bool s_useExisting = false;
 	inline static bool s_useExistingRunInfo = false;
 	inline static bool s_devFeaturesEnabled = false;
+	
+	// Timing variables for build and upload
+	inline static FDateTime s_buildStartTime;
+	inline static FDateTime s_buildEndTime;
+	inline static FDateTime s_uploadStartTime;
 
 	//Rust bard dll interface seems to have issues with its own pointers when accessed on another thread, so we use flagging to trigger these calls in the main thread
 	//Will need rust-side improvement for upload concurrency
@@ -448,6 +461,7 @@ protected:
 	inline static FString s_portalUsername = "Not Logged In";
 	inline static FString s_currentAssetVersionId = "";
 	inline static TArray<TSharedPtr<FString>> s_portalStorageProviderOptions = {MakeShared<FString>("bard"), MakeShared<FString>("s3"), MakeShared<FString>("bard-zip")};
+	inline static TArray<TSharedPtr<FString>> s_buildConfigurationOptions = {MakeShared<FString>("Development"), MakeShared<FString>("Shipping")};
 
 	inline static TSharedPtr<GetTokenAsyncTask> s_getTokenAsyncTask = nullptr;
 	inline static TSharedPtr<SelectAssetLineAsyncTask> s_selectAssetLineAsyncTask = nullptr;

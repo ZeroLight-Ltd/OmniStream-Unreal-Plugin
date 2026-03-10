@@ -38,10 +38,12 @@ template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetRequestedStateVal
 template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetRequestedStateValue<TSharedPtr<FJsonValue, ESPMode::ThreadSafe>>(FString, bool, TSharedPtr<FJsonValue, ESPMode::ThreadSafe>&, bool&);
 template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetCurrentStateValue<FString>(FString, FString&, bool&);
 template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetCurrentStateValue<double>(FString, double&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetCurrentStateValue<float>(FString, float&, bool&);
 template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetCurrentStateValue<bool>(FString, bool&, bool&);
 template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetCurrentStateValue<TArray<FString>>(FString, TArray<FString>&, bool&);
 template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetCurrentStateValue<TArray<bool>>(FString, TArray<bool>&, bool&);
 template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetCurrentStateValue<TArray<double>>(FString, TArray<double>&, bool&);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetCurrentStateValue<TArray<float>>(FString, TArray<float>&, bool&);
 template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::GetCurrentStateValue<TSharedPtr<FJsonValue>>(FString, TSharedPtr<FJsonValue>&, bool&);
 template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::SetCurrentStateValue<FString>(FString, FString, bool);
 template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::SetCurrentStateValue<double>(FString, double, bool);
@@ -52,6 +54,15 @@ template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::SetCurrentStateValue
 template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::SetCurrentStateValue<TArray<double>>(FString, TArray<double>, bool);
 template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::SetCurrentStateValue<TArray<float>>(FString, TArray<float>, bool);
 template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::SetCurrentStateValue<TSharedPtr<FJsonValue>>(FString, TSharedPtr<FJsonValue>, bool);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::Internal_AppendProcessingState<FString>(FString, FString);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::Internal_AppendProcessingState<double>(FString, double);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::Internal_AppendProcessingState<float>(FString, float);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::Internal_AppendProcessingState<bool>(FString, bool);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::Internal_AppendProcessingState<TArray<FString>>(FString, TArray<FString>);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::Internal_AppendProcessingState<TArray<bool>>(FString, TArray<bool>);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::Internal_AppendProcessingState<TArray<double>>(FString, TArray<double>);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::Internal_AppendProcessingState<TArray<float>>(FString, TArray<float>);
+template ZLCLOUDPLUGIN_API void UZLCloudPluginStateManager::Internal_AppendProcessingState<TSharedPtr<FJsonValue>>(FString, TSharedPtr<FJsonValue>);
 
 
 UZLCloudPluginStateManager* UZLCloudPluginStateManager::CreateInstance()
@@ -503,6 +514,42 @@ FString UZLCloudPluginStateManager::MergeDefaultInitialState(FString overrideIni
 	return mergedInitialState;
 }
 
+static TSharedPtr<FJsonValue> StateKeyInfoToDefaultJsonValue(const FStateKeyInfo& Info)
+{
+	switch (Info.GetDataTypeEnum())
+	{
+	case EStateKeyDataType::String:
+		return MakeShared<FJsonValueString>(Info.DefaultStringValue);
+	case EStateKeyDataType::Number:
+		return MakeShared<FJsonValueNumber>(Info.DefaultNumberValue);
+	case EStateKeyDataType::Bool:
+		return MakeShared<FJsonValueBoolean>(Info.DefaultBoolValue);
+	case EStateKeyDataType::StringArray:
+	{
+		TArray<TSharedPtr<FJsonValue>> Arr;
+		for (const FString& S : Info.DefaultStringArray)
+			Arr.Add(MakeShared<FJsonValueString>(S));
+		return MakeShared<FJsonValueArray>(Arr);
+	}
+	case EStateKeyDataType::NumberArray:
+	{
+		TArray<TSharedPtr<FJsonValue>> Arr;
+		for (double D : Info.DefaultNumberArray)
+			Arr.Add(MakeShared<FJsonValueNumber>(D));
+		return MakeShared<FJsonValueArray>(Arr);
+	}
+	case EStateKeyDataType::BoolArray:
+	{
+		TArray<TSharedPtr<FJsonValue>> Arr;
+		for (bool B : Info.DefaultBoolArray)
+			Arr.Add(MakeShared<FJsonValueBoolean>(B));
+		return MakeShared<FJsonValueArray>(Arr);
+	}
+	default:
+		return MakeShared<FJsonValueString>(TEXT(""));
+	}
+}
+
 bool GetJsonValueFromNestedKey(FString NestedKey, TSharedPtr<FJsonObject> JsonObject,const TSharedPtr<FJsonValue>* &Value)
 {
 	TArray<FString> Keys;
@@ -543,92 +590,6 @@ static void DuplicateJsonArray(const TArray<TSharedPtr<FJsonValue>>& Source, TAr
 		Dest.Add(FJsonValue::Duplicate(Value));
 	}
 }
-
-//bool SetJsonValueFromNestedKey(FString NestedKey, TSharedPtr<FJsonObject>& JsonObject, const TSharedPtr<FJsonValue> value)
-//{
-//	if (!value.IsValid())
-//	{
-//		UE_LOG(LogZLCloudPlugin, Display, TEXT("Tried to set an invalid FJsonValue object to key %s"), *NestedKey);
-//		return false;
-//	}
-//
-//	TArray<FString> Keys;
-//	NestedKey.ParseIntoArray(Keys, TEXT("."), true);
-//
-//	const FString FinalKey = Keys[Keys.Num() - 1];
-//
-//	TSharedPtr<FJsonObject> CurrentObject = JsonObject;
-//	for (const FString& Key : Keys)
-//	{
-//		if (!CurrentObject.IsValid())
-//		{
-//			return false;
-//		}
-//		else if (!CurrentObject->HasField(Key))
-//		{
-//			//Need to create a new FJsonObject level
-//			if (Key != FinalKey)
-//				CurrentObject->SetObjectField(Key, MakeShared<FJsonObject>());
-//		}
-//
-//		TSharedPtr<FJsonValue> JsonValue = CurrentObject->TryGetField(Key);
-//		if (JsonValue.IsValid() && JsonValue->Type == EJson::Object)
-//		{
-//			CurrentObject = JsonValue->AsObject();
-//		}
-//		else if (Key == FinalKey)
-//		{
-//			// The last key should have a value type different from an object
-//			// Handle error or return the value as needed
-//			switch (value->Type)
-//			{
-//			case EJson::Boolean:
-//			{
-//				bool BoolValue;
-//				if (value->TryGetBool(BoolValue))
-//				{
-//					CurrentObject->SetBoolField(Key, BoolValue);
-//				}
-//				break;
-//			}
-//			case EJson::Number:
-//			{
-//				double NumberValue;
-//				if (value->TryGetNumber(NumberValue))
-//				{
-//					CurrentObject->SetNumberField(Key, NumberValue);
-//				}
-//				break;
-//			}
-//			case EJson::String:
-//			{
-//				FString StringValue;
-//				if (value->TryGetString(StringValue))
-//				{
-//					CurrentObject->SetStringField(Key, StringValue);
-//				}
-//				break;
-//			}
-//			case EJson::Array:
-//			{
-//				const TArray<TSharedPtr<FJsonValue>>* ArrayValue;
-//				if (value->TryGetArray(ArrayValue))
-//				{
-//					TArray<TSharedPtr<FJsonValue>> NewArray;
-//					DuplicateJsonArray(*ArrayValue, NewArray);
-//
-//					CurrentObject->SetArrayField(Key, TArray<TSharedPtr<FJsonValue>>(NewArray));
-//				}
-//				break;
-//			}
-//			}
-//
-//			return true;
-//		}
-//	}
-//
-//	return false;
-//}
 
 bool SetJsonValueFromNestedKey(FString NestedKey, TSharedPtr<FJsonObject>& JsonObject, FJsonValue* value)
 {
@@ -760,6 +721,31 @@ bool RemoveNestedKey(FString NestedKey, TSharedPtr<FJsonObject>& JsonObject)
 	}
 
 	return false;
+}
+
+TSharedPtr<FJsonObject> MergeRequestStateWithSchemaDefaults(const TSharedPtr<FJsonObject>& RequestState, UStateKeyInfoAsset* SchemaAsset, int32& OutMergedCount)
+{
+	OutMergedCount = 0;
+	TSharedPtr<FJsonObject> Merged = MakeShared<FJsonObject>();
+	FJsonObject::Duplicate(RequestState.ToSharedRef(), Merged);
+
+	if (!SchemaAsset || SchemaAsset->KeyInfos.Num() == 0)
+		return Merged;
+
+	for (const TPair<FString, FStateKeyInfo>& Pair : SchemaAsset->KeyInfos)
+	{
+		const FString& DottedKey = Pair.Key;
+		const TSharedPtr<FJsonValue>* ExistingValue = nullptr;
+		if (!GetJsonValueFromNestedKey(DottedKey, Merged, ExistingValue))
+		{
+			TSharedPtr<FJsonValue> DefaultVal = StateKeyInfoToDefaultJsonValue(Pair.Value);
+			if (DefaultVal.IsValid() && SetJsonValueFromNestedKey(DottedKey, Merged, DefaultVal.Get()))
+			{
+				++OutMergedCount;
+			}
+		}
+	}
+	return Merged;
 }
 
 TArray<FString> UZLCloudPluginStateManager::CurrentStateCompareDiffs_Keys(TSharedPtr<FJsonObject> ComparisonJsonObject)
@@ -1097,6 +1083,16 @@ void UZLCloudPluginStateManager::Update(LauncherComms* launcherComms)
 		stateRequestedContentJob = screenshotManager->HasCurrentRender();
 	}
 
+	if (m_framesToWaitServerNotify > 0)
+	{
+		m_framesToWaitServerNotify--;
+		if (m_framesToWaitServerNotify == 0)
+		{
+			launcherComms->SendLauncherMessage("APPINITIALSTATESET"); //onConnect is ready, allow adoption
+			m_framesToWaitServerNotify = -1; // Reset
+		}
+	}
+
 	if (IsProcessingStateRequest())
 	{
 		requestId = JsonObject_processingState->GetStringField(s_requestIdStr);
@@ -1108,6 +1104,7 @@ void UZLCloudPluginStateManager::Update(LauncherComms* launcherComms)
 
 			if (stateRequestedContentJob)
 			{
+				UE_LOG(LogZLCloudPlugin, Display, TEXT("Confirming State for Capture: %d"), JsonObject_requestedStateLeafCount);
 				screenshotManager->SetCurrentRenderStateData(JsonObject_currentState);
 				screenshotManager->UpdateCurrentRenderStateRequestProgress(true, true);
 			}
@@ -1234,7 +1231,7 @@ void UZLCloudPluginStateManager::Update(LauncherComms* launcherComms)
 		{
 			//Send server notify and clear
 			m_needServerNotify = false;
-			launcherComms->SendLauncherMessage("APPINITIALSTATESET"); //onConnect is ready, allow adoption
+			m_framesToWaitServerNotify = 6;
 		}
 		else
 		{
@@ -1489,13 +1486,7 @@ template <typename T> void UZLCloudPluginStateManager::GetRequestedStateValue(FS
 
 			if (instantConfirm)
 			{
-				JsonObject_processingStateFinishedLeaves++;
-
-				//Remove from processing
-				RemoveNestedKey(FieldName, JsonObject_processingState);
-
-				//Update current state
-				SetJsonValueFromNestedKey(FieldName, JsonObject_currentState, val.Get());
+				ConfirmStateChange(FieldName, Success);
 			}
 		}
 		else if (JsonObject_out_requestedState->HasField(FieldName))
@@ -1594,32 +1585,7 @@ template <typename T> void UZLCloudPluginStateManager::GetRequestedStateValue(FS
 
 			if (instantConfirm)
 			{
-				JsonObject_processingStateFinishedLeaves += numLeavesInc;
-
-				//Remove from processing
-				JsonObject_processingState->RemoveField(FieldName);
-
-				//Update current state
-				if constexpr (isArray)
-				{
-					JsonObject_currentState->SetArrayField(FieldName, *ArrayValue);
-				}
-				else if constexpr (isNumber)
-				{
-					JsonObject_currentState->SetNumberField(FieldName, data);
-				}
-				else if constexpr (isBool)
-				{
-					JsonObject_currentState->SetBoolField(FieldName, data);
-				}
-				else if constexpr (isString)
-				{
-					JsonObject_currentState->SetStringField(FieldName, data);
-				}
-				else if constexpr (isJsonValue)
-				{
-					JsonObject_currentState->SetField(FieldName, data);
-				}
+				ConfirmStateChange(FieldName, Success);
 			}
 		}
 	}
@@ -1630,11 +1596,14 @@ template <typename T> void UZLCloudPluginStateManager::GetCurrentStateValue(FStr
 	Success = false;
 
 	constexpr bool isArray = (std::is_same<T, TArray<double>>::value)
+		|| (std::is_same<T, TArray<float>>::value)
 		|| (std::is_same<T, TArray<bool>>::value)
 		|| (std::is_same<T, TArray<FString>>::value);
 
 	constexpr bool isNumber = (std::is_same<T, double>::value)
-		|| (std::is_same<T, TArray<double>>::value);
+		|| (std::is_same<T, float>::value)
+		|| (std::is_same<T, TArray<double>>::value)
+		|| (std::is_same<T, TArray<float>>::value);
 
 	constexpr bool isBool = (std::is_same<T, bool>::value)
 		|| (std::is_same<T, TArray<bool>>::value);
@@ -2011,7 +1980,138 @@ template <typename T> void UZLCloudPluginStateManager::SetCurrentStateValue(FStr
 	}
 }
 
+template<typename T>
+void UZLCloudPluginStateManager::Internal_AppendProcessingState(FString FieldName, T data)
+{
+	constexpr bool isArray = (std::is_same<T, TArray<double>>::value)
+		|| (std::is_same<T, TArray<bool>>::value)
+		|| (std::is_same<T, TArray<FString>>::value);
 
+	constexpr bool isNumber = (std::is_same<T, double>::value)
+		|| (std::is_same<T, TArray<double>>::value);
+
+	constexpr bool isBool = (std::is_same<T, bool>::value)
+		|| (std::is_same<T, TArray<bool>>::value);
+
+	constexpr bool isString = (std::is_same<T, FString>::value)
+		|| (std::is_same<T, TArray<FString>>::value);
+
+	if (FieldName.Contains("."))
+	{
+		// . delimited nesting (this is mainly because BP does not handle generic types like FJsonValue or FJsonObject)
+		TArray<FString> Keys;
+		FieldName.ParseIntoArray(Keys, TEXT("."), true);
+
+		const FString FinalKey = Keys[Keys.Num() - 1];
+
+		TSharedPtr<FJsonObject> ProcessingObject = JsonObject_processingState;
+		for (const FString& Key : Keys)
+		{
+			if (Key.Equals(FinalKey, ESearchCase::CaseSensitive))
+			{
+				if constexpr (isArray)
+				{
+					TArray<TSharedPtr<FJsonValue>> ArrayValues;
+					ArrayValues.Reserve(data.Num());
+
+					for (const auto& Value : data)
+					{
+						if constexpr (isNumber)
+						{
+							ArrayValues.Add(MakeShared<FJsonValueNumber>(Value));
+						}
+						else if constexpr (isBool)
+						{
+							ArrayValues.Add(MakeShared<FJsonValueBoolean>(Value));
+						}
+						else if constexpr (isString)
+						{
+							ArrayValues.Add(MakeShared<FJsonValueString>(Value));
+						}
+					}
+
+					ProcessingObject->SetArrayField(FinalKey, ArrayValues);
+				}
+				else
+				{
+					if constexpr (isNumber)
+					{
+						ProcessingObject->SetNumberField(FinalKey, data);
+					}
+					else if constexpr (isBool)
+					{
+						ProcessingObject->SetBoolField(FinalKey, data);
+					}
+					else if constexpr (isString)
+					{
+						ProcessingObject->SetStringField(FinalKey, data);
+					}
+				}
+			}
+			else
+			{
+				const TSharedPtr<FJsonObject>* SubObj = nullptr;
+
+				if (ProcessingObject->TryGetObjectField(Key, SubObj))
+				{
+					ProcessingObject = *SubObj;
+				}
+				else
+				{
+					TSharedPtr<FJsonObject> NewSubObj = MakeShared<FJsonObject>();
+					ProcessingObject->SetObjectField(Key, NewSubObj);
+					ProcessingObject = NewSubObj;
+				}
+			}
+		}
+
+	}
+	else
+	{
+		if constexpr (isArray)
+		{
+			TArray<TSharedPtr<FJsonValue>> ArrayValues;
+			ArrayValues.Reserve(data.Num());
+
+			for (const auto& Value : data)
+			{
+				if constexpr (isNumber)
+				{
+					ArrayValues.Add(MakeShared<FJsonValueNumber>(Value));
+				}
+				else if constexpr (isBool)
+				{
+					ArrayValues.Add(MakeShared<FJsonValueBoolean>(Value));
+				}
+				else if constexpr (isString)
+				{
+					ArrayValues.Add(MakeShared<FJsonValueString>(Value));
+				}
+			}
+
+			JsonObject_processingState->SetArrayField(FieldName, ArrayValues);
+		}
+		else
+		{
+			if constexpr (isNumber)
+			{
+				JsonObject_processingState->SetNumberField(FieldName, data);
+			}
+			else if constexpr (isBool)
+			{
+				JsonObject_processingState->SetBoolField(FieldName, data);
+			}
+			else if constexpr (isString)
+			{
+				JsonObject_processingState->SetStringField(FieldName, data);
+			}
+		}
+	}
+
+	//To ensure request comes back when this appended internal state is also complete, we incremebt the tick-check state counters
+	UE_LOG(LogZLCloudPlugin, Display, TEXT("Internal state request appended key: %s"), *FieldName);
+	JsonObject_requestedStateLeafCount += 1;
+}
 
 void UZLCloudPluginStateManager::SetCurrentSchema(UStateKeyInfoAsset* Asset)
 {
@@ -2430,6 +2530,12 @@ void UZLCloudPluginStateManager::PushStateEventsToWeb()
 
 						currentJson->SetObjectField("unprocessed_state", unprocessed);
 					}
+
+					FString OutputString;
+					TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutputString);
+					FJsonSerializer::Serialize(currentJson.ToSharedRef(), Writer);
+
+					UE_LOG(LogZLCloudPlugin, Display, TEXT("State request timeout: %s"), *OutputString);
 				}
 			}
 			else if (JsonObject_processingStateLeafCount < JsonObject_requestedStateLeafCount) //Some requested states were ignored

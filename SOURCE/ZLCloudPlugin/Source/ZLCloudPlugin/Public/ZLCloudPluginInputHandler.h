@@ -96,6 +96,10 @@ namespace ZLCloudPlugin
 		 * JsonData handling
 		 */
         virtual void HandleJsonData(TArray<FString>& message);
+		/**
+		 * ImageCapture handling
+		 */
+		virtual void HandleImageCapture(TArray<FString>& message);
         /**
          * Command handling
          */

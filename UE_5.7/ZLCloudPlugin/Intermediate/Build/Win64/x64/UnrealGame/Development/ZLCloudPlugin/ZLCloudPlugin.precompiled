@@ -37,6 +37,7 @@
 		"ZLSpotLightDataDrivenUIManager.cpp.obj",
 		"ZLStateEditor.cpp.obj",
 		"ZLStateKeyInfo.cpp.obj",
-		"ZLTrackedStateBlueprint.cpp.obj"
+		"ZLTrackedStateBlueprint.cpp.obj",
+		"ZLTransientMaterialSwapOuter.cpp.obj"
 	]
 }

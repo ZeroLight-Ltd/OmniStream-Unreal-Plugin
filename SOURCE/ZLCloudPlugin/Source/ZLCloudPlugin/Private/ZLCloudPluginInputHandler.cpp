@@ -19,6 +19,16 @@
 #include "Misc/CoreMiscDefines.h"
 #include "Input/HittestGrid.h"
 #include "ZLCloudPluginDelegates.h"
+#if UNREAL_5_3_OR_NEWER
+#include "HighResScreenshot.h"
+#include "ImageUtils.h"
+#else
+#include "Engine/Public/HighResScreenshot.h"
+#include "Engine/Public/ImageUtils.h"
+#endif
+#include "Misc/Base64.h"
+#include "Engine/GameViewportClient.h"
+#include "Async/Async.h"
 #if WITH_EDITOR
 #include "Editor.h"
 #include "LevelEditor.h"
@@ -78,6 +88,7 @@ namespace ZLCloudPlugin
 		RegisterMessageHandler("MouseDouble", [this](TArray<FString>& message) { HandleOnMouseDoubleClick(message); });
 
 		RegisterMessageHandler("JsonData", [this](TArray<FString>& message) { HandleJsonData(message); });
+		RegisterMessageHandler("ImageCapture", [this](TArray<FString>& message) { HandleImageCapture(message); });
 //        RegisterMessageHandler("Command", [this](TArray<FString>& message) { HandleCommand(Ar); });
 //        RegisterMessageHandler("UIInteraction", [this](TArray<FString>& message) { HandleUIInteraction(Ar); });
     }
@@ -892,6 +903,186 @@ namespace ZLCloudPlugin
 			 Delegates->OnRecieveData.Broadcast(jsonData);
 		 }
 	 }
+
+	/**
+	 * ImageCapture handling
+	 */
+	void FZLCloudPluginInputHandler::HandleImageCapture(TArray<FString>& message)
+	{
+		// Message format: [MessageType.ImageCapture, requestId, width, height, format]
+		if (message.Num() < 5)
+		{
+			UE_LOG(LogZLCloudPluginInputHandler, Warning, TEXT("HandleImageCapture: Invalid message format. Expected 5 parameters, got %d"), message.Num());
+			return;
+		}
+
+		FString requestId = message[1];
+		int32 width = FCString::Atoi(*message[2]);
+		int32 height = FCString::Atoi(*message[3]);
+		FString format = message[4].ToLower();
+
+		if (format != TEXT("png") && format != TEXT("jpg") && format != TEXT("jpeg"))
+		{
+			UE_LOG(LogZLCloudPluginInputHandler, Warning, TEXT("HandleImageCapture: Invalid format '%s'. Using 'png' as default."), *format);
+			format = TEXT("png");
+		}
+
+		FString compressionFormat = format;
+		if (compressionFormat == TEXT("jpeg"))
+		{
+			compressionFormat = TEXT("jpg");
+		}
+
+		UE_LOG(LogZLCloudPluginInputHandler, Display, TEXT("HandleImageCapture: requestId=%s, width=%d, height=%d, format=%s"), *requestId, width, height, *format);
+
+		UGameViewportClient* GameViewport = nullptr;
+		if (GEngine)
+		{
+			for (const FWorldContext& Context : GEngine->GetWorldContexts())
+			{
+				if (Context.World() && Context.World()->GetGameViewport())
+				{
+					GameViewport = Context.World()->GetGameViewport();
+					break;
+				}
+			}
+		}
+
+		if (GameViewport)
+		{
+			FViewport* Viewport = GameViewport->Viewport;
+			if (Viewport != nullptr)
+			{
+				FHighResScreenshotConfig& HighResScreenshotConfig = GetHighResScreenshotConfig();
+				HighResScreenshotConfig.SetResolution(width, height);
+
+			TArray<TCHAR> RequestIdChars = requestId.GetCharArray();
+			TArray<TCHAR> FormatChars = compressionFormat.GetCharArray();
+			
+			UE_LOG(LogZLCloudPluginInputHandler, Verbose, TEXT("HandleImageCapture: Capturing values - requestId='%s', format='%s'"), *requestId, *compressionFormat);
+			
+			TWeakObjectPtr<UGameViewportClient> WeakGameViewport = GameViewport;
+			TSharedPtr<FDelegateHandle> DelegateHandlePtr = MakeShareable(new FDelegateHandle);
+
+			auto ScreenshotCallback = [this, 
+				RequestIdChars,
+				FormatChars,
+				WeakGameViewport, 
+				DelegateHandlePtr](int32 InSizeX, int32 InSizeY, const TArray<FColor>& InImageData) mutable
+			{
+				// Copy image data to ensure it's safe to use in the queued task
+				// The callback might be called from a different thread, so we need to queue work to the game thread
+				TArray<FColor> CopiedImageData = InImageData;
+				int32 CopiedSizeX = InSizeX;
+				int32 CopiedSizeY = InSizeY;
+				
+				// Queue the actual processing to the game thread
+				AsyncTask(ENamedThreads::GameThread, [this,
+					RequestIdChars,
+					FormatChars,
+					WeakGameViewport,
+					DelegateHandlePtr,
+					CopiedImageData,
+					CopiedSizeX,
+					CopiedSizeY]() mutable
+				{
+					// Validate screenshot dimensions (Unreal should provide valid values, but edge cases can happen)
+					if (CopiedSizeX <= 0 || CopiedSizeY <= 0)
+					{
+						UE_LOG(LogZLCloudPluginInputHandler, Error, TEXT("HandleImageCapture: Invalid screenshot dimensions: %dx%d"), CopiedSizeX, CopiedSizeY);
+						return;
+					}
+
+					// Validate image data size matches expected pixel count (catches data corruption/mismatch from Unreal callback)
+					const int32 ExpectedPixelCount = CopiedSizeX * CopiedSizeY;
+					if (CopiedImageData.Num() < ExpectedPixelCount)
+					{
+						UE_LOG(LogZLCloudPluginInputHandler, Error, TEXT("HandleImageCapture: Image data size mismatch. Expected %d pixels, got %d"), ExpectedPixelCount, CopiedImageData.Num());
+						return;
+					}
+
+					// Reconstruct strings from captured arrays (we control these from validated input)
+					FString RequestId(RequestIdChars.GetData());
+					FString Format(FormatChars.GetData());
+					
+					// Clean up delegate
+					if (UGameViewportClient* PinnedViewport = WeakGameViewport.Get())
+					{
+						if (DelegateHandlePtr->IsValid())
+						{
+							PinnedViewport->OnScreenshotCaptured().Remove(*DelegateHandlePtr);
+							DelegateHandlePtr->Reset();
+						}
+					}
+
+					UE_LOG(LogZLCloudPluginInputHandler, Display, TEXT("HandleImageCapture: Screenshot captured, size=%dx%d, processing... RequestId='%s', Format='%s'"), CopiedSizeX, CopiedSizeY, *RequestId, *Format);
+
+					// Validate module is still valid
+					if (!ZLCloudPluginModule)
+					{
+						UE_LOG(LogZLCloudPluginInputHandler, Error, TEXT("HandleImageCapture: ZLCloudPluginModule is null"));
+						return;
+					}
+
+				TArray64<uint8> CompressedImageBytes;
+				FImageView ImageView((const FColor*)CopiedImageData.GetData(), CopiedSizeX, CopiedSizeY);
+
+				// Set JPEG quality to 90% (0-100 range, where 100 is highest quality)
+				int32 Quality = 0; // Default quality (0 means use default)
+				if (Format == TEXT("jpg") || Format == TEXT("jpeg"))
+				{
+					Quality = 90;
+				}
+
+				if (!FImageUtils::CompressImage(CompressedImageBytes, *Format, ImageView, Quality))
+				{
+					UE_LOG(LogZLCloudPluginInputHandler, Error, TEXT("HandleImageCapture: Failed to compress image with format '%s'"), *Format);
+					return;
+				}
+
+					// Convert to base64 (FBase64::Encode requires TArray<uint8>, not TArray64)
+					TArray<uint8> CompressedImageBytesArray;
+					CompressedImageBytesArray.Append(CompressedImageBytes.GetData(), CompressedImageBytes.Num());
+					FString Base64Image = FBase64::Encode(CompressedImageBytesArray);
+
+					TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject);
+					ResponseJson->SetStringField(TEXT("requestId"), RequestId);
+					ResponseJson->SetStringField(TEXT("format"), Format);
+					ResponseJson->SetStringField(TEXT("imageData"), Base64Image);				
+
+					FString ResponseJsonString;
+					TSharedRef<TJsonWriter<>> JsonWriter = TJsonWriterFactory<>::Create(&ResponseJsonString);
+					FJsonSerializer::Serialize(ResponseJson.ToSharedRef(), JsonWriter);
+
+					// Double-check module is still valid before sending
+					if (ZLCloudPluginModule)
+					{
+						ZLCloudPluginModule->SendImageCapture(ResponseJsonString);
+						UE_LOG(LogZLCloudPluginInputHandler, Display, TEXT("HandleImageCapture: Image sent successfully, requestId=%s"), *RequestId);
+					}
+					else
+					{
+						UE_LOG(LogZLCloudPluginInputHandler, Error, TEXT("HandleImageCapture: ZLCloudPluginModule became invalid before sending"));
+					}
+				});
+			};
+
+				*DelegateHandlePtr = GameViewport->OnScreenshotCaptured().AddLambda(ScreenshotCallback);
+
+				//TODO could this code be shared with ZLScreenshot?
+				UE_LOG(LogZLCloudPluginInputHandler, Display, TEXT("HandleImageCapture: Triggering screenshot capture..."));
+				Viewport->TakeHighResScreenShot();
+			}
+			else
+			{
+				UE_LOG(LogZLCloudPluginInputHandler, Error, TEXT("HandleImageCapture: Viewport is null"));
+			}
+		}
+		else
+		{
+			UE_LOG(LogZLCloudPluginInputHandler, Error, TEXT("HandleImageCapture: GameViewport is null"));
+		}
+	}
 
     /**
      * Command handling

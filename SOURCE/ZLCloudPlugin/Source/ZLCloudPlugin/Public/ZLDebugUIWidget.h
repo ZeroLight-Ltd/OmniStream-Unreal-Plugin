@@ -19,6 +19,7 @@
 #include "Components/VerticalBoxSlot.h"
 #include "Components/SizeBox.h"
 #include "Components/Image.h"
+#include "Components/ButtonSlot.h"
 #include "Styling/SlateTypes.h"
 #include "Brushes/SlateColorBrush.h"
 #include "ZLStateKeyInfo.h"
@@ -167,6 +168,9 @@ public:
 
 	UFUNCTION()
 	void OnComboBoxChanged(FString SelectedItem, ESelectInfo::Type SelectionType);
+
+	UFUNCTION()
+	void TriggerResend();
 };
 
 UCLASS()
@@ -181,6 +185,9 @@ public:
 
 	UFUNCTION()
 	void OnCheckBoxChanged(bool bIsChecked);
+
+	UFUNCTION()
+	void TriggerResend();
 };
 
 UCLASS()
@@ -196,6 +203,9 @@ public:
 
 	UFUNCTION()
 	void OnTextValueCommitted(const FText& ComittedText, ETextCommit::Type CommitMethod);
+
+	UFUNCTION()
+	void TriggerResend();
 };
 
 UCLASS()
@@ -236,6 +246,9 @@ protected:
 	void OnSubmitState();
 
 	UFUNCTION()
+	void OnToggleAllowResendCurrent();
+
+	UFUNCTION()
 	void OnRemoveArrayEntry(UWidget* EntryToRemove);
 
 	void RebuildDebugUI();
@@ -248,12 +261,16 @@ protected:
 	TObjectPtr<UTextBlock> SchemaTitle;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Schema", meta = (BindWidget))
+	TObjectPtr<UButton> ZLLogoButton;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Schema", meta = (BindWidget))
 	TObjectPtr<UVerticalBox> SchemaOptionsVBox;
 
 	UPROPERTY()
 	UStateKeyInfoAsset* TargetSchema = nullptr;
 
 	bool instantProcess = true;
+	bool allowResendCurrentValues = false;
 };
 
 UCLASS()

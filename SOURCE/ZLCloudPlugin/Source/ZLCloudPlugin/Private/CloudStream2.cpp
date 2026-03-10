@@ -10,6 +10,7 @@
 #include "Misc/App.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Engine/GameEngine.h"
+#include "RenderingThread.h"
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -51,14 +52,21 @@ FVector3f CloudStream2::m_MousePosition = FVector3f::ZeroVector;
 bool CloudStream2::m_LastCameraMoved = true;
 ZLStopwatch CloudStream2::m_StreamTimer;
 
+uint32_t CloudStream2::m_featureNodesFrameID = 0;
+bool CloudStream2::m_isFeatureNodesSyncCapable = false;
+
 #if UNREAL_5_5_OR_NEWER
 FTextureRHIRef CloudStream2::m_IntermediateTexture = nullptr;
 #else
 FTexture2DRHIRef CloudStream2::m_IntermediateTexture = nullptr;
 #endif
 
+FGPUFenceRHIRef CloudStream2::m_TextureReleaseFence = nullptr;
+
 bool CloudStream2::m_NeedsResolutionChange = false;
 bool CloudStream2::m_BackToInitialCameraConfig = false;
+int CloudStream2::m_FramesToSkipAfterResolutionChange = 0;
+bool CloudStream2::m_IsChangingTexture = false;
 
 InterruptionReason CloudStream2::m_Interruption = InterruptionReason::NO_INTERRUPTION;
 FCriticalSection CloudStream2::m_InterruptionMutex;
@@ -73,13 +81,45 @@ TSharedPtr<IZLCloudPluginInputHandler> CloudStream2::m_InputHandler = nullptr;
 TSharedPtr<ZLAudioSubmixCapturer> CloudStream2::m_audioSubmixCapturer = nullptr;
 bool CloudStream2::m_audioInitialised = false;
 
+bool CloudStream2::IsDLLValid()
+{
+	return m_pluginInitialised && m_CloudStream2DLLHandle != nullptr;
+}
+
 void CloudStream2::InitPlugin()
 {
 	if (m_pluginInitialised)
-		return;
+	{
+		// Already initialized, verify handle is still valid
+		if (!m_CloudStream2DLLHandle)
+		{
+			UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 plugin marked as initialized but DLL handle is null, reinitializing..."));
+			m_pluginInitialised = false;
+		}
+		else
+		{
+			return;
+		}
+	}
 
 	// Get the base directory of this plugin
-	FString BaseDir = IPluginManager::Get().FindPlugin("ZLCloudPlugin")->GetBaseDir();
+	TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin("ZLCloudPlugin");
+	if (!Plugin.IsValid())
+	{
+		UE_LOG(LogZLCloudPlugin, Error, TEXT("Failed to find ZLCloudPlugin in plugin manager"));
+		m_pluginInitialised = false;
+		m_CloudStream2DLLHandle = nullptr;
+		return;
+	}
+
+	FString BaseDir = Plugin->GetBaseDir();
+	if (BaseDir.IsEmpty())
+	{
+		UE_LOG(LogZLCloudPlugin, Error, TEXT("ZLCloudPlugin base directory is empty"));
+		m_pluginInitialised = false;
+		m_CloudStream2DLLHandle = nullptr;
+		return;
+	}
 
 	FString LibraryPath;
 #if PLATFORM_WINDOWS
@@ -90,13 +130,32 @@ void CloudStream2::InitPlugin()
 	LibraryPath = FPaths::Combine(*BaseDir, TEXT("Binaries/ThirdParty/CloudStream2/Linux/x86_64-unknown-linux-gnu/CloudStream2.so"));
 #endif // PLATFORM_WINDOWS
 
-	m_CloudStream2DLLHandle = !LibraryPath.IsEmpty() ? FPlatformProcess::GetDllHandle(*LibraryPath) : nullptr;
+	if (LibraryPath.IsEmpty())
+	{
+		UE_LOG(LogZLCloudPlugin, Error, TEXT("CloudStream2 library path is empty for current platform"));
+		m_pluginInitialised = false;
+		m_CloudStream2DLLHandle = nullptr;
+		return;
+	}
+
+	// Check if file exists before attempting to load
+	if (!FPaths::FileExists(LibraryPath))
+	{
+		UE_LOG(LogZLCloudPlugin, Error, TEXT("CloudStream2 DLL not found at path: %s"), *LibraryPath);
+		m_pluginInitialised = false;
+		m_CloudStream2DLLHandle = nullptr;
+		return;
+	}
+
+	m_CloudStream2DLLHandle = FPlatformProcess::GetDllHandle(*LibraryPath);
 
 	if (m_CloudStream2DLLHandle)
 	{
 		//CloudStream2DLL::CloudStream2DebugPopup();
 		m_pluginInitialised = true;
+
 		CloudStream2DLL::SetUEDebugFunction(&CloudStream2::PluginPrint);
+		
 		m_audioSubmixCapturer = MakeShared<ZLAudioSubmixCapturer>();
 #if WITH_EDITOR
 		if (GIsEditor) //Catch because standalone level play annoyingly runs with WITH_EDITOR defined
@@ -106,32 +165,44 @@ void CloudStream2::InitPlugin()
 			//SetMessageHandling(false);
 		}
 #endif
+		UE_LOG(LogZLCloudPlugin, Display, TEXT("CloudStream2 DLL loaded successfully from: %s"), *LibraryPath);
 	}
 	else
 	{
-		UE_LOG(LogZLCloudPlugin, Error, TEXT("Failed to load CloudStream2 dll"));
+		UE_LOG(LogZLCloudPlugin, Error, TEXT("Failed to load CloudStream2 DLL from: %s"), *LibraryPath);
+		m_pluginInitialised = false;
+		m_CloudStream2DLLHandle = nullptr;
 		return;
 	}
 }
 
 void CloudStream2::FreePlugin()
 {
-	if (m_pluginInitialised)
+	if (m_pluginInitialised && m_CloudStream2DLLHandle)
 	{
-		// Free the dll handle
-		CloudStream2DLL::Destroy();
+		if (IsDLLValid())
+		{
+			CloudStream2DLL::Destroy();
+		}
+		
 		FPlatformProcess::FreeDllHandle(m_CloudStream2DLLHandle);
 		UE_LOG(LogZLCloudPlugin, Display, TEXT("CloudStream2 : Target FPS %d"), m_TargetFPS);
 		m_CloudStream2DLLHandle = nullptr;
+	}
+	else if (m_CloudStream2DLLHandle)
+	{
+		UE_LOG(LogZLCloudPlugin, Warning, TEXT("Freeing CloudStream2 DLL handle that was not properly initialized"));
+		FPlatformProcess::FreeDllHandle(m_CloudStream2DLLHandle);
+		m_CloudStream2DLLHandle = nullptr;
+	}
 
-		if (m_audioSubmixCapturer)
-		{
-			if (m_audioInitialised)
-				m_audioSubmixCapturer->Uninitialise();
+	if (m_audioSubmixCapturer)
+	{
+		if (m_audioInitialised)
+			m_audioSubmixCapturer->Uninitialise();
 
-			m_audioSubmixCapturer.Reset();
-			m_audioSubmixCapturer = nullptr;
-		}
+		m_audioSubmixCapturer.Reset();
+		m_audioSubmixCapturer = nullptr;
 	}
 
 	m_pluginReady = false;
@@ -205,13 +276,21 @@ void CloudStream2::DisconnectInputHandler()
 		m_InputHandler.Reset();
 		m_inputDeactivate = false;
 	}
+
+	m_featureNodesFrameID = 0;
 }
 
 void CloudStream2::InitCloudStreamSettings(const char* settingsJson)
 {
-	if (!m_pluginInitialised)
+	if (!IsDLLValid())
 	{
-		UE_LOG(LogZLCloudPlugin, Error, TEXT("CloudStream2 dll not initialised"));
+		UE_LOG(LogZLCloudPlugin, Error, TEXT("CloudStream2 DLL not initialised or invalid, cannot set settings"));
+		return;
+	}
+	
+	if (!settingsJson)
+	{
+		UE_LOG(LogZLCloudPlugin, Error, TEXT("CloudStream2 settings JSON is null"));
 		return;
 	}
 
@@ -261,8 +340,17 @@ void CloudStream2::InitCloudStreamSettings(const char* settingsJson)
 
 void CloudStream2::UpdateFPS()
 {
+	if (!IsDLLValid())
+	{
+		return; // Silently return if DLL not initialized
+	}
+
 	const UZLCloudPluginSettings* Settings = GetMutableDefault<UZLCloudPluginSettings>();
-	check(Settings);
+	if (!Settings)
+	{
+		UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 settings not available, cannot update FPS"));
+		return;
+	}
 
 	int fps = Settings->FramesPerSecond;
 
@@ -270,7 +358,11 @@ void CloudStream2::UpdateFPS()
 	{
 		//Set FPS
 		IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("t.MaxFPS"));
-		CVar->Set(fps);
+		if (CVar)
+		{
+			CVar->Set(fps);
+		}
+		
 		CloudStream2DLL::SetFPS(fps);
 		m_TargetFPS = fps;
 		UE_LOG(LogZLCloudPlugin, Display, TEXT("CloudStream2 : Target FPS %d"), m_TargetFPS);
@@ -301,7 +393,7 @@ void CloudStream2::SetReadyToStream()
 
 bool CloudStream2::PluginStreamConnected()
 {
-	if (IsReady())
+	if (IsReady() && IsDLLValid())
 	{
 		if (CloudStream2DLL::GetNumConnections() > 0)
 		{
@@ -313,6 +405,12 @@ bool CloudStream2::PluginStreamConnected()
 
 void CloudStream2::SetAppInfo()
 {
+	if (!IsDLLValid())
+	{
+		UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 DLL not valid, cannot set app info"));
+		return;
+	}
+
 	//Set info to plugin that can be shared to the browser (don't add any : )
 	FString appInfo = "";
 
@@ -321,6 +419,13 @@ void CloudStream2::SetAppInfo()
 	int cs2_rev = 0;
 	int cs2_build = 0;
 	CloudStream2DLL::GetPluginVersion(cs2_major, cs2_minor, cs2_rev, cs2_build);
+
+	m_isFeatureNodesSyncCapable = cs2_major > 2 || cs2_minor > 0 || cs2_rev > 3;
+
+	if (!m_isFeatureNodesSyncCapable)
+	{
+		UE_LOG(LogZLCloudPlugin, Error, TEXT("CloudStream2 plug-in version 2.0.4 or above is required to support feature nodes frame synchronisation."));
+	}
 
 	FString pluginVersion = "";
 	IPluginManager& PluginManager = IPluginManager::Get();
@@ -345,9 +450,9 @@ void CloudStream2::SetAppInfo()
 
 void CloudStream2::InitCloudStreamCallbacks()
 {
-	if (!m_pluginInitialised)
+	if (!IsDLLValid())
 	{
-		UE_LOG(LogZLCloudPlugin, Error, TEXT("CloudStream2 dll not initialised"));
+		UE_LOG(LogZLCloudPlugin, Error, TEXT("CloudStream2 DLL not initialised or invalid, cannot initialize callbacks"));
 		return;
 	}
 
@@ -393,6 +498,10 @@ void CloudStream2::Update(UWorld* World)
 				}
 				else
 				{
+					// Flush rendering commands before changing resolution to ensure GPU has finished
+					// all operations with the current backbuffer.
+					FlushRenderingCommands();
+					
 					//Send command to update resolution
 					FString ChangeResCommand = FString::Printf(TEXT("r.SetRes %dx%d"), m_defaultStreamWidth, m_defaultStreamHeight);
 					GEngine->Exec(World, *ChangeResCommand);
@@ -423,6 +532,11 @@ void CloudStream2::Update(UWorld* World)
 				}
 				else
 				{
+					// Flush rendering commands before changing resolution to ensure GPU has finished
+					// all operations with the current backbuffer. This prevents GPU crashes when
+					// resolution change triggers new PSO compilation.
+					FlushRenderingCommands();
+					
 					//Send command to update resolution
 					FString ChangeResCommand = FString::Printf(TEXT("r.SetRes %dx%d"), m_FrameRequirements.Width, m_FrameRequirements.Height);
 					GEngine->Exec(World, *ChangeResCommand);
@@ -430,9 +544,12 @@ void CloudStream2::Update(UWorld* World)
 			}
 
 			m_NeedsResolutionChange = false;
+			// Skip a few frames after resolution change to allow PSO compilation to complete
+			// and prevent GPU resource conflicts during the transition
+			m_FramesToSkipAfterResolutionChange = 3;
 		}
 
-		if (m_audioSubmixCapturer)
+		if (m_audioSubmixCapturer && IsDLLValid())
 		{
 			if (CloudStream2DLL::ShouldSendAudio())
 			{
@@ -462,34 +579,108 @@ void CloudStream2::Update(UWorld* World)
 
 void CloudStream2::CheckInterruptions()
 {
-	FScopeLock ScopeLock(&m_InterruptionMutex);
+	check(IsInRenderingThread());
+	
+	InterruptionReason CurrentInterruption = InterruptionReason::NO_INTERRUPTION;
+	CloudStream2DLL::EncoderRequirements FrameReqs = {};
+	bool bHasInterruption = false;
+	
 	{
+		FScopeLock ScopeLock(&m_InterruptionMutex);
 		if (m_Interruption != InterruptionReason::NO_INTERRUPTION)
 		{
-			if (m_Interruption == InterruptionReason::FRAME_REQUIREMENTS)
-			{				
-				if (m_IntermediateTexture)
-				{
-					m_IntermediateTexture.SafeRelease();
-				}
-				m_IntermediateTexture = ZLCloudPluginUtils::CreateTexture(m_FrameRequirements.Width, m_FrameRequirements.Height);
-				CloudStream2DLL::SetTexture((ID3D12Resource*)m_IntermediateTexture->GetNativeResource());
-
-				UE_LOG(LogZLCloudPlugin, Display, TEXT("CloudStream2 : IntermediateTex change: %dx%d"), m_FrameRequirements.Width, m_FrameRequirements.Height);
-			}
-			else if (m_Interruption == InterruptionReason::CLIENTS_DISCONNECTED)
-			{
-				m_SentFramesCount = 0;
-
-				m_NeedsResolutionChange = true;
-				m_BackToInitialCameraConfig = true;
-
-				m_FrameRequirements.Clear();
-				//ClearTexture();
-				m_inputDeactivate = true;
-			}
-
+			CurrentInterruption = m_Interruption;
+			FrameReqs = m_FrameRequirements;
+			bHasInterruption = true;
 			m_Interruption = InterruptionReason::NO_INTERRUPTION;
+		}
+	}
+	
+	if (bHasInterruption)
+	{
+		if (CurrentInterruption == InterruptionReason::FRAME_REQUIREMENTS)
+		{
+			m_IsChangingTexture = true;
+			
+			if (m_IntermediateTexture)
+			{
+				FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
+				
+				if (m_TextureReleaseFence)
+				{
+					const int32 MaxWaitIterations = 1000;
+					int32 WaitIterations = 0;
+					while (!m_TextureReleaseFence->Poll() && WaitIterations < MaxWaitIterations)
+					{
+						FPlatformProcess::Sleep(0.001f);
+						++WaitIterations;
+					}
+					if (WaitIterations >= MaxWaitIterations)
+					{
+						UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : GPU fence wait timeout"));
+					}
+				}
+				
+				RHICmdList.ImmediateFlush(EImmediateFlushType::WaitForOutstandingTasksOnly);
+				
+				m_IntermediateTexture.SafeRelease();
+				m_TextureReleaseFence = nullptr;
+			}
+			
+			if (FrameReqs.Width > 0 && FrameReqs.Height > 0)
+			{
+				m_IntermediateTexture = ZLCloudPluginUtils::CreateTexture(FrameReqs.Width, FrameReqs.Height);
+				
+				if (m_IntermediateTexture && m_IntermediateTexture->GetNativeResource() && IsDLLValid())
+				{
+					CloudStream2DLL::SetTexture((ID3D12Resource*)m_IntermediateTexture->GetNativeResource());
+					UE_LOG(LogZLCloudPlugin, Display, TEXT("CloudStream2 : IntermediateTex change: %dx%d"), FrameReqs.Width, FrameReqs.Height);
+				}
+				else
+				{
+					UE_LOG(LogZLCloudPlugin, Error, TEXT("CloudStream2 : Failed to create intermediate texture %dx%d"), FrameReqs.Width, FrameReqs.Height);
+				}
+			}
+			else
+			{
+				UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : Invalid frame requirements for texture creation: %dx%d"), FrameReqs.Width, FrameReqs.Height);
+			}
+			
+			m_IsChangingTexture = false;
+		}
+		else if (CurrentInterruption == InterruptionReason::CLIENTS_DISCONNECTED)
+		{
+			m_SentFramesCount = 0;
+
+			m_IsChangingTexture = true;
+			
+			if (m_TextureReleaseFence)
+			{
+				FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
+				
+				const int32 MaxWaitIterations = 1000;
+				int32 WaitIterations = 0;
+				while (!m_TextureReleaseFence->Poll() && WaitIterations < MaxWaitIterations)
+				{
+					FPlatformProcess::Sleep(0.001f);
+					++WaitIterations;
+				}
+				if (WaitIterations >= MaxWaitIterations)
+				{
+					UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : GPU fence wait timeout during cleanup"));
+				}
+				
+				RHICmdList.ImmediateFlush(EImmediateFlushType::WaitForOutstandingTasksOnly);
+				m_TextureReleaseFence = nullptr;
+			}
+
+			m_NeedsResolutionChange = true;
+			m_BackToInitialCameraConfig = true;
+
+			m_FrameRequirements.Clear();
+			m_inputDeactivate = true;
+			
+			m_IsChangingTexture = false;
 		}
 	}
 }
@@ -510,6 +701,16 @@ void CloudStream2::UpdateMJPEGQuality()
 }
 */
 
+uint32_t CloudStream2::GetFeatureNodesFrameID()
+{
+	return m_featureNodesFrameID;
+}
+
+bool CloudStream2::GetFeatureNodesSyncCapability()
+{
+	return m_isFeatureNodesSyncCapable;
+}
+
 #if UNREAL_5_5_OR_NEWER
 void CloudStream2::OnFrame(const FTextureRHIRef& BackBuffer)
 #else
@@ -521,21 +722,52 @@ void CloudStream2::OnFrame(const FTexture2DRHIRef& BackBuffer)
 	{
 		CheckInterruptions();
 
-		if (m_IntermediateTexture && !m_NeedsResolutionChange)
+		// Skip frames during resolution transition to prevent GPU resource conflicts
+		if (m_FramesToSkipAfterResolutionChange > 0)
 		{
-			//void* nativeTextureResource = BackBuffer->GetNativeResource();
+			--m_FramesToSkipAfterResolutionChange;
+		}
+		// Additional validation: ensure texture is valid, not being changed, and resolution change is not in progress
+		else if (m_IntermediateTexture && m_IntermediateTexture->GetNativeResource() && !m_NeedsResolutionChange && !m_IsChangingTexture && IsDLLValid())
+		{
+			// Validate back buffer is valid
+			if (!BackBuffer || !BackBuffer->GetNativeResource())
+			{
+				UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : Invalid back buffer, skipping frame"));
+				return;
+			}
 			
 			FGPUFenceRHIRef CopyFence = GDynamicRHI->RHICreateGPUFence(*FString::Printf(TEXT("CloudStream2CopyTexture")));
 			
+			if (CopyFence)
+			{
 #if UNREAL_5_1_OR_NEWER
-			FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
-			ZLCloudPluginUtils::CopyTexture(RHICmdList, BackBuffer, m_IntermediateTexture, CopyFence);
+				FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
+				ZLCloudPluginUtils::CopyTexture(RHICmdList, BackBuffer, m_IntermediateTexture, CopyFence);
 #else
-			ZLCloudPluginUtils::CopyTexture(BackBuffer, m_IntermediateTexture, CopyFence);
+				ZLCloudPluginUtils::CopyTexture(BackBuffer, m_IntermediateTexture, CopyFence);
 #endif
 
-			CloudStream2DLL::OnFrameUE(0, GDynamicRHI->RHIGetNativeGraphicsQueue());
-			++m_SentFramesCount;
+				// Store the fence so we can wait on it before releasing the texture
+				m_TextureReleaseFence = CopyFence;
+
+				// Validate graphics queue before using it
+				void* GraphicsQueue = GDynamicRHI->RHIGetNativeGraphicsQueue();
+				if (GraphicsQueue)
+				{
+					CloudStream2DLL::OnFrameUE(0, GraphicsQueue);
+					m_featureNodesFrameID++;
+					++m_SentFramesCount;
+				}
+				else
+				{
+					UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : Invalid graphics queue, skipping frame"));
+				}
+			}
+			else
+			{
+				UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : Failed to create GPU fence, skipping frame"));
+			}
 		}
 
 		/*
@@ -611,37 +843,31 @@ void CloudStream2::OnFrame(const FTexture2DRHIRef& BackBuffer)
 void CloudStream2::OnFrameRequirementsChanged(CloudStream2DLL::EncoderRequirements requirements)
 {
 	FScopeLock ScopeLock(&m_InterruptionMutex);
+	
+	m_LastCameraMoved = true;
+
+	m_StreamTimer.Reset();
+	m_StreamTimer.Start();
+
+	if (m_FrameRequirements.FrameType != requirements.FrameType)
+		m_FrameRequirements.FrameType = requirements.FrameType;
+
+	if (requirements.Width != m_FrameRequirements.Width || requirements.Height != m_FrameRequirements.Height)
 	{
-		m_LastCameraMoved = true;
-
-		//if (!m_StreamTimer.IsRunning)
-		{
-			m_StreamTimer.Reset();
-			m_StreamTimer.Start();
-		}
-
-		if (m_FrameRequirements.FrameType != requirements.FrameType)
-			m_FrameRequirements.FrameType = requirements.FrameType;
-
-		if (requirements.Width != m_FrameRequirements.Width || requirements.Height != m_FrameRequirements.Height)
-		{
-			m_Interruption = InterruptionReason::FRAME_REQUIREMENTS;
-
-			m_FrameRequirements.Height = requirements.Height;
-			m_FrameRequirements.Width = requirements.Width;
-
-			m_NeedsResolutionChange = true;
-			m_BackToInitialCameraConfig = false;
-		}
-
-		if (requirements.UseDynamicResolution != m_FrameRequirements.UseDynamicResolution)
-			m_FrameRequirements.UseDynamicResolution = requirements.UseDynamicResolution;
-
-		if (requirements.UseStreamPausing != m_FrameRequirements.UseStreamPausing)
-			m_FrameRequirements.UseStreamPausing = requirements.UseStreamPausing;
-
-		m_ForcedFrames = FMath::Max<int32>(m_ForcedFrames, 4);
+		m_Interruption = InterruptionReason::FRAME_REQUIREMENTS;
+		m_FrameRequirements.Height = requirements.Height;
+		m_FrameRequirements.Width = requirements.Width;
+		m_NeedsResolutionChange = true;
+		m_BackToInitialCameraConfig = false;
 	}
+
+	if (requirements.UseDynamicResolution != m_FrameRequirements.UseDynamicResolution)
+		m_FrameRequirements.UseDynamicResolution = requirements.UseDynamicResolution;
+
+	if (requirements.UseStreamPausing != m_FrameRequirements.UseStreamPausing)
+		m_FrameRequirements.UseStreamPausing = requirements.UseStreamPausing;
+
+	m_ForcedFrames = FMath::Max<int32>(m_ForcedFrames, 4);
 }
 
 int CloudStream2::MouseLatencyValue()
@@ -668,17 +894,24 @@ void CloudStream2::OnMousePositionChanged(float x, float y, float z, int latency
 void CloudStream2::OnClientsDisconnected()
 {
 	FScopeLock ScopeLock(&m_InterruptionMutex);
-	{
-		m_Interruption = InterruptionReason::CLIENTS_DISCONNECTED;
-		m_StreamTimer.Stop();
-	}
+	m_Interruption = InterruptionReason::CLIENTS_DISCONNECTED;
+	m_StreamTimer.Stop();
 }
 
 void CloudStream2::SendCommand(const char* id, const char* data)
 {
-	if (IsReady())
+	if (IsReady() && IsDLLValid())
 	{
+		if (!id)
+		{
+			UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : SendCommand called with null id"));
+			return;
+		}
 		CloudStream2DLL::SendCommand(id, data);
+	}
+	else
+	{
+		UE_LOG(LogZLCloudPlugin, Verbose, TEXT("CloudStream2 : SendCommand called but plugin not ready or DLL invalid"));
 	}
 }
 

@@ -37,6 +37,7 @@
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLSpotLightDataDrivenUIManager.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLStateEditor.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLStateKeyInfo.cpp.obj",
-		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLTrackedStateBlueprint.cpp.obj"
+		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLTrackedStateBlueprint.cpp.obj",
+		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLTransientMaterialSwapOuter.cpp.obj"
 	]
 }

@@ -91,7 +91,7 @@ public:
 	/**
 	 * When a state request is processing for more than the specified value (in seconds) the request times out and reports a timeout to the web
 	 */
-	UPROPERTY(config, EditAnywhere, Category = Cloud)
+	UPROPERTY(config, EditAnywhere, Category = Cloud, meta = (ClampMin = "10.0", UIMin = "10.0"))
 	float stateRequestTimeout = 20.0;
 
 	/**
@@ -148,6 +148,18 @@ public:
 	*/
 	UPROPERTY(config, EditAnywhere, Category = BuildAndDeploy)
 	FString httpProxyOverride = "";
+
+	/**
+	* Optional command line parameters appended to the run args in run_info.json for both Cloud and CloudXR run modes (e.g. "-LOG=unreal_log.txt").
+	*/
+	UPROPERTY(config, EditAnywhere, Category = BuildAndDeploy)
+	FString runInfoCommandLineParams = "";
+
+	/**
+	* Build configuration when building: "Development" or "Shipping". Default is Development.
+	*/
+	UPROPERTY(config, EditAnywhere, Category = BuildAndDeploy)
+	FString buildConfiguration = "Development";
 
 	/**
 	* Specifies a filepath on-disk to a jpeg/png image that will be used as the thumbnail for the project in Portal

@@ -14,6 +14,8 @@
 #include "Modules/ModuleManager.h"
 #include "Features/IModularFeatures.h"
 #include "Interfaces/IProjectBuildMutatorFeature.h"
+#include "Dom/JsonObject.h"
+#include "Templates/Function.h"
 
 class AController;
 class AGameModeBase;
@@ -21,6 +23,7 @@ class APlayerController;
 class FSceneViewport;
 class UZLCloudPluginInput;
 class SWindow;
+class MessageCallbacks;
 
 namespace ZLCloudPlugin
 {
@@ -85,6 +88,9 @@ namespace ZLCloudPlugin
 		void RemoveInputComponent(UZLCloudPluginInput* InInputComponent) override;
 		const TArray<UZLCloudPluginInput*> GetInputComponents() override;
 
+		void RequestAppDataCacheStats(TFunction<void(TSharedPtr<FJsonObject>)> Callback) override;
+		void TriggerAppDataCacheUpload(TFunction<void(TSharedPtr<FJsonObject>)> Callback) override;
+
 		TWeakPtr<SViewport> GetTargetViewport();
 
 		IZLCloudPluginAudioSink* GetPeerAudioSink(FZLCloudPluginPlayerId PlayerId) override;
@@ -111,7 +117,11 @@ namespace ZLCloudPlugin
 		void OnEndPIE(bool bIsSimulating);
 		void OnBeginStandalonePlay(uint32 processID);
 
-		void SendData(const FString& jsonData);
+		void SendData(const FString& jsonData) override;
+		void SendImageCapture(const FString& imageData) override;
+		void SendFeatureNodeInit(const FString& jsonData);
+		void SendFeatureNodeData(const FString& jsonData);
+		void SendFeatureNodeDataHelper(const FString& jsonData, bool init);
 
 		void InitStreamer();
 		void CompleteInitStreamer();

@@ -91,7 +91,7 @@ namespace CloudStream2DLL
 
 		CLOUDSTREAM2DLL_IMPORT void SetTexture(void* intermidiateTexture);
 
-		CLOUDSTREAM2DLL_IMPORT void OnRichDataStream(int dataSourceID, char* data, long timestamp);
+		CLOUDSTREAM2DLL_IMPORT void OnRichDataStream(int dataSourceID, const char* data, long timestamp);
 		CLOUDSTREAM2DLL_IMPORT void SendCommand(const char* id, const char* data);
 
 		CLOUDSTREAM2DLL_IMPORT int GetNumConnections();

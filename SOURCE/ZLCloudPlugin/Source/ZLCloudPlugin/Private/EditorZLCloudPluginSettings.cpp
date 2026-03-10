@@ -2,6 +2,7 @@
 
 #include "EditorZLCloudPluginSettings.h"
 #include "JavaScriptKeyCodes.inl"
+#include "HAL/FileManager.h"
 #include "Misc/ConfigCacheIni.h"
 #include "ZLCloudPluginVersion.h"
 
@@ -101,8 +102,33 @@ void UZLCloudPluginSettings::SaveToCustomIni()
 
 	const FString Section = TEXT("/Script/ZLCloudPlugin.ZLCloudPluginSettings");
 
-	FString RelativeBuildFolder = buildFolder;
-	FPaths::MakePathRelativeTo(RelativeBuildFolder, *FPaths::ProjectDir());
+	// Resolve symlinks/junctions so that e.g. P: (symlink to project location) becomes a path we can store relative to project
+	FString resolvedBuildFolder = buildFolder.TrimStartAndEnd();
+	if (!resolvedBuildFolder.IsEmpty() && IFileManager::Get().DirectoryExists(*resolvedBuildFolder))
+	{
+		FString onDisk = IFileManager::Get().GetFilenameOnDisk(*resolvedBuildFolder);
+		if (!onDisk.IsEmpty())
+			resolvedBuildFolder = onDisk;
+	}
+	FString projectDirBase = FPaths::ProjectDir();
+	if (!projectDirBase.EndsWith(TEXT("/")) && !projectDirBase.EndsWith(TEXT("\\")))
+		projectDirBase += TEXT("/");
+	FString resolvedProjectDir = IFileManager::Get().GetFilenameOnDisk(*projectDirBase);
+	if (resolvedProjectDir.IsEmpty())
+		resolvedProjectDir = projectDirBase;
+	if (!resolvedProjectDir.EndsWith(TEXT("/")) && !resolvedProjectDir.EndsWith(TEXT("\\")))
+		resolvedProjectDir += TEXT("/");
+	// Always store relative path (resolved paths may be on same volume after following symlinks)
+	FString buildFolderToStore = resolvedBuildFolder;
+	FPaths::MakePathRelativeTo(buildFolderToStore, *(resolvedProjectDir + TEXT(".")));
+	if (!FPaths::IsRelative(buildFolderToStore))
+	{
+		// Fallback: try relative to unresolved project dir
+		buildFolderToStore = buildFolder.TrimStartAndEnd();
+		FPaths::MakePathRelativeTo(buildFolderToStore, *(projectDirBase + TEXT(".")));
+	}
+	if (!FPaths::IsRelative(buildFolderToStore))
+		buildFolderToStore = buildFolder.TrimStartAndEnd(); // still absolute (e.g. different physical drive): store as-is
 
 	FString RelativeThumbnailPath = thumbnailImagePath.FilePath;
 	FPaths::MakePathRelativeTo(RelativeThumbnailPath, *FPaths::ProjectDir());
@@ -125,10 +151,12 @@ void UZLCloudPluginSettings::SaveToCustomIni()
 	WRITE_CONFIG("deployName", *deployName);
 	WRITE_CONFIG("displayName", *displayName);
 	WRITE_CONFIG("buildId", *buildId);
-	WRITE_CONFIG("buildFolder", *RelativeBuildFolder);
+	WRITE_CONFIG("buildFolder", *buildFolderToStore);
 	WRITE_CONFIG("portalAssetLineId", *portalAssetLineId);
 	WRITE_CONFIG("portalServerUrl", *portalServerUrl);
 	WRITE_CONFIG("httpProxyOverride", *httpProxyOverride);
+	WRITE_CONFIG("runInfoCommandLineParams", *runInfoCommandLineParams);
+	WRITE_CONFIG("buildConfiguration", *buildConfiguration);
 	WRITE_CONFIG("showExperimentalFeatures", showExperimentalFeatures ? TEXT("True") : TEXT("False"));
 
 	FString NormalizedPath = RelativeThumbnailPath;
@@ -136,8 +164,7 @@ void UZLCloudPluginSettings::SaveToCustomIni()
 
 	const FString FinalFormatted = FString::Printf(TEXT("(FilePath=\"%s\")"), *NormalizedPath);
 
-#if UNREAL_5_7_OR_NEWER
-	const FConfigSection* ConfigSection = ConfigFile.FindOrAddConfigSection(Section);
+#if UNREAL_5_4_OR_NEWER
 	ConfigFile.RemoveKeyFromSection(*Section, TEXT("thumbnailImagePath"));
 	ConfigFile.AddToSection(*Section, TEXT("thumbnailImagePath"), FinalFormatted);
 #else

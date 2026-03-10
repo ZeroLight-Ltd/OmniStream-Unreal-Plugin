@@ -50,6 +50,9 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "K2Node_CallFunction.h"
 #include "Editor.h"
+#include "Misc/DateTime.h"
+#include "Misc/MessageDialog.h"
+#include "ZLCloudPluginVersion.h"
 
 #define LOCTEXT_NAMESPACE "ZLCloudPlugin"
 
@@ -91,9 +94,9 @@ void FZeroLightMainButton::CheckForNewerPlugin()
 
 			if (FJsonSerializer::Deserialize(reader, JsonObject) && JsonObject.IsValid())
 			{
-				if (JsonObject->HasField("tag_name"))
+				if (JsonObject->HasField(TEXT("tag_name")))
 				{
-					githubVersion = JsonObject->GetStringField("tag_name");
+					githubVersion = JsonObject->GetStringField(TEXT("tag_name"));
 				}
 			}
 
@@ -265,6 +268,8 @@ FText FZeroLightMainButton::UpdateProgress() const
 
 		s_triggerBuildUpload = false;
 
+		s_uploadStartTime = FDateTime::Now();
+
 		if (TriggerBuildUpload())
 		{
 
@@ -368,13 +373,40 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 	FString RunningEditorExe = FPlatformProcess::ExecutableName();
 	UE_LOG(LogPortalCLI, Log, TEXT("Editor Executable: %s"), *RunningEditorExe);
 
-	FString ConfigName = TEXT("Development"); // Default
+	// Reload settings from INI so we use the latest saved values (build config, etc.)
+	if (s_cloudstreamSettings != nullptr)
+	{
+		FString IniPath = FConfigCacheIni::NormalizeConfigIniPath(FPaths::ProjectConfigDir() + TEXT("DefaultZLCloudPluginSettings.ini"));
+		s_cloudstreamSettings->LoadConfig(nullptr, *IniPath);
+	}
+	// Use the folder the user just selected (set by async task before TriggerBuild); otherwise use saved build folder from INI
+	FString outFolderName;
+	if (!s_pendingBuildFolder.IsEmpty())
+	{
+		outFolderName = s_pendingBuildFolder;
+		FPaths::NormalizeDirectoryName(outFolderName);
+		s_pendingBuildFolder.Empty();
+	}
+	else
+	{
+		outFolderName = GetBuildFolder();
+	}
+	// Use the build configuration selected in the UI (Development/Shipping) for -clientconfig etc.
+	FString ConfigName = GetBuildConfiguration();
+	// Config of the editor we are running — used only for -unrealexe path when needsExeArg
+	FString BuildEXEConfigName = TEXT("Development");
 	bool needsExeArg = false;
 	if (RunningEditorExe.Contains(TEXT("DebugGame")))
 	{
-		ConfigName = TEXT("DebugGame");
+		BuildEXEConfigName = TEXT("DebugGame");
 		needsExeArg = true;
 	}
+	else if (RunningEditorExe.Contains(TEXT("Shipping")))
+	{
+		BuildEXEConfigName = TEXT("Shipping");
+		needsExeArg = true;
+	}
+	UE_LOG(LogPortalCLI, Log, TEXT("Build configuration: %s"), *ConfigName);
 
 	// Ensure engine path ends with slash
 	FString engineDir = FPaths::EngineDir();
@@ -387,8 +419,6 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 
 	FString runUATPath = FPaths::ConvertRelativePathToFull(engineDir + "Build/BatchFiles/RunUAT.bat");
 
-	FString outFolderName = GetBuildFolder();
-
 	FString commandArgs;
 
 	if (IsCodeProject())
@@ -398,7 +428,6 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 	else
 	{
 		InjectTempTargetFiles();
-
 
 		FString TurnkeyParams = TEXT("-command=VerifySdk -platform=Win64 -UpdateIfNeeded");
 
@@ -424,7 +453,7 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 		needsExeArg = false;
 	}
 	commandArgs += FString("-project=\"" + projectPath + "\" ");
-	commandArgs += FString("-clientconfig=Development ");
+	commandArgs += FString("-clientconfig=" + ConfigName + " ");
 
 	//Ensure we dont have a unclean current build context
 	portalCLI->ClearCurrentBuild();
@@ -435,8 +464,8 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 
 	if (needsExeArg)
 	{
-		// Append correct Unreal Editor executable path using absolute path
-		FString unrealExePath = FPaths::ConvertRelativePathToFull(engineDir + "Binaries/Win64/UnrealEditor-Win64-" + ConfigName + "-Cmd.exe");
+		// Append correct Unreal Editor executable path (config of the editor we are running)
+		FString unrealExePath = FPaths::ConvertRelativePathToFull(engineDir + "Binaries/Win64/UnrealEditor-Win64-" + BuildEXEConfigName + "-Cmd.exe");
 		FString unrealExeArg = FString::Printf(TEXT("-unrealexe=\"%s\" "), *unrealExePath);
 		commandArgs += unrealExeArg;
 	}
@@ -444,6 +473,7 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 	UE_LOG(LogPortalCLI, Log, TEXT("UAT Command: %s %s"), *runUATPath, *commandArgs);
 
 	TFunction<void(FString result, double timeElapsed)> OnBuildFinished = [this](FString result, double timeElapsed) {
+		s_buildEndTime = FDateTime::Now();
 
 		if (result == "Completed")
 		{
@@ -471,6 +501,9 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 
 	SetBuildFolder(outFolderName);
 	s_isCurrentlyBuilding = true;
+	
+	s_buildStartTime = FDateTime::Now();
+	
 	IUATHelperModule& uatHelper = FModuleManager::LoadModuleChecked<IUATHelperModule>("UATHelper");
 	uatHelper.CreateUatTask(
 		commandArgs,
@@ -485,12 +518,22 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 
 void FZeroLightMainButton::StartExistingBuildDeployTask() const
 {
-	FString existingBuildFolder = GetBuildFolder();
+	FString existingBuildFolder;
+	if (!s_pendingBuildFolder.IsEmpty())
+	{
+		existingBuildFolder = s_pendingBuildFolder;
+		FPaths::NormalizeDirectoryName(existingBuildFolder);
+		s_pendingBuildFolder.Empty();
+	}
+	else
+	{
+		existingBuildFolder = GetBuildFolder();
+	}
 	//Ensure we dont have a unclean current build context
 	portalCLI->ClearCurrentBuild();
 
 	FString exeStr = FPaths::GetBaseFilename(FPaths::GetProjectFilePath());
-	FString exeName = exeStr + "-Win64-Shipping.exe"; //Release exe name
+	FString exeName = exeStr + "-Win64-" + GetBuildConfiguration() + ".exe";
 	FString altExeName = exeStr + ".exe";
 
 	//Blueprint-only projects use this name
@@ -771,7 +814,11 @@ FReply FZeroLightMainButton::AutoResolveProjectWarnings()
 	{
 		FText Title = FText::FromString("Restart Required");
 		FText Message = FText::FromString("Resolving OmniStream warnings require a restart. Please restart the editor for the changes to take effect.");
+#if UNREAL_5_3_OR_NEWER
+		FMessageDialog::Open(EAppMsgType::Ok, EAppReturnType::Ok, Message, Title);
+#else
 		FMessageDialog::Open(EAppMsgType::Ok, Message, &Title);
+#endif
 	}
 
 	return FReply::Handled();
@@ -800,6 +847,16 @@ void FZeroLightMainButton::SetBuildID(const FText& id)
 	}
 }
 
+void FZeroLightMainButton::SetRunInfoCommandLineParams(const FText& text)
+{
+	if (s_cloudstreamSettings != nullptr)
+	{
+		s_cloudstreamSettings->runInfoCommandLineParams = text.ToString().TrimStartAndEnd();
+		s_cloudstreamSettings->SaveConfig(NULL, *s_savedIniPath);
+		s_cloudstreamSettings->SaveToCustomIni();
+	}
+}
+
 void FZeroLightMainButton::SetBuildFolder(const FString& path)
 {
 	if (s_cloudstreamSettings != nullptr)
@@ -810,13 +867,43 @@ void FZeroLightMainButton::SetBuildFolder(const FString& path)
 	}
 }
 
+void FZeroLightMainButton::SetPendingBuildFolder(const FString& path)
+{
+	s_pendingBuildFolder = path;
+}
+
 FString FZeroLightMainButton::GetBuildFolder()
 {
-	if (s_cloudstreamSettings != nullptr)
+	FString baseDir = FPaths::ProjectDir();
+	FString defaultBuildFolder = FPaths::Combine(baseDir, TEXT("Build"));
+	if (s_cloudstreamSettings == nullptr || s_cloudstreamSettings->buildFolder.IsEmpty())
 	{
-		return s_cloudstreamSettings->buildFolder;
+		return defaultBuildFolder;
 	}
-	return "";
+	FString stored = s_cloudstreamSettings->buildFolder.TrimStartAndEnd();
+	// User-selected absolute path (e.g. P:\TestProject__main\Build): use as-is so the chosen folder is always used
+	if (!FPaths::IsRelative(stored))
+	{
+		FString normalized = FPaths::ConvertRelativePathToFull(stored);
+		FPaths::NormalizeDirectoryName(normalized);
+		return normalized;
+	}
+	// Relative path: resolve against project dir, and only then check it's under project (avoid overwriting user's absolute choice)
+	FString combined = FPaths::Combine(baseDir, stored);
+	FString resolved = FPaths::ConvertRelativePathToFull(combined);
+	FString normalizedProjectDir = FPaths::ConvertRelativePathToFull(baseDir);
+	if (!normalizedProjectDir.EndsWith(TEXT("/")) && !normalizedProjectDir.EndsWith(TEXT("\\")))
+	{
+		normalizedProjectDir += TEXT("/");
+	}
+	if (!resolved.StartsWith(normalizedProjectDir))
+	{
+		UE_LOG(LogPortalCLI, Warning, TEXT("Build folder \"%s\" is outside current project; using \"%s\" and updating settings."), *resolved, *defaultBuildFolder);
+		SetBuildFolder(defaultBuildFolder);
+		return defaultBuildFolder;
+	}
+	FPaths::NormalizeDirectoryName(resolved);
+	return resolved;
 }
 
 void FZeroLightMainButton::SetUseExistingBuild(const ECheckBoxState state)
@@ -866,6 +953,38 @@ void FZeroLightMainButton::SetPortalStorageProvider(TSharedPtr<FString> NewValue
 		s_portalStorageProvider = FString(*NewValue);
 
 		FSlateApplication::Get().ForceRedrawWindow(BuildAndDeployWnd.ToSharedRef());
+	}
+}
+
+FString FZeroLightMainButton::GetBuildConfiguration()
+{
+	if (s_cloudstreamSettings != nullptr && !s_cloudstreamSettings->buildConfiguration.IsEmpty())
+	{
+		FString Config = s_cloudstreamSettings->buildConfiguration.TrimStartAndEnd();
+		if (Config.Equals(TEXT("Shipping"), ESearchCase::IgnoreCase))
+		{
+			return TEXT("Shipping");
+		}
+		if (Config.Equals(TEXT("Development"), ESearchCase::IgnoreCase))
+		{
+			return TEXT("Development");
+		}
+		return Config;
+	}
+	return TEXT("Development");
+}
+
+void FZeroLightMainButton::SetBuildConfiguration(TSharedPtr<FString> NewValue, ESelectInfo::Type SelectInfo)
+{
+	if (NewValue.IsValid() && s_cloudstreamSettings != nullptr)
+	{
+		s_cloudstreamSettings->buildConfiguration = *NewValue;
+		s_cloudstreamSettings->SaveConfig(NULL, *s_savedIniPath);
+		s_cloudstreamSettings->SaveToCustomIni();
+		if (IsInSlateThread())
+		{
+			FSlateApplication::Get().ForceRedrawWindow(BuildAndDeployWnd.ToSharedRef());
+		}
 	}
 }
 
@@ -1046,6 +1165,35 @@ bool FZeroLightMainButton::OnBuildPackageSuccess() const
 	s_triggerBuildUpload = true;
 	
 	return true;
+}
+
+void FZeroLightMainButton::PrintBuildAndUploadSummary()
+{
+	FTimespan buildDuration = s_buildEndTime - s_buildStartTime;
+	FTimespan uploadDuration = s_uploadEndTime - s_uploadStartTime;
+	FTimespan totalDuration = s_uploadEndTime - s_buildStartTime;
+	
+	FString buildTimeStr = FString::Printf(TEXT("%02d:%02d:%02d"), 
+		buildDuration.GetHours(), 
+		buildDuration.GetMinutes(), 
+		buildDuration.GetSeconds());
+	
+	FString uploadTimeStr = FString::Printf(TEXT("%02d:%02d:%02d"), 
+		uploadDuration.GetHours(), 
+		uploadDuration.GetMinutes(), 
+		uploadDuration.GetSeconds());
+	
+	FString totalTimeStr = FString::Printf(TEXT("%02d:%02d:%02d"), 
+		totalDuration.GetHours(), 
+		totalDuration.GetMinutes(), 
+		totalDuration.GetSeconds());
+	
+	UE_LOG(LogPortalCLI, Log, TEXT("=========================================="));
+	UE_LOG(LogPortalCLI, Log, TEXT("Build and Upload Summary:"));
+	UE_LOG(LogPortalCLI, Log, TEXT("  Build Time:   %s"), *buildTimeStr);
+	UE_LOG(LogPortalCLI, Log, TEXT("  Upload Time:  %s"), *uploadTimeStr);
+	UE_LOG(LogPortalCLI, Log, TEXT("  Total Time:   %s"), *totalTimeStr);
+	UE_LOG(LogPortalCLI, Log, TEXT("=========================================="));
 }
 
 bool FZeroLightMainButton::RestoreToBuildDirectory()
@@ -1271,7 +1419,7 @@ bool FZeroLightMainButton::TriggerBuildUpload(FString retryPath) const
 		}
 		
 		FString exeStr = FPaths::GetBaseFilename(FPaths::GetProjectFilePath());
-		FString exeName = exeStr + "-Win64-Shipping.exe"; //Release exe name
+		FString exeName = exeStr + "-Win64-" + GetBuildConfiguration() + ".exe";
 		FString altExeName = exeStr + ".exe";
 		FString defaultExeName = "UnrealGame.exe";
 
@@ -1367,7 +1515,7 @@ TSharedPtr<FJsonObject> FZeroLightMainButton::AggregatePredictedJSONSchema() con
 			if (StateKeyInfoAsset)
 			{
 				TSharedPtr<FJsonObject> serialisedSchemaData = StateKeyInfoAsset->SerializeStateKeyAsset_JsonSchemaCompliant();
-				serialisedSchemaData->RemoveField("$schema");
+				serialisedSchemaData->RemoveField(TEXT("$schema"));
 				aggregatedJsonObject = MergeJsonObjectsRecursive(aggregatedJsonObject, serialisedSchemaData);
 			}
 		}
@@ -1382,7 +1530,7 @@ bool FZeroLightMainButton::AddRunInfoJSONAndMetadataToBuild(FString outputFolder
 	if (!overrideProjectName.IsEmpty())
 		projectStr = overrideProjectName;
 
-	FString exeName = projectStr + "-Win64-Shipping.exe"; //Release exe name
+	FString exeName = projectStr + "-Win64-" + GetBuildConfiguration() + ".exe";
 	FString defaultExeName = "UnrealGame.exe";
 
 	FString cppProjectExePath = outputFolderPath + "/" + projectStr + "/Binaries/" + BUILDPLATFORM + "/";
@@ -1442,6 +1590,11 @@ bool FZeroLightMainButton::AddRunInfoJSONAndMetadataToBuild(FString outputFolder
 
 	FString cloudArgs = (s_cloudstreamSettings->bDisableTextureStreamingOnLaunch) ? "-WINDOWED -ResX=1270 -ResY=720 -NOTEXTURESTREAMING -Unattended -NoVSync -LOG=unreal_log.txt" : "-WINDOWED -ResX=1270 -ResY=720 -Unattended -NoVSync -LOG=unreal_log.txt";
 	FString cloudXRArgs = (s_cloudstreamSettings->bDisableTextureStreamingOnLaunch) ? "-WINDOWED -VR -cloudxr -ResX=1270 -ResY=720 -NOTEXTURESTREAMING -Unattended -NoVSync -LOG=unreal_log.txt" : "-WINDOWED -VR -cloudxr -ResX=1270 -ResY=720 -Unattended -NoVSync -LOG=unreal_log.txt";
+	if (!s_cloudstreamSettings->runInfoCommandLineParams.IsEmpty())
+	{
+		cloudArgs += TEXT(" ") + s_cloudstreamSettings->runInfoCommandLineParams;
+		cloudXRArgs += TEXT(" ") + s_cloudstreamSettings->runInfoCommandLineParams;
+	}
 	AddRunMode("Cloud", cloudArgs, runModesJSONObj);
 	AddRunMode("CloudXR", cloudXRArgs, runModesJSONObj, "xr");
 
@@ -2079,6 +2232,41 @@ void FZeroLightMainButton::ShowBuildAndDeployDialog()
 						.Padding(13, 0, 60, 0)
 						.VAlign(EVerticalAlignment::VAlign_Center)
 						[
+							SNew(STextBlock).Text(FText::FromString("Build Configuration"))
+						]
+						+ SHorizontalBox::Slot()
+						.FillWidth(1.0f)
+						.Padding(0, 0, 13, 0)
+						.VAlign(EVerticalAlignment::VAlign_Center)
+						[
+							SNew(SComboBox<TSharedPtr<FString>>)
+								.OptionsSource(&s_buildConfigurationOptions)
+								.OnSelectionChanged(this, &FZeroLightMainButton::SetBuildConfiguration)
+								.OnGenerateWidget_Lambda([](TSharedPtr<FString> Item) {
+									return SNew(STextBlock).Text(Item.IsValid() ? FText::FromString(*Item) : FText::GetEmpty());
+								})
+								.IsEnabled_Lambda([this]() {
+									if (s_isCurrentlyBuilding)
+										return false;
+									else
+										return s_uploadAsyncTask == nullptr;
+								})
+								.Content()
+								[
+									SNew(STextBlock)
+										.Text_Lambda([this]() { return FText::FromString(GetBuildConfiguration()); })
+								]
+						]
+					]
+					+ SVerticalBox::Slot().AutoHeight()
+					.Padding(0,0,0,3)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.Padding(13, 0, 60, 0)
+						.VAlign(EVerticalAlignment::VAlign_Center)
+						[
 							SNew(STextBlock).Text(FText::FromString("Existing Build"))
 						]
 
@@ -2123,6 +2311,35 @@ void FZeroLightMainButton::ShowBuildAndDeployDialog()
 											return s_uploadAsyncTask == nullptr;
 								})
 							]
+					]
+
+					+ SVerticalBox::Slot().AutoHeight()
+					.Padding(0, 0, 0, 3)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.Padding(13, 0, 60, 0)
+						.VAlign(EVerticalAlignment::VAlign_Center)
+						[
+							SNew(STextBlock).Text(FText::FromString("Command Line Params"))
+						]
+						+ SHorizontalBox::Slot()
+						.FillWidth(1.0f)
+						.Padding(0, 0, 13, 0)
+						.VAlign(EVerticalAlignment::VAlign_Center)
+						[
+							SNew(SEditableTextBox)
+								.Text_Lambda([this]() { return FText::FromString(s_cloudstreamSettings ? s_cloudstreamSettings->runInfoCommandLineParams : FString()); })
+								.OnTextChanged(FOnTextChanged::CreateSP(this, &FZeroLightMainButton::SetRunInfoCommandLineParams))
+								.MinDesiredWidth(200.0f)
+								.IsEnabled_Lambda([this]() {
+									if (s_isCurrentlyBuilding)
+										return false;
+									else
+										return s_uploadAsyncTask == nullptr;
+								})
+						]
 					]
 
 					/*+ SVerticalBox::Slot().AutoHeight()
@@ -2830,11 +3047,13 @@ uint32 GetTokenAsyncTask::Run()
 			if (triggerBuild && !downstreamJobTargetPath.IsEmpty())
 			{
 				FZeroLightMainButton::SetBuildFolder(downstreamJobTargetPath);
+				FZeroLightMainButton::SetPendingBuildFolder(downstreamJobTargetPath);
 				FZeroLightMainButton::TriggerBuild();
 			}
 			else if (triggerExistingDeploy && !downstreamJobTargetPath.IsEmpty())
 			{
 				FZeroLightMainButton::SetBuildFolder(downstreamJobTargetPath);
+				FZeroLightMainButton::SetPendingBuildFolder(downstreamJobTargetPath);
 				FZeroLightMainButton::TriggerExistingBuildDeploy();
 			}
 		}
@@ -2878,6 +3097,8 @@ uint32 UploadAsyncTask::Run()
 		return 1;
 	}
 
+	UE_LOG(LogPortalCLI, Log, TEXT("UploadAsyncTask::Run - Token Fetching..."));
+
 	threadBardCli.StartOutputReadTask();
 
 	m_abortHandle = portal::ensure_token_task_get_abort_handle(m_tokenTask);
@@ -2906,6 +3127,8 @@ uint32 UploadAsyncTask::Run()
 			FZeroLightMainButton::SetIsPortalAuthorised(true);
 		}
 
+		UE_LOG(LogPortalCLI, Log, TEXT("UploadAsyncTask::Run - Token Fetched"));
+
 		portal::abort_handle_destory_name(m_abortHandle);
 
 		//Stirp invalid characters out of customer set names for filepath safety (charatcers will be preserved in the runinfo)
@@ -2928,16 +3151,24 @@ uint32 UploadAsyncTask::Run()
 		{
 			std::filesystem::path finalCopyFSPath = TCHAR_TO_UTF8(*finalCopyPath);
 
-			if (FPaths::DirectoryExists(finalUploadPath))
-			{
-				if (!std::filesystem::remove_all(TCHAR_TO_UTF8(*finalUploadPath)))
+			try {
+				if (FPaths::DirectoryExists(finalUploadPath))
 				{
-				}
+					if (!std::filesystem::remove_all(TCHAR_TO_UTF8(*finalUploadPath)))
+					{
+					}
 
-				std::filesystem::create_directories(finalCopyFSPath.parent_path());
+					std::filesystem::create_directories(finalCopyFSPath.parent_path());
+				}
+				else
+					std::filesystem::create_directories(finalCopyFSPath.parent_path());
 			}
-			else
-				std::filesystem::create_directories(finalCopyFSPath.parent_path());
+			catch (const std::filesystem::filesystem_error& e) {
+				UE_LOG(LogPortalCLI, Log, TEXT("Create final copy path failed: %s"), *FString(e.what()));
+				FZeroLightMainButton::SetProgressText(FText::FromString(finalCopyPath + " could not be created"));
+				FZeroLightMainButton::SetIsBuilding(false);
+				return false;
+			}
 
 			int attempts = 0;
 			const int max_attempts = 3;
@@ -2994,6 +3225,8 @@ uint32 UploadAsyncTask::Run()
 				thumbnailFilePath = "ZLAssets/Viewers/" + projectStr + "/" + noSpaceNameStr + "/" + buildIdStr + "/" + file;
 			}
 		}
+
+		UE_LOG(LogPortalCLI, Log, TEXT("UploadAsyncTask::Run - Final Output Directory Created"));
 
 		FZeroLightMainButton::s_pausedUploadPath = finalUploadPath; //Store for continuing a paused upload
 		FZeroLightMainButton::SetRestorePaths(finalCopyPath, parentPath + "/Windows", finalUploadPath);
@@ -3053,6 +3286,8 @@ uint32 UploadAsyncTask::Run()
 			}
 		}
 
+		UE_LOG(LogPortalCLI, Log, TEXT("UploadAsyncTask::Run - Portal Asset Version Created"));
+
 		std::string assetVersionIdPtr = TCHAR_TO_UTF8(*currentAssetVersionId);
 		uint32_t assetVersionIdLen = static_cast<uint32_t>(currentAssetVersionId.Len());
 
@@ -3075,6 +3310,8 @@ uint32 UploadAsyncTask::Run()
 		m_oneStepPortalUploadTask = handle_ptr_error(portal::client_upload_portal_asset_version_one_step_async(
 			threadBardCli.m_client->m_client,
 			uploadParams));
+
+		UE_LOG(LogPortalCLI, Log, TEXT("UploadAsyncTask::Run - Portal One Step Upload Started..."));
 
 		if (m_oneStepPortalUploadTask == nullptr)
 		{
@@ -3101,6 +3338,10 @@ uint32 UploadAsyncTask::Run()
 					bool success = true;
 					FZeroLightMainButton::SetIsBuilding(false);
 
+					UE_LOG(LogPortalCLI, Log, TEXT("UploadAsyncTask::Run - Portal One Step Upload Finished..."));
+
+					FZeroLightMainButton::s_uploadEndTime = FDateTime::Now();
+
 					OutputMessage uploadOutput = OutputMessage(portal::client_upload_one_step_task_result_into_output(uploadResult));
 
 					uploadOutput.print();
@@ -3115,6 +3356,8 @@ uint32 UploadAsyncTask::Run()
 
 					if (success)
 					{
+						FZeroLightMainButton::PrintBuildAndUploadSummary();
+						
 						if (isCIUpload)
 						{
 							UE_LOG(LogPortalCLI, Log, TEXT("Command Line Build & Upload upload completed, terminating Unreal Engine..."));
@@ -3143,6 +3386,8 @@ uint32 UploadAsyncTask::Run()
 					}
 					else
 					{
+						FZeroLightMainButton::PrintBuildAndUploadSummary();
+						
 						FZeroLightMainButton::SetProgressText(FText::FromString("Error during Portal upload"));
 						if (isCIUpload)
 							FPlatformMisc::RequestExit(true);
@@ -3152,6 +3397,13 @@ uint32 UploadAsyncTask::Run()
 				}
 				else
 				{
+					if (FZeroLightMainButton::s_uploadEndTime.GetTicks() == 0)
+					{
+						FZeroLightMainButton::s_uploadEndTime = FDateTime::Now();
+					}
+					
+					FZeroLightMainButton::PrintBuildAndUploadSummary();
+					
 					if(FZeroLightMainButton::s_userCancelledUpload)
 						FZeroLightMainButton::SetCurrentUploadAssetVersionId("");
 
@@ -3170,6 +3422,13 @@ uint32 UploadAsyncTask::Run()
 			}
 			else
 			{
+				if (FZeroLightMainButton::s_uploadEndTime.GetTicks() == 0)
+				{
+					FZeroLightMainButton::s_uploadEndTime = FDateTime::Now();
+				}
+				
+				FZeroLightMainButton::PrintBuildAndUploadSummary();
+				
 				portal::client_upload_one_step_task_result_destory(uploadResult);
 				threadBardCli.StopOutputReadTask();
 

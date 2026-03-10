@@ -42,21 +42,29 @@ void MessageWithData::SetData(unsigned char* messageBuffer)
 		}
 		
 		int stringSize = m_messageDataEnd - m_messageDataStart;
-		unsigned char* messageDataString = new unsigned char[stringSize+1];
-		memcpy(messageDataString, &messageBuffer[m_messageDataStart], stringSize);
-		messageDataString[stringSize] = '\0';
-
-		m_messageData = FString(UTF8_TO_TCHAR((char*)messageDataString));
-
-		m_messageDataStart = -1;    //don't do it again
-		delete[] messageDataString;
-
-		TSharedRef<TJsonReader<TCHAR>> JsonReader = TJsonReaderFactory<TCHAR>::Create(m_messageData);
-		if (FJsonSerializer::Deserialize(JsonReader, m_messageJSON))
+		if (stringSize > 0)
 		{
-			m_jsonData = true;
+
+			TArray<uint8> MessageDataArray;
+			MessageDataArray.SetNumUninitialized(stringSize + 1); // +1 for null terminator
+			
+			FMemory::Memcpy(MessageDataArray.GetData(), &messageBuffer[m_messageDataStart], stringSize);
+			MessageDataArray[stringSize] = '\0'; // Ensure null termination
+
+			m_messageData = FString(UTF8_TO_TCHAR((char*)MessageDataArray.GetData()));
+			m_messageDataStart = -1;    //don't do it again
+
+			TSharedRef<TJsonReader<TCHAR>> JsonReader = TJsonReaderFactory<TCHAR>::Create(m_messageData);
+			if (FJsonSerializer::Deserialize(JsonReader, m_messageJSON))
+			{
+				m_jsonData = true;
+			}
 		}
-		
+		else
+		{
+			m_messageData = FString();
+			m_messageDataStart = -1;
+		}
 	}
 }
 

@@ -16,6 +16,8 @@
 
 class UTexture2D;
 class UZLCloudPluginInput;
+class FJsonObject;
+template<typename> class TFunction;
 
 /**
 * The public interface to this module
@@ -102,6 +104,24 @@ public:
 	virtual void SendData(const FString& jsonData) = 0;
 
 	/**
+	 * Send image capture data to the browser
+	 * @param imageData - string of json data containing image capture response
+	 */
+	virtual void SendImageCapture(const FString& imageData) = 0;
+
+	/**
+	 * Send feature node initial data to the browser
+	 * @param jsonData - string of json data to send
+	 */
+	virtual void SendFeatureNodeInit(const FString& jsonData) = 0;
+
+	/**
+	 * Send feature node per-tick data to the browser
+	 * @param jsonData - string of json data to send
+	 */
+	virtual void SendFeatureNodeData(const FString& jsonData) = 0;
+
+	/**
 	 * Get the audio sink associated with a specific peer/player.
 	 */
 	virtual IZLCloudPluginAudioSink* GetPeerAudioSink(FZLCloudPluginPlayerId PlayerId) = 0;
@@ -128,5 +148,17 @@ public:
 	 * Get the input components currently attached to ZLCloudStream.
 	 */
 	virtual const TArray<UZLCloudPluginInput*> GetInputComponents() = 0;
+
+	/**
+	 * Request AppDataCache statistics from the server.
+	 * @param Callback - Function to call when stats are received. Takes a shared JSON object with the stats.
+	 */
+	virtual void RequestAppDataCacheStats(TFunction<void(TSharedPtr<FJsonObject>)> Callback) = 0;
+
+	/**
+	 * Trigger upload of AppDataCache to cloud storage.
+	 * @param Callback - Function to call when upload response is received. Takes a shared JSON object with the response.
+	 */
+	virtual void TriggerAppDataCacheUpload(TFunction<void(TSharedPtr<FJsonObject>)> Callback) = 0;
 
 };

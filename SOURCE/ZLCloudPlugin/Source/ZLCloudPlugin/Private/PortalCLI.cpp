@@ -96,7 +96,10 @@ bool PortalClient::InitPlugin()
             UE_LOG(LogPortalDllCLI, Log, TEXT("Portal client logging started"));
         }
         else
+        {
+            UE_LOG(LogPortalDllCLI, Error, TEXT("Portal client logging failed"));
             fetch_error();
+        }
     }
     else
     {

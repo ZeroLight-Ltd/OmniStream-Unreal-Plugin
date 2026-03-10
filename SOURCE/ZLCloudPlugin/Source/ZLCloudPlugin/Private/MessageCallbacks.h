@@ -51,6 +51,10 @@ class MessageCallbacks
 		static void SETCAMERADIRECTLYJSON(MessageWithData* msg);
 		static void GET_SCREENSHOT_LAYER_OPTIONS(MessageWithData* msg);
 
+		//AppDataCache
+		static void ReturnAppDataCacheStats(MessageWithData* msg);
+		static void ReturnAppDataCacheUpload(MessageWithData* msg);
+
 		static void DummyCallback(MessageWithData* msg);
 
 	private:

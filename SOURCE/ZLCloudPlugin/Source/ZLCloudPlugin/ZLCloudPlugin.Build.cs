@@ -95,8 +95,21 @@ public class ZLCloudPlugin : ModuleRules
 		{
 			PublicDefinitions.Add("WITH_ZLPLUGINVERSION=0");
 		}
-		
-		if(version_5_1_or_newer)
+
+		string DLSSModulePath = Path.Combine(ModuleDirectory, "..", "..", "..", "NvidiaDLSS", "DLSS");
+		string DLSSMRQModulePath = Path.Combine(ModuleDirectory, "..", "..", "..", "NvidiaDLSS", "DLSSMoviePipelineSupport");
+		if (Directory.Exists(DLSSModulePath) && Directory.Exists(DLSSMRQModulePath))
+		{
+			PublicDependencyModuleNames.Add("DLSS");
+			PublicDependencyModuleNames.Add("DLSSMoviePipelineSupport");
+			PublicDefinitions.Add("WITH_DLSS=1");
+		}
+		else
+		{
+			PublicDefinitions.Add("WITH_DLSS=0");
+		}
+
+		if (version_5_1_or_newer)
 		{
 			PublicDependencyModuleNames.AddRange(new string[]
 			{

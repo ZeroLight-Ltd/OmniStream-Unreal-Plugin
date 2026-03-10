@@ -66,6 +66,9 @@ namespace ZLCloudPlugin
 		static void SetMessageHandling(bool enable) { m_messageHandlerIgnore = !enable; }
 		static bool IsInputHandling() { return !m_inputIgnore; }
 		static bool IsMessageHandling() { return !m_messageHandlerIgnore; }
+
+		static uint32_t GetFeatureNodesFrameID();
+		static bool GetFeatureNodesSyncCapability();
 		
 	private:
 		static void CheckInterruptions();
@@ -73,6 +76,9 @@ namespace ZLCloudPlugin
 		static void DisconnectInputHandler();
 		
 		static void PluginPrint(bool error, const TCHAR* string);
+		
+		// Helper function to verify DLL is loaded and initialized before use
+		static bool IsDLLValid();
 
 		static bool m_pluginInitialised;
 		static bool m_pluginReady;
@@ -95,8 +101,12 @@ namespace ZLCloudPlugin
 		static FTexture2DRHIRef m_IntermediateTexture;
 #endif
 
+		static FGPUFenceRHIRef m_TextureReleaseFence;
+
 		static bool m_NeedsResolutionChange;
 		static bool m_BackToInitialCameraConfig;
+		static int m_FramesToSkipAfterResolutionChange;
+		static bool m_IsChangingTexture; // Flag to prevent texture operations during texture changes
 
 		static int m_TargetFPS;
 		static int m_LatencyValue;
@@ -115,5 +125,8 @@ namespace ZLCloudPlugin
 
 		static TSharedPtr<ZLAudioSubmixCapturer> m_audioSubmixCapturer;
 		static bool m_audioInitialised;
+
+		static uint32_t m_featureNodesFrameID;
+		static bool m_isFeatureNodesSyncCapable;
 	};
 }

@@ -187,7 +187,7 @@ void ZLCloudPlugin::FZLCloudPluginModule::OnBeginPIE(bool bIsSimulating)
 	CloudStream2::SetMessageHandling(true);
 	CloudStream2::SetInputHandling(true);
 
-	if(!m_streamerInitComplete)
+	if (!m_streamerInitComplete)
 		InitStreamer();
 
 	m_isRunningPIE = true;
@@ -277,7 +277,7 @@ void ZLCloudPlugin::FZLCloudPluginModule::StartupModule()
 	}
 
 #if WITH_EDITOR
-	if(!GIsEditor)
+	if (!GIsEditor)
 #endif
 		CloudStream2::InitPlugin();
 
@@ -498,7 +498,7 @@ void ZLCloudPlugin::FZLCloudPluginModule::ShutdownModule()
 
 	m_streamerInitComplete = false;
 
-	CloudStream2::FreePlugin();	
+	CloudStream2::FreePlugin();
 
 	IModularFeatures::Get().UnregisterModularFeature(GetModularFeatureName(), this);
 
@@ -648,6 +648,9 @@ void ZLCloudPlugin::FZLCloudPluginModule::PopulateProtocol()
 //	MessageProtocol.ToStreamerProtocol.Add("UIInteraction", FZLCloudPluginInputMessage(50, 0, {}));
 	MessageProtocol.ToStreamerProtocol.Add("Command", FZLCloudPluginInputMessage(51, 0, {}));
 	MessageProtocol.ToStreamerProtocol.Add("JsonData", FZLCloudPluginInputMessage(52, 0, {}));
+	MessageProtocol.ToStreamerProtocol.Add("FeatureNodeInit", FZLCloudPluginInputMessage(53, 0, {}));
+	MessageProtocol.ToStreamerProtocol.Add("FeatureNodeData", FZLCloudPluginInputMessage(54, 0, {}));
+	MessageProtocol.ToStreamerProtocol.Add("ImageCapture", FZLCloudPluginInputMessage(55, 0, {}));
 
 	// Keyboard Input Message.
 	// Complex command with payload, therefore we specify the length of the payload (bytes) as well as the structure of the payload
@@ -766,6 +769,18 @@ const TArray<UZLCloudPluginInput*> ZLCloudPlugin::FZLCloudPluginModule::GetInput
 	return InputComponents;
 }
 
+void ZLCloudPlugin::FZLCloudPluginModule::RequestAppDataCacheStats(TFunction<void(TSharedPtr<FJsonObject>)> Callback)
+{
+	m_LauncherComms.SetAppDataCacheStatsCallback(Callback);
+	m_LauncherComms.RequestAppDataCacheStats();
+}
+
+void ZLCloudPlugin::FZLCloudPluginModule::TriggerAppDataCacheUpload(TFunction<void(TSharedPtr<FJsonObject>)> Callback)
+{
+	m_LauncherComms.SetAppDataCacheUploadCallback(Callback);
+	m_LauncherComms.TriggerAppDataCacheUpload();
+}
+
 
 void ZLCloudPlugin::FZLCloudPluginModule::OnGameModePostLogin(AGameModeBase* GameMode, APlayerController* NewPlayer)
 {
@@ -775,6 +790,14 @@ void ZLCloudPlugin::FZLCloudPluginModule::OnGameModeLogout(AGameModeBase* GameMo
 {
 }
 
+void ZLCloudPlugin::FZLCloudPluginModule::SendImageCapture(const FString& imageData)
+{
+	auto ansiString = StringCast<ANSICHAR>(*imageData);
+	const char* charMessage = ansiString.Get();
+
+	//Needs to match PopulateProtocol values
+	CloudStream2::SendCommand(/*"ImageCapture"*/"55", charMessage);
+}
 
 void ZLCloudPlugin::FZLCloudPluginModule::SendData(const FString& jsonData)
 {
@@ -783,6 +806,31 @@ void ZLCloudPlugin::FZLCloudPluginModule::SendData(const FString& jsonData)
 
 	//Needs to match PopulateProtocol values
 	CloudStream2::SendCommand(/*"JsonData"*/"52", charMessage);
+}
+
+void ZLCloudPlugin::FZLCloudPluginModule::SendFeatureNodeDataHelper(const FString& jsonData, bool init)
+{
+	//Using FStringView involves no new memory allocation, essentially just incrementing a pointer and decrementing a length integer
+	//in order to copy the original jsonData but with the opening parenthesis removed
+	FStringView copyJsonData(jsonData);
+	copyJsonData = copyJsonData.Mid(1);
+
+	FString jsonDataExtra = "{\"F\":" + FString::FromInt(CloudStream2::GetFeatureNodesFrameID()) + ",\"D\":{" + copyJsonData + "}";
+
+	auto ansiString = StringCast<ANSICHAR>(CloudStream2::GetFeatureNodesSyncCapability() ? *jsonDataExtra : *jsonData);
+	const char* charMessage = ansiString.Get();
+
+	CloudStream2::SendCommand(/*"FeatureNodeInit" : "FeatureNodeData"*/init ? "53" : "54", charMessage);
+}
+
+void ZLCloudPlugin::FZLCloudPluginModule::SendFeatureNodeInit(const FString& jsonData)
+{
+	SendFeatureNodeDataHelper(jsonData, true);
+}
+
+void ZLCloudPlugin::FZLCloudPluginModule::SendFeatureNodeData(const FString& jsonData)
+{
+	SendFeatureNodeDataHelper(jsonData, false);
 }
 
 bool ZLCloudPlugin::FZLCloudPluginModule::IsTickableWhenPaused() const
@@ -903,7 +951,7 @@ void ZLCloudPlugin::FZLCloudPluginModule::Tick(float DeltaTime)
 	}
 
 	//Connect/disconnect messages
-	if (UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->GetStreamConnected() 
+	if (UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->GetStreamConnected()
 		&& CloudStream2::PluginStreamConnected()
 		&& m_connectionState != connectedState::CONNECTED
 		)
@@ -912,6 +960,7 @@ void ZLCloudPlugin::FZLCloudPluginModule::Tick(float DeltaTime)
 		if (UZLCloudPluginDelegates* Delegates = UZLCloudPluginDelegates::GetZLCloudPluginDelegates())
 		{
 			Delegates->OnConnectedStream.Broadcast();
+			Delegates->OnConnectedStreamNative.Broadcast();
 		}
 
 		UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->SendCurrentStateToWeb(true, UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->GetServerUnmatchedNotifyState());
@@ -928,13 +977,14 @@ void ZLCloudPlugin::FZLCloudPluginModule::Tick(float DeltaTime)
 		if (UZLCloudPluginDelegates* Delegates = UZLCloudPluginDelegates::GetZLCloudPluginDelegates())
 		{
 			Delegates->OnDisconnectedStream.Broadcast();
+			Delegates->OnDisconnectedStreamNative.Broadcast();
 		}
 		m_connectionState = connectedState::DISCONNECTED;
 	}
 
 
 	CloudStream2::Update(World);
-	if(m_LauncherComms.IsReadRunning())
+	if (m_LauncherComms.IsReadRunning())
 		m_LauncherComms.Update();
 	ZLScreenshot::Get()->Update();
 

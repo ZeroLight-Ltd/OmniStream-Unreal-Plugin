@@ -19,6 +19,9 @@ void UZLDebugUIWidget::NativeConstruct()
 
     if (SubmitStateBtn)
         SubmitStateBtn->OnClicked.AddDynamic(this, &UZLDebugUIWidget::OnSubmitState);
+
+	if (ZLLogoButton)
+		ZLLogoButton->OnClicked.AddDynamic(this, &UZLDebugUIWidget::OnToggleAllowResendCurrent);
 }
 
 void UZLDebugUIWidget::NativeDestruct()
@@ -34,6 +37,9 @@ void UZLDebugUIWidget::NativeDestruct()
     {
         SubmitStateBtn->OnClicked.RemoveDynamic(this, &UZLDebugUIWidget::OnSubmitState);
     }
+
+	if (ZLLogoButton)
+		ZLLogoButton->OnClicked.RemoveDynamic(this, &UZLDebugUIWidget::OnToggleAllowResendCurrent);
 }
 
 void UZLDebugUIWidget::OnSubmitStateInstantBoxChanged(bool bIsChecked)
@@ -57,6 +63,16 @@ void UZLDebugUIWidget::OnSubmitState()
 
         Delegates->OnRecieveData.Broadcast(JsonString);
     }
+}
+
+void UZLDebugUIWidget::OnToggleAllowResendCurrent()
+{
+	UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager();
+
+	StateManager->s_defaultDoCurrentStateCompare = !StateManager->s_defaultDoCurrentStateCompare;
+	allowResendCurrentValues = !allowResendCurrentValues;
+
+	RebuildDebugUI();
 }
 
 void UZLDebugUIWidget::OnRemoveArrayEntry(UWidget* EntryToRemove)
@@ -163,6 +179,13 @@ void UStateKeyInputComboBox::OnComboBoxChanged(FString SelectedItem, ESelectInfo
     }
 }
 
+void UStateKeyInputComboBox::TriggerResend()
+{
+	FString SelectedItem = GetSelectedOption();
+
+	OnComboBoxChanged(SelectedItem, ESelectInfo::Direct);
+}
+
 void UStateKeyInputCheckBox::OnCheckBoxChanged(bool bIsChecked)
 {
     const FString& Key = KeyName;
@@ -180,6 +203,13 @@ void UStateKeyInputCheckBox::OnCheckBoxChanged(bool bIsChecked)
     {
         UpdateJsonObjectKey<bool>(Key, bIsChecked, ParentDebugUI->ModifiedStateObject);
     }
+}
+
+void UStateKeyInputCheckBox::TriggerResend()
+{
+	bool bCurrentState = IsChecked();
+
+	OnCheckBoxChanged(bCurrentState);
 }
 
 void UStateKeyInputTextBox::OnTextValueCommitted(const FText& ComittedText, ETextCommit::Type CommitMethod)
@@ -295,7 +325,12 @@ void UStateKeyInputTextBox::OnTextValueCommitted(const FText& ComittedText, ETex
     }
 }
 
+void UStateKeyInputTextBox::TriggerResend()
+{
+	FText CurrentText = GetText();
 
+	OnTextValueCommitted(CurrentText, ETextCommit::OnEnter);
+}
 
 void UZLDebugUIWidget::RebuildDebugUI()
 {
@@ -427,6 +462,12 @@ void UZLDebugUIWidget::RebuildDebugUIWithNesting()
 			UGridPanel* RowGrid = WidgetTree->ConstructWidget<UGridPanel>(UGridPanel::StaticClass());
 			RowGrid->SetColumnFill(0, 1.0f);
 			RowGrid->SetColumnFill(1, 1.0f);
+			if (allowResendCurrentValues)
+			{
+				RowGrid->SetColumnFill(0, 0.8f);
+				RowGrid->SetColumnFill(1, 0.8f);
+				RowGrid->SetColumnFill(2, 0.4f);
+			}
 
 			UTextBlock* Label = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
 			Label->SetText(FText::FromString(DisplayKeyName));
@@ -801,6 +842,52 @@ void UZLDebugUIWidget::RebuildDebugUIWithNesting()
 				InputSlot->SetPadding(FMargin(5.f));
 				InputSlot->SetHorizontalAlignment(Alignment);
 				InputSlot->SetVerticalAlignment(VAlign_Center);
+
+				if (allowResendCurrentValues)
+				{
+					UButton* ResendButton = WidgetTree->ConstructWidget<UButton>(UButton::StaticClass());
+					UTextBlock* ButtonText = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
+
+					if (ButtonText)
+					{
+						ButtonText->SetText(FText::FromString(TEXT("Resend")));
+
+						FSlateFontInfo ButtonFontInfo = ButtonText->GetFont();
+						ButtonFontInfo.Size = 16;
+
+						ButtonText->SetFont(ButtonFontInfo);
+						ButtonText->SetColorAndOpacity(FSlateColor(FLinearColor::Black));
+
+						ResendButton->AddChild(ButtonText);
+
+						UButtonSlot* TextSlot = Cast<UButtonSlot>(ButtonText->Slot);
+
+						if (TextSlot)
+						{
+							TextSlot->SetHorizontalAlignment(HAlign_Center);
+							TextSlot->SetVerticalAlignment(VAlign_Center);
+							TextSlot->SetPadding(FMargin(-1.0f, 0.0f, 0.0f, 0.0f));
+						}
+					}
+
+					if (UStateKeyInputTextBox* TextBox = Cast<UStateKeyInputTextBox>(InputWidget))
+					{
+						ResendButton->OnClicked.AddDynamic(TextBox, &UStateKeyInputTextBox::TriggerResend);
+					}
+					else if (UStateKeyInputComboBox* ComboBox = Cast<UStateKeyInputComboBox>(InputWidget))
+					{
+						ResendButton->OnClicked.AddDynamic(ComboBox, &UStateKeyInputComboBox::TriggerResend);
+					}
+					else if (UStateKeyInputCheckBox* CheckBox = Cast<UStateKeyInputCheckBox>(InputWidget))
+					{
+						ResendButton->OnClicked.AddDynamic(CheckBox, &UStateKeyInputCheckBox::TriggerResend);
+					}
+
+					UGridSlot* ResendSlot = RowGrid->AddChildToGrid(ResendButton, 0, 2);
+					ResendSlot->SetPadding(FMargin(5.f));
+					ResendSlot->SetHorizontalAlignment(Alignment);
+					ResendSlot->SetVerticalAlignment(VAlign_Center);
+				}
 			}
 
 			ParentBox->AddChildToVerticalBox(RowGrid);

@@ -18,8 +18,12 @@
 #include "ZLCloudPluginDelegates.h"
 #include "ZLCloudPluginVersion.h"
 
+#define SUPPORT_LEGACY_MESSAGES
+
 class LauncherComms;
 class UZLCloudPluginStateManager;
+class UMeshComponent;
+class UMaterialInterface;
 
 
 namespace ZLCloudPlugin
@@ -32,12 +36,22 @@ namespace ZLCloudPlugin
 		//STEREOPANO360,  //Returns 2 equirectangular images for stereoscopic panoramas - not yet implemented, but might be in future
 	};
 
+	enum ZLScreenshotAAMode
+	{
+		None,
+		TAA,
+		TSR,
+		DLSS,
+		DLAA
+	};
+
 	class ZLScreenshotJob
 	{
 	public:
 		ZLScreenshotJob() {};
 		ZLScreenshotJob(int32 InWidth, int32 InHeight, FString& InFileName, FString& InPath, FString& InUID, UWorld* InWorld, const TSharedPtr<FJsonObject>* stateRequestData, ScreenshotType InScreenshotType = ScreenshotType::DEFAULT2D);
 
+		void RevertSettings();
 	public:
 
 		int32 width, height;
@@ -49,9 +63,30 @@ namespace ZLCloudPlugin
 		TArray<FString> cVarOverrides;
 		TSharedPtr<FJsonObject> stateData = nullptr;
 		bool stateRequestSent = false;
+		bool transparent = false;
 		double jobStartTime = 0.0f;
 		double captureStartTime = 0.0f;
 		bool needsCameraPostprocessAdjustmentPerFace = false;
+		ZLScreenshotAAMode aaMode = ZLScreenshotAAMode::TAA;
+		int spatialSampleCount = 8;
+		int temporalSampleCount = 8;
+
+#ifdef SUPPORT_LEGACY_MESSAGES
+		bool isLegacyMessage = false;
+#endif //SUPPORT_LEGACY_MESSAGES
+
+		FString videoFormat;
+		FString videoSequenceName;
+		FString videoCodec;
+		FString videoPixelFormat;
+		TArray<FString>videoEncodeOptions;
+		double videoFrameRate = 30.0;
+		int32 videoStartFrame = 0;
+		int32 videoNumFrames = -1;
+
+		UMovieScene *sourceMovieScene = nullptr;
+		FFrameRate sourceFrameRate;
+		TRange<FFrameNumber> sourcePlaybackRange;
 
 
 		ScreenshotType type = ScreenshotType::DEFAULT2D;
@@ -66,6 +101,19 @@ namespace ZLCloudPlugin
 		bool jobCaptureStarted = false;
 
 		TObjectPtr<UMoviePipelineExecutorJob> ActiveRenderJob;
+		TMap<FString, FString> m_SavedCVarStates;
+
+		/** When transparent screenshot is used, backup of (component, material index, original material) so we can restore after capture */
+		struct FTransparentGlassMaterialBackup
+		{
+			TWeakObjectPtr<UMeshComponent> Component;
+			int32 MaterialIndex = 0;
+			TObjectPtr<UMaterialInterface> OriginalMaterial = nullptr;
+		};
+		TArray<FTransparentGlassMaterialBackup> TransparentGlassMaterialBackups;
+
+		/** Outer used for transparent-screenshot MIDs so they can be GC'd when the job is reset (avoids leak). */
+		TObjectPtr<UObject> TransparentGlassMaterialSwapOuter = nullptr;
 	};
 
 	class ZLScreenshot
@@ -92,12 +140,17 @@ namespace ZLCloudPlugin
 		void Init(LauncherComms* launcherComms);
 		void Update();
 		bool PerformMRQCapture(int width, int height, FString outputPath, FString jobName);
+	#ifdef SUPPORT_LEGACY_MESSAGES
+		bool RequestScreenshot(const char* settingsJson, UWorld* InWorld, FString& errorMsgOut, bool isLegacyMessage);
+	#else //SUPPORT_LEGACY_MESSAGES
 		bool RequestScreenshot(const char* settingsJson, UWorld* InWorld, FString& errorMsgOut);
+	#endif //SUPPORT_LEGACY_MESSAGES
 		void UpdateCurrentRenderStateRequestProgress(bool completed, bool matchSuccess);
 		void SetCurrentRenderStateData(TSharedPtr<FJsonObject> currentState, TSharedPtr<FJsonObject> timeoutState = nullptr, TSharedPtr<FJsonObject> unmatchedState = nullptr);
 		inline bool HasCurrentRender() { return m_CurrentRender.IsValid(); }
 		void Set2DODMode(bool is2DOD);
 		bool LoadImageAsFColorArray(const FString& ImagePath, TArray<FColor>& OutColorData, int32& OutWidth, int32& OutHeight);
+		void ApplyCVarOverridesDirect();
 
 #if UNREAL_5_3_OR_NEWER
 		void OnMoviePipelineFinished(FMoviePipelineOutputData Results);

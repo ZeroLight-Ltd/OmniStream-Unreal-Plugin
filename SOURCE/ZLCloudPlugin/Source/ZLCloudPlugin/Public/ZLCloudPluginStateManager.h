@@ -27,6 +27,9 @@
 
 ZLCLOUDPLUGIN_API TSharedPtr<FJsonObject> MergeJsonObjectsRecursive(const TSharedPtr<FJsonObject>& JsonObject1, const TSharedPtr<FJsonObject>& JsonObject2);
 
+/** Merges request state with schema defaults; keys missing from RequestState are set from SchemaAsset. Returns merged object and number of keys merged. */
+ZLCLOUDPLUGIN_API TSharedPtr<FJsonObject> MergeRequestStateWithSchemaDefaults(const TSharedPtr<FJsonObject>& RequestState, UStateKeyInfoAsset* SchemaAsset, int32& OutMergedCount);
+
 
 UENUM(BlueprintType)
 enum class EStateDirtyReason : uint8
@@ -57,6 +60,7 @@ public:
 	template <typename T> void GetRequestedStateValue(FString FieldName, bool instantConfirm, T& data, bool& Success);
 	template <typename T> void GetCurrentStateValue(FString FieldName, T& data, bool& Success);
 	template <typename T> void SetCurrentStateValue(FString FieldName, T data, bool SubmitToProcessState);
+	template <typename T> void Internal_AppendProcessingState(FString FieldName, T data);
 
 	void SetCurrentSchema(UStateKeyInfoAsset* Asset);
 	void AppendCurrentSchema(UStateKeyInfoAsset* Asset);
@@ -69,6 +73,7 @@ public:
 	inline TSharedPtr<FJsonObject> GetRequestedState_JsonObject() { return JsonObject_out_requestedState; };
 
 	void MergeTrackedStateIntoCurrentState(const FString& FieldName, TSharedPtr<FJsonObject> JsonObject);
+
 
 	TArray<FString> CurrentStateCompareDiffs_Keys(TSharedPtr<FJsonObject> ComparisonJsonObject);
 	TSharedPtr<FJsonObject> CurrentStateCompareDiffs(TSharedPtr<FJsonObject> ComparisonJsonObject);
@@ -209,6 +214,8 @@ public:
 	UPROPERTY()
 	UZLDebugUIWidget* DebugUIWidget = nullptr;
 
+	bool s_defaultDoCurrentStateCompare = true;
+
 private:
 	// The singleton object.
 	static UZLCloudPluginStateManager* Singleton;
@@ -218,6 +225,7 @@ private:
 
 	bool m_StreamConnected = false;
 	bool m_needServerNotify = false;
+	int m_framesToWaitServerNotify = -1;
 	bool m_stateDirty = false;
 	EStateDirtyReason m_stateDirtyReason;
 	double m_serverStateNotifyStart;
@@ -275,10 +283,10 @@ struct ZLCLOUDPLUGIN_API FSubKeyValueResult
 	FString StringValue;
 
 	UPROPERTY(BlueprintReadOnly, Category = "SubKeyValueResult")
-	float NumberValue;
+	float NumberValue = 0.0f;
 
 	UPROPERTY(BlueprintReadOnly, Category = "SubKeyValueResult")
-	bool BoolValue;
+	bool BoolValue = false;
 
 	UPROPERTY(BlueprintReadOnly, Category = "SubKeyValueResult")
 	TArray<FString> StringArray;
@@ -290,7 +298,7 @@ struct ZLCLOUDPLUGIN_API FSubKeyValueResult
 	TArray<bool> BoolArray;
 
 	UPROPERTY(BlueprintReadOnly, Category = "SubKeyValueResult")
-	EStateKeyDataType Type;
+	EStateKeyDataType Type = EStateKeyDataType::String;
 };
 
 UCLASS()
@@ -494,7 +502,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Zerolight Omnistream State")
 	static void GetCurrentStateValueString(FString FieldName, FString& StringValue, bool& Success)
 	{
-		UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->GetCurrentStateValue_String(FieldName, StringValue, Success);
+		UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->GetCurrentStateValue<FString>(FieldName, StringValue, Success);
 	}
 
 	/**
@@ -920,13 +928,83 @@ public:
 			StateManager->DebugUIWidget->TriggerRefreshUI();
 	}
 
+	/** 
+	 * Returns the requested value for a object-level key from the state manager. The FJsonObject is serialised to an FString for compatability in Blueprints. 
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Zerolight Omnistream State", meta = (BlueprintInternalUseOnly = "true"))
+	static void GetRequestedSchemaValueObjectString(UStateKeyInfoAsset* Asset, FString ParentKey, bool InstantConfirm,
+		bool MergeWithCurrent, FString& OutObjectString, bool& Success)
+	{
+		Success = false;
+
+		if (!Asset)
+		{
+			UE_LOG(LogZLCloudPlugin, Error, TEXT("Asset is null"));
+			return;
+		}
+		UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager();
+
+		bool bHasObjectKeys = false;
+		for (const TPair<FString, FStateKeyInfo>& Pair : Asset->KeyInfos)
+		{
+			if (Pair.Key.Contains(ParentKey)) //This object-level key does exist
+			{
+				bHasObjectKeys = true;
+				break;
+			}
+		}
+		if (Asset && bHasObjectKeys)
+		{
+			TSharedPtr<FJsonValue> TempJsonValue;
+			TSharedPtr<FJsonObject> TempJsonObject;
+			TSharedPtr<FJsonValue> CurrentState;
+			TSharedPtr<FJsonObject> CurrentJsonObject;
+
+			if (MergeWithCurrent)
+			{
+				bool success;
+				UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->GetCurrentStateValue<TSharedPtr<FJsonValue>>(ParentKey, CurrentState, success);
+				if (success)
+					CurrentJsonObject = CurrentState->AsObject();
+			}
+
+			StateManager->GetRequestedStateValue<TSharedPtr<FJsonValue>>(ParentKey, InstantConfirm, TempJsonValue, Success);
+
+			if (Success)
+			{
+				TempJsonObject = TempJsonValue->AsObject();
+
+				if (MergeWithCurrent)
+				{
+					TSharedPtr<FJsonObject> FullState;
+
+					if (CurrentJsonObject.IsValid())
+					{
+						FullState = MergeJsonObjectsRecursive(CurrentJsonObject, TempJsonObject);
+						TempJsonObject = FullState;
+					}
+				}
+
+				FString JsonString;
+				TSharedRef<TJsonWriter<TCHAR>> JsonWriter = TJsonWriterFactory<TCHAR>::Create(&JsonString, 1);
+				FJsonSerializer::Serialize(TempJsonObject.ToSharedRef(), JsonWriter);
+				JsonWriter->Close();
+
+				OutObjectString = JsonString;
+
+				if (Success && StateManager->DebugUIWidget && StateManager->DebugUIWidget->IsVisible())
+					StateManager->DebugUIWidget->TriggerRefreshUI();
+			}
+		}
+	}
+
 	UFUNCTION(meta = (BlueprintInternalUseOnly = "true"))
 	static void GetRequestedStateValueSubKeys(FString ParentKey, bool InstantConfirm,
 		TArray<FSubKeyValueResult>& Results, bool& Success)
 	{
 		bool AnySuccess = false;
+		bool ClearedPrevious = false;
 		Success = false;
-		Results.Empty();
 
 		UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager();
 		if (!StateManager)
@@ -1028,6 +1106,11 @@ public:
 			if (EntrySuccess)
 			{
 				AnySuccess = true;
+				if (!ClearedPrevious)
+				{
+					Results.Empty();
+					ClearedPrevious = true;
+				}
 				Results.Add(Result);
 			}
 		}
@@ -1036,6 +1119,121 @@ public:
 
 		if (Success && StateManager->DebugUIWidget && StateManager->DebugUIWidget->IsVisible())
 			StateManager->DebugUIWidget->TriggerRefreshUI();
+	}
+
+	UFUNCTION(meta = (BlueprintInternalUseOnly = "true"))
+	static void GetCurrentStateValueSubKeys(FString ParentKey,
+		TArray<FSubKeyValueResult>& Results, bool& Success)
+	{
+		bool AnySuccess = false;
+		Success = false;
+		Results.Empty();
+
+		UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager();
+		if (!StateManager)
+		{
+			UE_LOG(LogZLCloudPlugin, Error, TEXT("StateManager is null"));
+			return;
+		}
+
+		TSharedPtr<FJsonObject> CurrentJsonObject = StateManager->GetCurrentAppState();
+		if (!CurrentJsonObject.IsValid())
+		{
+			UE_LOG(LogZLCloudPlugin, Warning, TEXT("RequestedState JSON object is invalid."));
+			return;
+		}
+
+		TArray<FString> PathParts;
+		ParentKey.ParseIntoArray(PathParts, TEXT("."), true);
+
+		for (const FString& Part : PathParts)
+		{
+			const TSharedPtr<FJsonObject>* NextJsonObject = nullptr;
+			if (CurrentJsonObject->TryGetObjectField(Part, NextJsonObject) && NextJsonObject && NextJsonObject->IsValid())
+			{
+				CurrentJsonObject = *NextJsonObject;
+			}
+			else
+			{
+				Success = false;
+				return;
+			}
+		}
+
+		TArray<FString> ChildKeys;
+		CurrentJsonObject->Values.GenerateKeyArray(ChildKeys);
+
+		for (const FString& SubKey : ChildKeys)
+		{
+			const TSharedPtr<FJsonValue>& JsonValue = CurrentJsonObject->Values.FindChecked(SubKey);
+
+			const FString FullKey = ParentKey + TEXT(".") + SubKey;
+
+			FSubKeyValueResult Result;
+			Result.Key = FullKey;
+			bool EntrySuccess = false;
+
+			switch (JsonValue->Type)
+			{
+			case EJson::String:
+				Result.Type = EStateKeyDataType::String;
+				StateManager->GetCurrentStateValue<FString>(FullKey, Result.StringValue, EntrySuccess);
+				break;
+
+			case EJson::Number:
+				Result.Type = EStateKeyDataType::Number;
+				StateManager->GetCurrentStateValue<float>(FullKey, Result.NumberValue, EntrySuccess);
+				break;
+
+			case EJson::Boolean:
+				Result.Type = EStateKeyDataType::Bool;
+				StateManager->GetCurrentStateValue<bool>(FullKey, Result.BoolValue, EntrySuccess);
+				break;
+
+			case EJson::Array:
+			{
+				const TArray<TSharedPtr<FJsonValue>>& JsonArray = JsonValue->AsArray();
+				if (JsonArray.Num() > 0)
+				{
+					switch (JsonArray[0]->Type)
+					{
+					case EJson::String:
+						Result.Type = EStateKeyDataType::StringArray;
+						StateManager->GetCurrentStateValue<TArray<FString>>(FullKey, Result.StringArray, EntrySuccess);
+						break;
+					case EJson::Number:
+						Result.Type = EStateKeyDataType::NumberArray;
+						StateManager->GetCurrentStateValue<TArray<float>>(FullKey, Result.NumberArray, EntrySuccess);
+						break;
+					case EJson::Boolean:
+						Result.Type = EStateKeyDataType::BoolArray;
+						StateManager->GetCurrentStateValue<TArray<bool>>(FullKey, Result.BoolArray, EntrySuccess);
+						break;
+					default:
+						UE_LOG(LogZLCloudPlugin, Warning, TEXT("Unsupported array element type for key %s"), *FullKey);
+						continue;
+					}
+				}
+				else
+				{
+					continue;
+				}
+				break;
+			}
+
+			default:
+				UE_LOG(LogZLCloudPlugin, Warning, TEXT("Unsupported JSON value type for key %s"), *FullKey);
+				continue;
+			}
+
+			if (EntrySuccess)
+			{
+				AnySuccess = true;
+				Results.Add(Result);
+			}
+		}
+
+		Success = AnySuccess;
 	}
 
 	UFUNCTION(BlueprintCallable, Category = "Content Generation Profiling")
