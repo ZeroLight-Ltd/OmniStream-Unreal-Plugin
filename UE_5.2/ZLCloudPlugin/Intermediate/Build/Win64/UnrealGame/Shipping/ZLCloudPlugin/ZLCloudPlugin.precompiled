@@ -1,9 +1,10 @@
 {
 	"OutputFiles": [
 		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\PCH.ZLCloudPlugin.h.obj",
-		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\Module.ZLCloudPlugin.1_of_4.cpp.obj",
-		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\Module.ZLCloudPlugin.2_of_4.cpp.obj",
-		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\Module.ZLCloudPlugin.3_of_4.cpp.obj",
-		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\Module.ZLCloudPlugin.4_of_4.cpp.obj"
+		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\Module.ZLCloudPlugin.1_of_5.cpp.obj",
+		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\Module.ZLCloudPlugin.2_of_5.cpp.obj",
+		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\Module.ZLCloudPlugin.3_of_5.cpp.obj",
+		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\Module.ZLCloudPlugin.4_of_5.cpp.obj",
+		"..\\..\\..\\x64\\UnrealGame\\Shipping\\ZLCloudPlugin\\Module.ZLCloudPlugin.5_of_5.cpp.obj"
 	]
 }

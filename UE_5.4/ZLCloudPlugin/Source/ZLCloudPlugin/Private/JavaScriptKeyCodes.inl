@@ -80,7 +80,7 @@ namespace ZLCloudPlugin {
 		/*  61 */ &EKeys::Invalid,
 		/*  62 */ &EKeys::Invalid,
 		/*  63 */ &EKeys::Invalid,
-		/*  64 */ &EKeys::Invalid,
+		/*  64 */ &EKeys::Two,  /* @ (character code); JS may send 64 instead of physical key 50 */
 		/*  65 */ &EKeys::A,
 		/*  66 */ &EKeys::B,
 		/*  67 */ &EKeys::C,
@@ -208,7 +208,7 @@ namespace ZLCloudPlugin {
 		/* 189 */ &EKeys::Hyphen,
 		/* 190 */ &EKeys::Period,
 		/* 191 */ &EKeys::Slash,
-		/* 192 */ &EKeys::Tilde,
+		/* 192 */ &EKeys::A_AccentGrave,
 		/* 193 */ &EKeys::Invalid,
 		/* 194 */ &EKeys::Invalid,
 		/* 195 */ &EKeys::Invalid,

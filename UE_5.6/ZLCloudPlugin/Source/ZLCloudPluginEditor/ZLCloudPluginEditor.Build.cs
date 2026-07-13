@@ -8,12 +8,15 @@ public class ZLCloudPluginEditor : ModuleRules
 
 		PublicDependencyModuleNames.AddRange(new string[] {
             "Core", "CoreUObject", "Engine", "InputCore", "KismetCompiler", "BlueprintGraph",
-            "ZLCloudPlugin", "Slate", "SlateCore", "EditorStyle", "UnrealEd", "GraphEditor"
+            "ZLCloudPlugin", "Slate", "SlateCore", "EditorStyle", "UnrealEd", "GraphEditor",
+            "ToolMenus"
         });
 
         PrivateDependencyModuleNames.AddRange(new string[] {
             "Core", "CoreUObject", "Engine", "InputCore", "KismetCompiler", "BlueprintGraph",
-            "ZLCloudPlugin", "Slate", "SlateCore", "EditorStyle", "UnrealEd", "GraphEditor"
+            "ZLCloudPlugin", "Slate", "SlateCore", "EditorStyle", "UnrealEd", "GraphEditor",
+            "DeveloperToolSettings",
+            "AssetRegistry"
         });
 
         bUseUnity = true;

@@ -1,11 +1,7 @@
 // Copyright ZeroLight ltd. All Rights Reserved.
 
 #include "ZLCloudPluginModule.h"
-#if WITH_ZLPLUGINVERSION
-#include "ZLPluginVersion.h"
-#else
-#define REGISTER_ZL_PLUGIN_VERSION(PluginName, VersionDefine)
-#endif
+#include "ZLPluginVersionRegistry.h"
 //ZL #include "Streamer.h"
 #include "InputDevice.h"
 #include "ZLCloudPluginInputComponent.h"
@@ -24,6 +20,7 @@
 #include "Slate/SceneViewport.h"
 #include "Utils.h"
 #include "HAL/IConsoleManager.h"
+#include "FeatureNodesSyncGPUFence.h"
 
 
 #if PLATFORM_WINDOWS || PLATFORM_XBOXONE
@@ -224,9 +221,14 @@ void ZLCloudPlugin::FZLCloudPluginModule::OnEndPIE(bool bIsSimulating)
 	if (stateManager != nullptr)
 	{
 		stateManager->SetStreamConnected(false);
+#if WITH_EDITOR
+		stateManager->SavePreviousPIESessionPreset();
+#endif
+		stateManager->ResetDefaultInitialState();
 		stateManager->ClearProcessingState();
 		stateManager->ResetCurrentAppState("");
 		stateManager->DestroyDebugUI();
+		stateManager->ClearCurrentSchema();
 		stateManager->request_recieved_id = 0;
 	}
 }
@@ -236,8 +238,7 @@ void ZLCloudPlugin::FZLCloudPluginModule::StartupModule()
 {
 	// Register this plugin's version
 	REGISTER_ZL_PLUGIN_VERSION("ZLCloudPlugin", ZLCLOUDPLUGIN_VERSION);
-	
-#if WITH_ZLPLUGINVERSION
+
 	// Register callback to broadcast version info via delegate
 	RegisterZLVersionBroadcastCallback([](TSharedPtr<FJsonObject> JsonVersionData)
 	{
@@ -246,7 +247,6 @@ void ZLCloudPlugin::FZLCloudPluginModule::StartupModule()
 			Delegates->OnGetVersionInfoNative.Broadcast(JsonVersionData);
 		}
 	});
-#endif
 	
 	RegisterCustomizations();
 	bool noInitCloudPlugin = FParse::Param(FCommandLine::Get(), TEXT("nozlplugin"));
@@ -706,6 +706,10 @@ void ZLCloudPlugin::FZLCloudPluginModule::GetOnDemandOverrideDefaults()
 void ZLCloudPlugin::FZLCloudPluginModule::SetOnDemandMode(bool onDemandMode)
 {
 	m_isOnDemandMode = onDemandMode;
+	if (!onDemandMode)
+	{
+		m_contentGenerationState = EZLContentGenerationState::None;
+	}
 
 	if (GEngine)
 	{
@@ -713,6 +717,11 @@ void ZLCloudPlugin::FZLCloudPluginModule::SetOnDemandMode(bool onDemandMode)
 		fullyLoadTexCmd.AppendInt((onDemandMode) ? 1 : m_defaultFullyLoadUsedTextures);
 		GEngine->Exec(GEngine->GetWorld(), *fullyLoadTexCmd);
 	}
+}
+
+void ZLCloudPlugin::FZLCloudPluginModule::SetContentGenerationState(EZLContentGenerationState state)
+{
+	m_contentGenerationState = state;
 }
 
 void ZLCloudPlugin::FZLCloudPluginModule::SetAppReadyToStream_Internal(bool readyToStream)
@@ -810,12 +819,14 @@ void ZLCloudPlugin::FZLCloudPluginModule::SendData(const FString& jsonData)
 
 void ZLCloudPlugin::FZLCloudPluginModule::SendFeatureNodeDataHelper(const FString& jsonData, bool init)
 {
+	FeatureNodesSyncGPUFence::InsertFenceForCurrentFrame();
+
 	//Using FStringView involves no new memory allocation, essentially just incrementing a pointer and decrementing a length integer
 	//in order to copy the original jsonData but with the opening parenthesis removed
 	FStringView copyJsonData(jsonData);
 	copyJsonData = copyJsonData.Mid(1);
 
-	FString jsonDataExtra = "{\"F\":" + FString::FromInt(CloudStream2::GetFeatureNodesFrameID()) + ",\"D\":{" + copyJsonData + "}";
+	FString jsonDataExtra = "{\"F\":" + FString::FromInt(GFrameNumber) + ",\"D\":{" + copyJsonData + "}";
 
 	auto ansiString = StringCast<ANSICHAR>(CloudStream2::GetFeatureNodesSyncCapability() ? *jsonDataExtra : *jsonData);
 	const char* charMessage = ansiString.Get();

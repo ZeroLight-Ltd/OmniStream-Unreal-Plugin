@@ -67,7 +67,6 @@ namespace ZLCloudPlugin
 		static bool IsInputHandling() { return !m_inputIgnore; }
 		static bool IsMessageHandling() { return !m_messageHandlerIgnore; }
 
-		static uint32_t GetFeatureNodesFrameID();
 		static bool GetFeatureNodesSyncCapability();
 		
 	private:
@@ -126,7 +125,6 @@ namespace ZLCloudPlugin
 		static TSharedPtr<ZLAudioSubmixCapturer> m_audioSubmixCapturer;
 		static bool m_audioInitialised;
 
-		static uint32_t m_featureNodesFrameID;
 		static bool m_isFeatureNodesSyncCapable;
 	};
 }

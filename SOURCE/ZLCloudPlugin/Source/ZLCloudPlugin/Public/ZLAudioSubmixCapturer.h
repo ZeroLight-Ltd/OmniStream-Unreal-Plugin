@@ -18,9 +18,9 @@ namespace ZLCloudPlugin
 		void OnNewSubmixBuffer(const USoundSubmix* OwningSubmix, float* AudioData, int32 NumSamples, int32 NumChannels, const int32 SampleRate, double AudioClock) override;
 	
 		bool m_pluginReady;
-		TSharedPtr<ZLAudioSubmixCapturer> m_sharedPtr;
 	private:
 		FAudioDeviceHandle m_AudioDevice;
+		bool m_bIsRegistered = false;
 		FCriticalSection CriticalSection;
 	};
 } // namespace ZLCloudPlugin

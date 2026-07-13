@@ -20,6 +20,7 @@
 #include "Widgets/Views/SListView.h"
 #include "Widgets/Views/STableRow.h"
 #include "Widgets/Input/SSearchBox.h"
+#include "Widgets/Input/SEditableTextBox.h"
 #include "PropertyCustomizationHelpers.h"
 #include "DesktopPlatformModule.h"
 #include "Framework/Application/SlateApplication.h"
@@ -105,6 +106,7 @@ public:
     void SaveAssetFromMap();
     void LoadFromUAsset();
     void LoadFromJsonSchema(TSharedPtr<FJsonObject> Schema);
+    bool LoadSchemaFromFilePath(const FString& FilePath, bool bPersistPath = true);
 
 protected:
 	TSharedPtr<SMultiLineEditableTextBox> JsonTextBox;
@@ -118,6 +120,15 @@ protected:
     void UpdateJsonData(const FString& JsonString);
     void UpdateJsonStr();
     void GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObject, const FString& Prefix, const bool SetActiveObject = true);
+    void RefreshEditorFromState();
+    void SaveLastOpenedSchemaPathToConfig() const;
+    void LoadLastOpenedSchemaPathFromConfig();
+    void BeginRenameKey(const FString& Key);
+    void CommitRenameKey(const FString& OriginalKey, const FString& ProposedKey);
+    void DuplicateKey(const FString& SourceKey);
+
+    void DeleteKey(const FString& Key);
+    FString MakeUniqueDuplicateKey(const FString& SourceKey) const;
     void AutoPopulateSchema(TArray<EAutoPopulateType> PopFlags);
     TArray<EAutoPopulateType> GetAutoPopulateTypeSelection() { return SelectedAutoPopulateOptions; }
     TMap<FString, FStateKeyInfo> ConvertToSerializableMap(const TMap<FString, StateKeyInfo>& StateKeyInfoMap);
@@ -129,6 +140,8 @@ protected:
     inline static TMap<FString, StateKeyInfo> keyInfos;
     FString newKeyStr = "";
     FString lastOpenSchemaAssetPath = "";
+    FString keyBeingRenamed = "";
+    FString pendingRenameText = "";
 
     TArray<TSharedPtr<EAutoPopulateType>> AutoPopulateOptions;
     TArray<EAutoPopulateType> SelectedAutoPopulateOptions;

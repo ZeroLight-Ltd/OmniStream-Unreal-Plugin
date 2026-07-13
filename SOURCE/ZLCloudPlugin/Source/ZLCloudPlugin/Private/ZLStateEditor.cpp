@@ -11,6 +11,7 @@
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "Misc/ConfigCacheIni.h"
 #include "UObject/UnrealType.h"
 
 #if UNREAL_5_6_OR_NEWER
@@ -21,6 +22,203 @@
 #define LOCTEXT_NAMESPACE "FZLStateEditor"
 
 DEFINE_LOG_CATEGORY(LogZLStateEditor);
+
+namespace ZLStateEditorSchemaPersistence
+{
+	static const TCHAR* ConfigSection = TEXT("ZLStateEditor");
+	static const TCHAR* LastSchemaPathKey = TEXT("LastOpenSchemaAssetPath");
+}
+
+namespace
+{
+	TSharedPtr<FJsonValue> CloneJsonValue(const TSharedPtr<FJsonValue>& Value)
+	{
+		if (!Value.IsValid())
+		{
+			return nullptr;
+		}
+
+		switch (Value->Type)
+		{
+		case EJson::String:
+			return MakeShared<FJsonValueString>(Value->AsString());
+		case EJson::Number:
+			return MakeShared<FJsonValueNumber>(Value->AsNumber());
+		case EJson::Boolean:
+			return MakeShared<FJsonValueBoolean>(Value->AsBool());
+		case EJson::Null:
+			return MakeShared<FJsonValueNull>();
+		case EJson::Array:
+		{
+			TArray<TSharedPtr<FJsonValue>> ClonedArray;
+			for (const TSharedPtr<FJsonValue>& Item : Value->AsArray())
+			{
+				ClonedArray.Add(CloneJsonValue(Item));
+			}
+			return MakeShared<FJsonValueArray>(ClonedArray);
+		}
+		case EJson::Object:
+		{
+			TSharedPtr<FJsonObject> ClonedObject = MakeShared<FJsonObject>();
+			const TSharedPtr<FJsonObject> SourceObject = Value->AsObject();
+			if (SourceObject.IsValid())
+			{
+				for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : SourceObject->Values)
+				{
+					ClonedObject->SetField(Pair.Key, CloneJsonValue(Pair.Value));
+				}
+			}
+			return MakeShared<FJsonValueObject>(ClonedObject);
+		}
+		default:
+			return nullptr;
+		}
+	}
+
+	bool SplitKeyPath(const FString& FullKey, FString& OutParentPath, FString& OutLeafName)
+	{
+		const int32 LastDotIndex = FullKey.Find(TEXT("."), ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+		if (LastDotIndex == INDEX_NONE)
+		{
+			OutParentPath = TEXT("");
+			OutLeafName = FullKey;
+			return !OutLeafName.IsEmpty();
+		}
+
+		OutParentPath = FullKey.Left(LastDotIndex);
+		OutLeafName = FullKey.Mid(LastDotIndex + 1);
+		return !OutLeafName.IsEmpty();
+	}
+
+	TSharedPtr<FJsonObject> GetObjectAtPath(const TSharedPtr<FJsonObject>& RootObject, const FString& Path)
+	{
+		if (!RootObject.IsValid())
+		{
+			return nullptr;
+		}
+
+		if (Path.IsEmpty())
+		{
+			return RootObject;
+		}
+
+		TArray<FString> PathParts;
+		Path.ParseIntoArray(PathParts, TEXT("."), true);
+
+		TSharedPtr<FJsonObject> CurrentObject = RootObject;
+		for (const FString& Part : PathParts)
+		{
+			if (!CurrentObject.IsValid())
+			{
+				return nullptr;
+			}
+
+			const TSharedPtr<FJsonValue> ExistingValue = CurrentObject->TryGetField(Part);
+			if (!ExistingValue.IsValid() || ExistingValue->Type != EJson::Object)
+			{
+				return nullptr;
+			}
+
+			CurrentObject = ExistingValue->AsObject();
+		}
+
+		return CurrentObject;
+	}
+
+	TSharedPtr<FJsonObject> GetOrCreateObjectAtPath(const TSharedPtr<FJsonObject>& RootObject, const FString& Path)
+	{
+		if (!RootObject.IsValid())
+		{
+			return nullptr;
+		}
+
+		if (Path.IsEmpty())
+		{
+			return RootObject;
+		}
+
+		TArray<FString> PathParts;
+		Path.ParseIntoArray(PathParts, TEXT("."), true);
+
+		TSharedPtr<FJsonObject> CurrentObject = RootObject;
+		for (const FString& Part : PathParts)
+		{
+			if (!CurrentObject.IsValid())
+			{
+				return nullptr;
+			}
+
+			const TSharedPtr<FJsonValue> ExistingValue = CurrentObject->TryGetField(Part);
+			if (ExistingValue.IsValid() && ExistingValue->Type == EJson::Object)
+			{
+				CurrentObject = ExistingValue->AsObject();
+				continue;
+			}
+
+			TSharedPtr<FJsonObject> NextObject = MakeShared<FJsonObject>();
+			CurrentObject->SetObjectField(Part, NextObject);
+			CurrentObject = NextObject;
+		}
+
+		return CurrentObject;
+	}
+
+	TSharedPtr<FJsonValue> GetJsonValueAtPath(const TSharedPtr<FJsonObject>& RootObject, const FString& FullKey)
+	{
+		FString ParentPath;
+		FString LeafName;
+		if (!SplitKeyPath(FullKey, ParentPath, LeafName))
+		{
+			return nullptr;
+		}
+
+		const TSharedPtr<FJsonObject> ParentObject = GetObjectAtPath(RootObject, ParentPath);
+		return ParentObject.IsValid() ? ParentObject->TryGetField(LeafName) : nullptr;
+	}
+
+	bool SetJsonValueAtPath(const TSharedPtr<FJsonObject>& RootObject, const FString& FullKey, const TSharedPtr<FJsonValue>& Value)
+	{
+		FString ParentPath;
+		FString LeafName;
+		if (!SplitKeyPath(FullKey, ParentPath, LeafName) || !Value.IsValid())
+		{
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject> ParentObject = GetOrCreateObjectAtPath(RootObject, ParentPath);
+		if (!ParentObject.IsValid())
+		{
+			return false;
+		}
+
+		ParentObject->SetField(LeafName, Value);
+		return true;
+	}
+
+	bool RemoveJsonValueAtPath(const TSharedPtr<FJsonObject>& RootObject, const FString& FullKey)
+	{
+		FString ParentPath;
+		FString LeafName;
+		if (!SplitKeyPath(FullKey, ParentPath, LeafName))
+		{
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject> ParentObject = GetObjectAtPath(RootObject, ParentPath);
+		if (!ParentObject.IsValid())
+		{
+			return false;
+		}
+
+		if (!ParentObject->HasField(LeafName))
+		{
+			return false;
+		}
+
+		ParentObject->RemoveField(LeafName);
+		return true;
+	}
+}
 
 TMap<FString, FStateKeyInfo> FZLStateEditor::ConvertToSerializableMap(const TMap<FString, StateKeyInfo>& StateKeyInfoMap)
 {
@@ -168,6 +366,7 @@ void FZLStateEditor::SaveAssetFromMap()
 
 		// Store the saved file path for next save dialog default
 		lastOpenSchemaAssetPath = SaveFileName;
+		SaveLastOpenedSchemaPathToConfig();
 
 		// Also save to .zlschema JSON file
 		FString SchemaFileName = FPaths::GetPath(SaveFileName) / (AssetName + TEXT(".zlschema"));
@@ -199,8 +398,7 @@ void FZLStateEditor::LoadFromUAsset()
 	IDesktopPlatform* DesktopPlatform = FDesktopPlatformModule::Get();
 	if (!DesktopPlatform) return;
 
-	FString OpenPath;
-	const FString DefaultPath = FPaths::ProjectContentDir();
+	const FString DefaultPath = lastOpenSchemaAssetPath.IsEmpty() ? FPaths::ProjectContentDir() : FPaths::GetPath(lastOpenSchemaAssetPath);
 	const FString FileTypes = TEXT("Schema Files (*.uasset;*.zlschema)|*.uasset;*.zlschema|Unreal Asset (*.uasset)|*.uasset|Schema JSON (*.zlschema)|*.zlschema");
 
 	TArray<FString> OutFiles;
@@ -216,74 +414,7 @@ void FZLStateEditor::LoadFromUAsset()
 
 	if (bOpened && OutFiles.Num() > 0)
 	{
-		FString FilePath = OutFiles[0];
-		FString FileExtension = FPaths::GetExtension(FilePath).ToLower();
-
-		if (FileExtension == TEXT("zlschema"))
-		{
-			// Load from JSON file
-			FString JsonString;
-			if (!FFileHelper::LoadFileToString(JsonString, *FilePath))
-			{
-				UE_LOG(LogTemp, Error, TEXT("Failed to read schema JSON file: %s"), *FilePath);
-				return;
-			}
-
-			// Parse JSON
-			TSharedPtr<FJsonObject> JsonObject;
-			TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
-			if (!FJsonSerializer::Deserialize(Reader, JsonObject) || !JsonObject.IsValid())
-			{
-				UE_LOG(LogTemp, Error, TEXT("Failed to parse JSON from schema file: %s"), *FilePath);
-				return;
-			}
-
-			LoadFromJsonSchema(JsonObject);
-
-			// Store the loaded file path for save dialog default
-			lastOpenSchemaAssetPath = FilePath;
-
-			UE_LOG(LogTemp, Log, TEXT("Loaded schema from JSON file: %s"), *FilePath);
-		}
-		else if (FileExtension == TEXT("uasset"))
-		{
-			// Load from uasset file
-			FString PackageName;
-			if (!FPackageName::TryConvertFilenameToLongPackageName(FilePath, PackageName))
-			{
-				UE_LOG(LogTemp, Error, TEXT("Could not convert filename to package: %s"), *FilePath);
-				return;
-			}
-
-			FString AssetName = FPaths::GetBaseFilename(FilePath);
-
-			UPackage* Package = LoadPackage(nullptr, *PackageName, LOAD_None);
-			if (!Package)
-			{
-				UE_LOG(LogTemp, Error, TEXT("Failed to load package: %s"), *PackageName);
-				return;
-			}
-
-			UStateKeyInfoAsset* LoadedAsset = FindObject<UStateKeyInfoAsset>(Package, *AssetName);
-			if (!LoadedAsset)
-			{
-				UE_LOG(LogTemp, Error, TEXT("Failed to find asset in package: %s (make sure this is a schema .uasset or .zlschema file)"), *AssetName);
-				return;
-			}
-
-			keyInfos = ConvertToEditorMap(LoadedAsset->KeyInfos, ActiveJsonObject);
-			UpdateJsonStr(); //Refresh editor, maybe use invalidate call here?
-			UpdateJsonData(s_currentJsonStr);
-
-			// Store the loaded file path for save dialog default
-			lastOpenSchemaAssetPath = FilePath;
-
-			UE_LOG(LogTemp, Log, TEXT("Loaded %d keys from asset."), keyInfos.Num());
-		}
-		else
-		{
-			UE_LOG(LogTemp, Error, TEXT("Unsupported file type: %s (expected .uasset or .zlschema)"), *FileExtension);
-		}
+		LoadSchemaFromFilePath(OutFiles[0], true);
 	}
 }
 
@@ -521,6 +652,262 @@ TMap<FString, StateKeyInfo> FZLStateEditor::ConvertToEditorMap(const TMap<FStrin
 	return RuntimeMap;
 }
 
+void FZLStateEditor::RefreshEditorFromState()
+{
+	UpdateJsonStr();
+	UpdateJsonData(s_currentJsonStr);
+}
+
+void FZLStateEditor::SaveLastOpenedSchemaPathToConfig() const
+{
+	if (!GConfig)
+	{
+		return;
+	}
+
+	GConfig->SetString(
+		ZLStateEditorSchemaPersistence::ConfigSection,
+		ZLStateEditorSchemaPersistence::LastSchemaPathKey,
+		*lastOpenSchemaAssetPath,
+		GEditorPerProjectIni
+	);
+	GConfig->Flush(false, GEditorPerProjectIni);
+}
+
+void FZLStateEditor::LoadLastOpenedSchemaPathFromConfig()
+{
+	if (!GConfig)
+	{
+		return;
+	}
+
+	GConfig->GetString(
+		ZLStateEditorSchemaPersistence::ConfigSection,
+		ZLStateEditorSchemaPersistence::LastSchemaPathKey,
+		lastOpenSchemaAssetPath,
+		GEditorPerProjectIni
+	);
+}
+
+bool FZLStateEditor::LoadSchemaFromFilePath(const FString& FilePath, bool bPersistPath)
+{
+	const FString FileExtension = FPaths::GetExtension(FilePath).ToLower();
+
+	if (FileExtension == TEXT("zlschema"))
+	{
+		FString JsonString;
+		if (!FFileHelper::LoadFileToString(JsonString, *FilePath))
+		{
+			UE_LOG(LogTemp, Error, TEXT("Failed to read schema JSON file: %s"), *FilePath);
+			return false;
+		}
+
+		TSharedPtr<FJsonObject> JsonObject;
+		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
+		if (!FJsonSerializer::Deserialize(Reader, JsonObject) || !JsonObject.IsValid())
+		{
+			UE_LOG(LogTemp, Error, TEXT("Failed to parse JSON from schema file: %s"), *FilePath);
+			return false;
+		}
+
+		LoadFromJsonSchema(JsonObject);
+		lastOpenSchemaAssetPath = FilePath;
+		if (bPersistPath)
+		{
+			SaveLastOpenedSchemaPathToConfig();
+		}
+
+		UE_LOG(LogTemp, Log, TEXT("Loaded schema from JSON file: %s"), *FilePath);
+		return true;
+	}
+
+	if (FileExtension == TEXT("uasset"))
+	{
+		FString PackageName;
+		if (!FPackageName::TryConvertFilenameToLongPackageName(FilePath, PackageName))
+		{
+			UE_LOG(LogTemp, Error, TEXT("Could not convert filename to package: %s"), *FilePath);
+			return false;
+		}
+
+		const FString AssetName = FPaths::GetBaseFilename(FilePath);
+
+		UPackage* Package = LoadPackage(nullptr, *PackageName, LOAD_None);
+		if (!Package)
+		{
+			UE_LOG(LogTemp, Error, TEXT("Failed to load package: %s"), *PackageName);
+			return false;
+		}
+
+		UStateKeyInfoAsset* LoadedAsset = FindObject<UStateKeyInfoAsset>(Package, *AssetName);
+		if (!LoadedAsset)
+		{
+			UE_LOG(LogTemp, Error, TEXT("Failed to find asset in package: %s (make sure this is a schema .uasset or .zlschema file)"), *AssetName);
+			return false;
+		}
+
+		keyInfos = ConvertToEditorMap(LoadedAsset->KeyInfos, ActiveJsonObject);
+		RefreshEditorFromState();
+		lastOpenSchemaAssetPath = FilePath;
+		if (bPersistPath)
+		{
+			SaveLastOpenedSchemaPathToConfig();
+		}
+
+		UE_LOG(LogTemp, Log, TEXT("Loaded %d keys from asset."), keyInfos.Num());
+		return true;
+	}
+
+	UE_LOG(LogTemp, Error, TEXT("Unsupported file type: %s (expected .uasset or .zlschema)"), *FileExtension);
+	return false;
+}
+
+FString FZLStateEditor::MakeUniqueDuplicateKey(const FString& SourceKey) const
+{
+	FString ParentPath;
+	FString LeafName;
+	if (!SplitKeyPath(SourceKey, ParentPath, LeafName))
+	{
+		return FString();
+	}
+
+	int32 Suffix = 1;
+	FString CandidateKey;
+	do
+	{
+		const FString CandidateLeaf = FString::Printf(TEXT("%s_%d"), *LeafName, Suffix++);
+		CandidateKey = ParentPath.IsEmpty() ? CandidateLeaf : ParentPath + TEXT(".") + CandidateLeaf;
+	}
+	while (keyInfos.Contains(CandidateKey));
+
+	return CandidateKey;
+}
+
+void FZLStateEditor::DuplicateKey(const FString& SourceKey)
+{
+	if (!keyInfos.Contains(SourceKey))
+	{
+		return;
+	}
+
+	const FString DuplicateKeyName = MakeUniqueDuplicateKey(SourceKey);
+	if (DuplicateKeyName.IsEmpty())
+	{
+		return;
+	}
+
+	keyInfos.Add(DuplicateKeyName, keyInfos[SourceKey]);
+
+	const TSharedPtr<FJsonValue> SourceValue = GetJsonValueAtPath(ActiveJsonObject, SourceKey);
+	if (SourceValue.IsValid())
+	{
+		SetJsonValueAtPath(ActiveJsonObject, DuplicateKeyName, CloneJsonValue(SourceValue));
+	}
+
+	if (AreaExpansionStates.Contains(SourceKey))
+	{
+		AreaExpansionStates.Add(DuplicateKeyName, AreaExpansionStates[SourceKey]);
+	}
+	else
+	{
+		AreaExpansionStates.Add(DuplicateKeyName, TPair<bool, bool>(true, true));
+	}
+
+	RefreshEditorFromState();
+}
+
+void FZLStateEditor::DeleteKey(const FString& Key)
+{
+	if (!keyInfos.Contains(Key))
+	{
+		return;
+	}
+
+	keyInfos.Remove(Key);
+	AreaExpansionStates.Remove(Key);
+	RemoveJsonValueAtPath(ActiveJsonObject, Key);
+
+	if (keyBeingRenamed == Key)
+	{
+		keyBeingRenamed = TEXT("");
+		pendingRenameText = TEXT("");
+	}
+
+	RefreshEditorFromState();
+}
+
+void FZLStateEditor::BeginRenameKey(const FString& Key)
+{
+	if (!keyInfos.Contains(Key))
+	{
+		return;
+	}
+
+	keyBeingRenamed = Key;
+	pendingRenameText = Key;
+	UpdateJsonData(s_currentJsonStr);
+}
+
+void FZLStateEditor::CommitRenameKey(const FString& OriginalKey, const FString& ProposedKey)
+{
+	if (!keyInfos.Contains(OriginalKey))
+	{
+		keyBeingRenamed = TEXT("");
+		pendingRenameText = TEXT("");
+		return;
+	}
+
+	FString SanitizedKey = ProposedKey;
+	SanitizedKey.TrimStartAndEndInline();
+
+	if (SanitizedKey.IsEmpty() || SanitizedKey.EndsWith(TEXT(".")))
+	{
+		UE_LOG(LogZLStateEditor, Warning, TEXT("Cannot rename key '%s' to invalid key '%s'"), *OriginalKey, *SanitizedKey);
+		return;
+	}
+
+	if (SanitizedKey == OriginalKey)
+	{
+		keyBeingRenamed = TEXT("");
+		pendingRenameText = TEXT("");
+		UpdateJsonData(s_currentJsonStr);
+		return;
+	}
+
+	if (keyInfos.Contains(SanitizedKey))
+	{
+		UE_LOG(LogZLStateEditor, Warning, TEXT("Cannot rename key '%s' because '%s' already exists"), *OriginalKey, *SanitizedKey);
+		return;
+	}
+
+	const TSharedPtr<FJsonValue> SourceValue = GetJsonValueAtPath(ActiveJsonObject, OriginalKey);
+	if (!SourceValue.IsValid())
+	{
+		UE_LOG(LogZLStateEditor, Warning, TEXT("Could not locate JSON value for key '%s' while renaming"), *OriginalKey);
+		return;
+	}
+
+	if (!SetJsonValueAtPath(ActiveJsonObject, SanitizedKey, CloneJsonValue(SourceValue)))
+	{
+		UE_LOG(LogZLStateEditor, Warning, TEXT("Failed to set JSON field for renamed key '%s'"), *SanitizedKey);
+		return;
+	}
+
+	RemoveJsonValueAtPath(ActiveJsonObject, OriginalKey);
+	keyInfos.Add(SanitizedKey, keyInfos[OriginalKey]);
+	keyInfos.Remove(OriginalKey);
+
+	if (AreaExpansionStates.Contains(OriginalKey))
+	{
+		AreaExpansionStates.Add(SanitizedKey, AreaExpansionStates[OriginalKey]);
+		AreaExpansionStates.Remove(OriginalKey);
+	}
+
+	keyBeingRenamed = TEXT("");
+	pendingRenameText = TEXT("");
+	RefreshEditorFromState();
+}
+
 void FZLStateEditor::Construct(const FArguments& InArgs)
 {
 	PopulateAutoPopulateOptions();
@@ -711,7 +1098,7 @@ void FZLStateEditor::Construct(const FArguments& InArgs)
 													{
 														if (!newKeyStr.IsEmpty())
 														{
-															while (!newKeyStr.IsEmpty() && FString(TEXT("!\"£$%&*")).Contains(newKeyStr.Left(1))) newKeyStr.RemoveAt(0);
+															while (!newKeyStr.IsEmpty() && FString(TEXT("!\"ï¿½$%&*")).Contains(newKeyStr.Left(1))) newKeyStr.RemoveAt(0);
 
 															if (newKeyStr.EndsWith("."))
 															{
@@ -796,8 +1183,28 @@ void FZLStateEditor::Construct(const FArguments& InArgs)
 				]
 		];
 
-	if (s_currentJsonStr != "")
+	LoadLastOpenedSchemaPathFromConfig();
+
+	bool bAutoLoadedSchema = false;
+	if (!lastOpenSchemaAssetPath.IsEmpty() && FPaths::FileExists(lastOpenSchemaAssetPath))
+	{
+		bAutoLoadedSchema = LoadSchemaFromFilePath(lastOpenSchemaAssetPath, false);
+		if (!bAutoLoadedSchema)
+		{
+			lastOpenSchemaAssetPath = TEXT("");
+			SaveLastOpenedSchemaPathToConfig();
+		}
+	}
+	else if (!lastOpenSchemaAssetPath.IsEmpty())
+	{
+		lastOpenSchemaAssetPath = TEXT("");
+		SaveLastOpenedSchemaPathToConfig();
+	}
+
+	if (!bAutoLoadedSchema && s_currentJsonStr != "")
+	{
 		UpdateJsonData(s_currentJsonStr);
+	}
 }
 
 void FZLStateEditor::OnJsonTextChanged(const FText& NewText)
@@ -877,8 +1284,19 @@ void FZLStateEditor::GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObjec
 	if (SetActiveObject)
 		this->ActiveJsonObject = JsonObject;
 
-	for (const auto& Pair : JsonObject->Values)
+	TArray<FString> SortedFieldNames;
+	JsonObject->Values.GetKeys(SortedFieldNames);
+	SortedFieldNames.Sort();
+
+	for (const FString& FieldName : SortedFieldNames)
 	{
+		const TSharedPtr<FJsonValue>* ValuePtr = JsonObject->Values.Find(FieldName);
+		if (!ValuePtr || !ValuePtr->IsValid())
+		{
+			continue;
+		}
+
+		const TPair<FString, TSharedPtr<FJsonValue>> Pair(FieldName, *ValuePtr);
 		FString Key = Prefix.IsEmpty() ? Pair.Key : Prefix + TEXT(".") + Pair.Key;
 		if (Pair.Value->Type == EJson::Object)
 		{
@@ -921,6 +1339,19 @@ void FZLStateEditor::GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObjec
 					}
 				}
 			}
+			else
+			{
+				// Keep foldout default controls in sync when JSON is edited directly.
+				keyInfos[Key].defaultValue = CloneJsonValue(Pair.Value);
+				if (Pair.Value->Type == EJson::Array)
+				{
+					keyInfos[Key].defaultValueArray = Pair.Value->AsArray();
+				}
+				else
+				{
+					keyInfos[Key].defaultValueArray.Empty();
+				}
+			}
 
 			TSharedPtr<SVerticalBox> ArrayBox = SNew(SVerticalBox);
 			TSharedPtr<SVerticalBox> AcceptedValuesArrayBox = SNew(SVerticalBox);
@@ -946,7 +1377,87 @@ void FZLStateEditor::GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObjec
 						.BodyBorderBackgroundColor(FLinearColor::White)
 						.HeaderContent()
 						[
-							SNew(STextBlock).Text(FText::FromString(Key))
+							SNew(SBorder)
+								.BorderImage(FAppStyle::GetBrush("NoBorder"))
+								.Padding(2.0f)
+								.OnMouseButtonDown_Lambda([this, Key](const FGeometry&, const FPointerEvent& MouseEvent)
+							{
+								if (MouseEvent.GetEffectingButton() != EKeys::RightMouseButton)
+								{
+									return FReply::Unhandled();
+								}
+
+								FMenuBuilder MenuBuilder(true, nullptr);
+								MenuBuilder.AddMenuEntry(
+									FText::FromString("Duplicate"),
+									FText::FromString("Duplicate this key using a unique _N suffix"),
+									FSlateIcon(),
+									FUIAction(FExecuteAction::CreateLambda([this, Key]()
+								{
+									DuplicateKey(Key);
+								}))
+								);
+								MenuBuilder.AddMenuEntry(
+									FText::FromString("Rename"),
+									FText::FromString("Rename this key"),
+									FSlateIcon(),
+									FUIAction(FExecuteAction::CreateLambda([this, Key]()
+								{
+									BeginRenameKey(Key);
+								}))
+								);
+								MenuBuilder.AddMenuEntry(
+									FText::FromString("Delete"),
+									FText::FromString("Delete this key"),
+									FSlateIcon(),
+									FUIAction(FExecuteAction::CreateLambda([this, Key]()
+								{
+									DeleteKey(Key);
+								}))
+								);
+
+								FSlateApplication::Get().PushMenu(
+									AsShared(),
+									FWidgetPath(),
+									MenuBuilder.MakeWidget(),
+									MouseEvent.GetScreenSpacePosition(),
+									FPopupTransitionEffect(FPopupTransitionEffect::ContextMenu)
+								);
+
+								return FReply::Handled();
+							})
+								[
+									SNew(SHorizontalBox)
+										+ SHorizontalBox::Slot()
+										.FillWidth(1.0f)
+										.Padding(0, 0, 0, 0)
+										.VAlign(VAlign_Center)
+										[
+											SNew(SBox)
+												.MaxDesiredWidth(600.0f)
+												[
+													(keyBeingRenamed == Key)
+													? StaticCastSharedRef<SWidget>(SNew(SEditableTextBox)
+														.Text_Lambda([this, Key]()
+													{
+														return FText::FromString((keyBeingRenamed == Key) ? pendingRenameText : Key);
+													})
+														.SelectAllTextWhenFocused(true)
+														.OnTextChanged_Lambda([this](const FText& NewText)
+													{
+														pendingRenameText = NewText.ToString();
+													})
+														.OnTextCommitted_Lambda([this, Key](const FText& NewText, ETextCommit::Type CommitType)
+													{
+														if (CommitType == ETextCommit::OnEnter || CommitType == ETextCommit::OnUserMovedFocus)
+														{
+															CommitRenameKey(Key, NewText.ToString());
+														}
+													}))
+													: StaticCastSharedRef<SWidget>(SNew(STextBlock).Text(FText::FromString(Key)))
+												]
+										]
+								]
 						]
 						.BodyContent()
 						[
@@ -1181,7 +1692,7 @@ void FZLStateEditor::GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObjec
 				{
 					for (int32 i = 0; i < keyInfos[Key].defaultValueArray.Num(); ++i)
 					{
-						TSharedPtr<FJsonValue> ValuePtr = (keyInfos[Key].defaultValueArray)[i];
+						TSharedPtr<FJsonValue> FieldValuePtr = (keyInfos[Key].defaultValueArray)[i];
 
 						if (keyInfos[Key].dataType == "StringArray")
 						{
@@ -1193,7 +1704,7 @@ void FZLStateEditor::GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObjec
 										.FillWidth(1.0f)
 										[
 											SNew(SEditableTextBox)
-												.Text(FText::FromString(ValuePtr->AsString()))
+												.Text(FText::FromString(FieldValuePtr->AsString()))
 												.OnTextCommitted_Lambda([this, JsonObject, Pair, i, Key](const FText& NewText, ETextCommit::Type)
 											{
 												keyInfos[Key].defaultValueArray[i] = MakeShared<FJsonValueString>(NewText.ToString());
@@ -1233,7 +1744,7 @@ void FZLStateEditor::GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObjec
 										.FillWidth(1.0f)
 										[
 											SNew(SNumericEntryBox<float>)
-												.Value(ValuePtr->AsNumber())
+												.Value(FieldValuePtr->AsNumber())
 												.OnValueCommitted_Lambda([this, JsonObject, Pair, i, Key](float NewValue, ETextCommit::Type)
 											{
 												FString FormattedString = FString::Printf(TEXT("%.3f"), NewValue);
@@ -1276,7 +1787,7 @@ void FZLStateEditor::GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObjec
 										.FillWidth(1.0f)
 										[
 											SNew(SCheckBox)
-												.IsChecked(ValuePtr->AsBool() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
+												.IsChecked(FieldValuePtr->AsBool() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
 												.OnCheckStateChanged_Lambda([this, JsonObject, Pair, i, Key](ECheckBoxState NewState)
 											{
 												keyInfos[Key].defaultValueArray[i] = MakeShared<FJsonValueBoolean>(NewState == ECheckBoxState::Checked);
@@ -1347,7 +1858,7 @@ void FZLStateEditor::GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObjec
 				{
 					for (int32 i = 0; i < keyInfos[Key].acceptedValues.Num(); ++i)
 					{
-						TSharedPtr<FJsonValue> ValuePtr = (keyInfos[Key].acceptedValues)[i];
+						TSharedPtr<FJsonValue> FieldValuePtr = (keyInfos[Key].acceptedValues)[i];
 
 						if (keyInfos[Key].dataType == "StringArray" || keyInfos[Key].dataType == "String")
 						{
@@ -1359,7 +1870,7 @@ void FZLStateEditor::GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObjec
 										.FillWidth(1.0f)
 										[
 											SNew(SEditableTextBox)
-												.Text(FText::FromString(ValuePtr->AsString()))
+												.Text(FText::FromString(FieldValuePtr->AsString()))
 												.OnTextCommitted_Lambda([this, JsonObject, Pair, i, Key](const FText& NewText, ETextCommit::Type)
 											{
 												keyInfos[Key].acceptedValues[i] = MakeShared<FJsonValueString>(NewText.ToString());
@@ -1395,7 +1906,7 @@ void FZLStateEditor::GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObjec
 										.FillWidth(1.0f)
 										[
 											SNew(SNumericEntryBox<float>)
-												.Value(ValuePtr->AsNumber())
+												.Value(FieldValuePtr->AsNumber())
 												.OnValueCommitted_Lambda([this, JsonObject, Pair, i, Key](float NewValue, ETextCommit::Type)
 											{
 												FString FormattedString = FString::Printf(TEXT("%.3f"), NewValue);
@@ -1536,6 +2047,106 @@ TMap<FName, TArray<FName>> GetAllZLNodesInEditor()
 								continue;
 						}
 
+						bool bUseAdvancedStateKeyMapping = false;
+						if (FProperty* AdvModeProp = ZLNodeClass->FindPropertyByName(TEXT("bUseAdvancedStateKeyMapping")))
+						{
+							if (const FBoolProperty* AdvBool = CastField<FBoolProperty>(AdvModeProp))
+							{
+								bUseAdvancedStateKeyMapping = AdvBool->GetPropertyValue_InContainer(Actor);
+							}
+						}
+
+						if (bUseAdvancedStateKeyMapping)
+						{
+							TArray<FName> AcceptedValues;
+							AcceptedValues.Add(FName(TEXT("OFF")));
+							NodeHasSequence = false;
+
+							if (FProperty* EntriesProp = ZLNodeClass->FindPropertyByName(TEXT("AdvancedStateKeyEntries")))
+							{
+								if (FArrayProperty* ArrayProp = CastField<FArrayProperty>(EntriesProp))
+								{
+									if (FStructProperty* StructInner = CastField<FStructProperty>(ArrayProp->Inner))
+									{
+										if (UScriptStruct* EntryStruct = StructInner->Struct)
+										{
+											FStrProperty* StateKeyProp = CastField<FStrProperty>(EntryStruct->FindPropertyByName(TEXT("StateKey")));
+											FObjectProperty* SeqObjProp = CastField<FObjectProperty>(EntryStruct->FindPropertyByName(TEXT("TargetSequence")));
+											FObjectProperty* CtrlObjProp = CastField<FObjectProperty>(EntryStruct->FindPropertyByName(TEXT("TargetNodeController")));
+
+											FScriptArrayHelper ArrayHelper(ArrayProp, ArrayProp->ContainerPtrToValuePtr<void>(Actor));
+											for (int32 Idx = 0; Idx < ArrayHelper.Num(); ++Idx)
+											{
+												uint8* RowPtr = ArrayHelper.GetRawPtr(Idx);
+												FString StateKey = StateKeyProp ? StateKeyProp->GetPropertyValue_InContainer(RowPtr) : FString();
+												StateKey.TrimStartAndEndInline();
+												if (StateKey.IsEmpty())
+												{
+													continue;
+												}
+
+												UObject* SeqObj = SeqObjProp ? SeqObjProp->GetObjectPropertyValue_InContainer(RowPtr) : nullptr;
+												UObject* CtrlObj = CtrlObjProp ? CtrlObjProp->GetObjectPropertyValue_InContainer(RowPtr) : nullptr;
+
+												if (Cast<ULevelSequence>(SeqObj))
+												{
+													NodeHasSequence = true;
+													AcceptedValues.AddUnique(FName(*FString::Printf(TEXT("PLAYING_TO_%s"), *StateKey)));
+													AcceptedValues.AddUnique(FName(*StateKey));
+												}
+												if (CtrlObj && CtrlObj->IsA(ZLNodeClass))
+												{
+													AcceptedValues.AddUnique(FName(*StateKey));
+												}
+											}
+										}
+									}
+								}
+							}
+
+							if (ParentTriggerProp && !NodeHasSequence)
+							{
+								TArray<AActor*> AttachedActors;
+								Actor->GetAttachedActors(AttachedActors);
+
+								for (AActor* ChildActor : AttachedActors)
+								{
+									if (ChildActor && ChildActor->IsA(ZLNodeClass))
+									{
+										FProperty* ChildSeqProp = ChildActor->GetClass()->FindPropertyByName(TEXT("Sequence"));
+
+										if (ChildSeqProp)
+										{
+											FObjectProperty* ChildObjProp = CastField<FObjectProperty>(ChildSeqProp);
+											if (ChildObjProp)
+											{
+												UObject* ChildSeqObj = ChildObjProp->GetObjectPropertyValue_InContainer(ChildActor);
+
+												if (ChildSeqObj)
+												{
+													NodeHasSequence = true;
+													break;
+												}
+											}
+										}
+									}
+								}
+							}
+
+							if (NodeName != NAME_None)
+							{
+								FName KeyStr;
+								if (Actor->GetClass() == ZLNodeClass)
+									KeyStr = FName("triggers." + NodeName.ToString());
+								else if (Actor->GetClass() == ZLLightNodeClass)
+									KeyStr = FName("lights." + NodeName.ToString());
+
+								ZLNodeOptions.Add(KeyStr, AcceptedValues);
+							}
+							continue;
+						}
+
+						NodeHasSequence = false;
 						if (ZLNodeSequenceProp)
 						{
 							FObjectProperty* SequenceObjectProp = CastField<FObjectProperty>(ZLNodeSequenceProp);
@@ -1550,7 +2161,7 @@ TMap<FName, TArray<FName>> GetAllZLNodesInEditor()
 								NodeHasSequence = false;
 						}
 
-						if (ParentTriggerProp && !NodeHasSequence) //Check if any attached controllers have sequences and should be playable from this parent
+						if (ParentTriggerProp && !NodeHasSequence)
 						{
 							TArray<AActor*> AttachedActors;
 
@@ -1647,73 +2258,6 @@ TArray<FName> GetAllCameraNamesInEditor()
 
 	return CameraNames;
 }
-
-//TArray<TPair<FString, TArray<FString>>> GetAllAnimationKeyStatesInEditor()
-//{
-//	TArray<TPair<FString, TArray<FString>>> AnimationKeyStates;
-//
-//	// Script / CoreUObject.Class'/Script/DIMEconfigurator.AnimationTriggerComponent'
-//
-//	if (GEditor)
-//	{
-//		UWorld* World = GEditor->GetEditorWorldContext().World();
-//		if (World)
-//		{
-//			UClass* AnimTriggerComponentClass = StaticLoadClass(
-//				UObject::StaticClass(), nullptr,
-//				TEXT("/Script/DIMEconfigurator.AnimationTriggerComponent")
-//			);
-//
-//			UScriptStruct* AnimClipDataStruct = Cast<UScriptStruct>(StaticLoadObject(
-//				UScriptStruct::StaticClass(), nullptr, 
-//				TEXT("/Script/DIMEconfigurator.AnimClipData"))
-//			);
-//
-//			if (AnimTriggerComponentClass && AnimClipDataStruct)
-//			{				
-//				FArrayProperty* AnimationsProp = CastField<FArrayProperty>(AnimTriggerComponentClass->FindPropertyByName(TEXT("Animations")));
-//				FProperty* AnimNameProp = AnimClipDataStruct->FindPropertyByName(TEXT("Name"));
-//
-//				if (AnimationsProp && AnimNameProp)
-//				{
-//					for (TActorIterator<AActor> It(World); It; ++It)
-//					{
-//						AActor* Actor = *It;
-//						if (!Actor) continue;
-//
-//						// 5. For each actor, find the component of the type we're looking for.
-//						UActorComponent* Component = Actor->FindComponentByClass(AnimTriggerComponentClass);
-//						if (Component)
-//						{
-//							FScriptArrayHelper ArrayHelper(AnimationsProp, AnimationsProp->ContainerPtrToValuePtr<void>(Component));
-//
-//							for (int32 i = 0; i < ArrayHelper.Num(); ++i)
-//							{
-//								// Get a raw pointer to the struct data at the current array index.
-//								uint8* StructPtr = ArrayHelper.GetRawPtr(i);
-//
-//								// From the struct pointer, get the value of the 'AnimationName' property.
-//								FString AnimationName = *AnimNameProp->ContainerPtrToValuePtr<FString>(StructPtr);
-//
-//								if (!AnimationName.IsEmpty())
-//								{
-//									TArray<FString> States;
-//									States.Add("Reverse");
-//									States.Add("Play");
-//									// Add the name to our list, ensuring it's not already there.
-//									AnimationKeyStates.AddUnique(TPair<FString, TArray<FString>>(AnimationName, States));
-//								}
-//							}
-//						}
-//					}
-//				}
-//			}
-//		}
-//	}
-//
-//	return AnimationKeyStates;
-//}
-
 
 TArray<TPair<FString, TArray<FString>>> GetAllAnimationKeyStatesInEditor()
 {

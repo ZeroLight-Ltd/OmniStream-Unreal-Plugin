@@ -10,6 +10,7 @@
 #include "ZLCloudPluginPlayerId.h"
 #include "IZLCloudPluginAudioSink.h"
 #include "Templates/SharedPointer.h"
+#include "ZLContentGenerationState.h"
 #include "ZLCloudPluginProtocol.h"
 
 #include "IInputDevice.h"
@@ -27,9 +28,19 @@ class ZLCLOUDPLUGIN_API IZLCloudPluginModule : public IInputDeviceModule
 protected:
 	bool m_RunningCloudXRMode = false;
 	bool m_isOnDemandMode = false;
+	EZLContentGenerationState m_contentGenerationState = EZLContentGenerationState::None;
 public:
 	inline bool IsContentGenerationMode() { return m_isOnDemandMode; }
 	inline bool IsXRMode() { return m_RunningCloudXRMode; }
+
+	/** The current content generation sub-state. Only meaningful while IsContentGenerationMode() is true. */
+	inline EZLContentGenerationState GetContentGenerationState() { return m_contentGenerationState; }
+
+	/** True while content generation is actively recording video sequence frames. */
+	inline bool IsContentGenerationMediaRecording() { return m_isOnDemandMode && m_contentGenerationState == EZLContentGenerationState::MediaRecording; }
+
+	/** Sets the content generation sub-state (media capture vs media recording). */
+	virtual void SetContentGenerationState(EZLContentGenerationState state) = 0;
 
 	/**
 	* Singleton-like access to this module's interface.

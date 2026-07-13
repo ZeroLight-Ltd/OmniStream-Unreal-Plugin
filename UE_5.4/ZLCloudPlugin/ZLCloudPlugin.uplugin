@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 186,
-	"VersionName": "1.0.186",
+	"Version": 199,
+	"VersionName": "1.1.199",
 	"FriendlyName": "ZeroLight OmniStream Plugin",
 	"Description": "Cloud Streaming plugin used to stream real-time content from the cloud",
 	"Category": "Cloud",
@@ -38,6 +38,10 @@
 		},
 		{
 			"Name": "MovieRenderPipeline",
+			"Enabled": true
+		},
+		{
+			"Name": "PythonScriptPlugin",
 			"Enabled": true
 		}
 	]

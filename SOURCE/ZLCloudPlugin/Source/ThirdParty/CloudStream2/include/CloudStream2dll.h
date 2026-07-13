@@ -79,7 +79,7 @@ namespace CloudStream2DLL
 		CLOUDSTREAM2DLL_IMPORT void GetPluginVersion(int& major, int& minor, int& rev, int& build);
 		CLOUDSTREAM2DLL_IMPORT void SetAppVersionInfo(const char* versionInfo);
 
-		CLOUDSTREAM2DLL_IMPORT void OnFrameUE(int isDynamic, void* deviceCommandQueue);
+		CLOUDSTREAM2DLL_IMPORT void OnFrameUE(int isDynamic, void* deviceCommandQueue, uint32_t frameID);
 		CLOUDSTREAM2DLL_IMPORT void Initialize(EncoderRequirementsCallback encoderCallback, MousePositionCallback mouseCallback, ClientsDisconnectedCallback clientsDisconnectedCallback, RichDataStreamConfigCallback richDataStreamConfigCallback, FrameMetadataConfigCallback frameMetaConfigCallback, ForceImageChangingCallback forceImageChangingCallback, PluginMessageCallback pluginMessageCallback, SendFramesCallback sendFramesCallback);
 
 		CLOUDSTREAM2DLL_IMPORT void SetAverageFrameTime(float frameAverageTime);

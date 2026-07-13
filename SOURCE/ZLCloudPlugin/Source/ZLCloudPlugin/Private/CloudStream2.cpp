@@ -11,6 +11,7 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Engine/GameEngine.h"
 #include "RenderingThread.h"
+#include "FeatureNodesSyncGPUFence.h"
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -52,7 +53,6 @@ FVector3f CloudStream2::m_MousePosition = FVector3f::ZeroVector;
 bool CloudStream2::m_LastCameraMoved = true;
 ZLStopwatch CloudStream2::m_StreamTimer;
 
-uint32_t CloudStream2::m_featureNodesFrameID = 0;
 bool CloudStream2::m_isFeatureNodesSyncCapable = false;
 
 #if UNREAL_5_5_OR_NEWER
@@ -155,8 +155,7 @@ void CloudStream2::InitPlugin()
 		m_pluginInitialised = true;
 
 		CloudStream2DLL::SetUEDebugFunction(&CloudStream2::PluginPrint);
-		
-		m_audioSubmixCapturer = MakeShared<ZLAudioSubmixCapturer>();
+
 #if WITH_EDITOR
 		if (GIsEditor) //Catch because standalone level play annoyingly runs with WITH_EDITOR defined
 		{
@@ -204,6 +203,7 @@ void CloudStream2::FreePlugin()
 		m_audioSubmixCapturer.Reset();
 		m_audioSubmixCapturer = nullptr;
 	}
+	m_audioInitialised = false;
 
 	m_pluginReady = false;
 	m_cloudSettingsSet = false;
@@ -276,8 +276,6 @@ void CloudStream2::DisconnectInputHandler()
 		m_InputHandler.Reset();
 		m_inputDeactivate = false;
 	}
-
-	m_featureNodesFrameID = 0;
 }
 
 void CloudStream2::InitCloudStreamSettings(const char* settingsJson)
@@ -388,7 +386,17 @@ void CloudStream2::UpdateFilteredKeys()
 void CloudStream2::SetReadyToStream() 
 { 
 	m_pluginReady = true; 
-	m_audioSubmixCapturer->m_pluginReady = true;
+
+	// In editor/PIE this may be called before the first Update() tick where we lazily create audio capture.
+	if (!m_audioSubmixCapturer)
+	{
+		m_audioSubmixCapturer = MakeShared<ZLAudioSubmixCapturer>();
+	}
+
+	if (m_audioSubmixCapturer)
+	{
+		m_audioSubmixCapturer->m_pluginReady = true;
+	}
 }
 
 bool CloudStream2::PluginStreamConnected()
@@ -549,8 +557,18 @@ void CloudStream2::Update(UWorld* World)
 			m_FramesToSkipAfterResolutionChange = 3;
 		}
 
-		if (m_audioSubmixCapturer && IsDLLValid())
+		if (IsDLLValid())
 		{
+			if (!m_audioSubmixCapturer)
+			{
+				m_audioSubmixCapturer = MakeShared<ZLAudioSubmixCapturer>();
+				m_audioSubmixCapturer->m_pluginReady = m_pluginReady;
+			}
+			else
+			{
+				m_audioSubmixCapturer->m_pluginReady = m_pluginReady;
+			}
+
 			if (CloudStream2DLL::ShouldSendAudio())
 			{
 				if (!m_audioInitialised)
@@ -701,11 +719,6 @@ void CloudStream2::UpdateMJPEGQuality()
 }
 */
 
-uint32_t CloudStream2::GetFeatureNodesFrameID()
-{
-	return m_featureNodesFrameID;
-}
-
 bool CloudStream2::GetFeatureNodesSyncCapability()
 {
 	return m_isFeatureNodesSyncCapable;
@@ -755,8 +768,7 @@ void CloudStream2::OnFrame(const FTexture2DRHIRef& BackBuffer)
 				void* GraphicsQueue = GDynamicRHI->RHIGetNativeGraphicsQueue();
 				if (GraphicsQueue)
 				{
-					CloudStream2DLL::OnFrameUE(0, GraphicsQueue);
-					m_featureNodesFrameID++;
+					CloudStream2DLL::OnFrameUE(0, GraphicsQueue, (uint32_t)FeatureNodesSyncGPUFence::GetLatestFrameID());
 					++m_SentFramesCount;
 				}
 				else

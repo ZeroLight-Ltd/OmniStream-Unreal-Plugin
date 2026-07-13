@@ -56,6 +56,30 @@ struct FStateKeyInfo
     UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
     bool bIgnoredInDataHashes = false;
 
+    UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
+    bool bUseMinMax = false;
+
+    UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
+    double MinValue = 0.0;
+
+    UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
+    double MaxValue = 0.0;
+
+    UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
+    bool bAllowDynamicArraySize = false;
+
+    UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
+    bool bAllowNullValue = false;
+
+    UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
+    bool bDefaultValueIsNull = false;
+
+    // When true, dropdown / option widgets in the Debug UI display the description
+    // (resolved via DIME model metadata) for each accepted value instead of the raw
+    // value. The underlying value broadcast to the configuration remains the true value.
+    UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
+    bool bDisplayDescriptionAsOptions = false;
+
     inline bool IsArray()
     {
         return DataType == "StringArray" || DataType == "NumberArray" || DataType == "BoolArray";
@@ -80,6 +104,36 @@ struct FStateKeyInfo
     }
 };
 
+USTRUCT(BlueprintType)
+struct FDIMEModelCodeMetadata
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category = "DIME", BlueprintReadWrite)
+	FString Code;
+
+	UPROPERTY(EditAnywhere, Category = "DIME", BlueprintReadWrite)
+	FString Group;
+
+	UPROPERTY(EditAnywhere, Category = "DIME", BlueprintReadWrite)
+	int32 DescriptionId = INDEX_NONE;
+};
+
+USTRUCT(BlueprintType)
+struct FDIMEModelMetadata
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category = "DIME", BlueprintReadWrite)
+	FString ModelName;
+
+	UPROPERTY(EditAnywhere, Category = "DIME", BlueprintReadWrite)
+	TMap<int32, FString> DescriptionLookupById;
+
+	UPROPERTY(EditAnywhere, Category = "DIME", BlueprintReadWrite)
+	TArray<FDIMEModelCodeMetadata> Codes;
+};
+
 UCLASS(BlueprintType)
 class ZLCLOUDPLUGIN_API UStateKeyInfoAsset : public UObject
 {
@@ -89,7 +143,20 @@ public:
 	UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
 	TMap<FString, FStateKeyInfo> KeyInfos;
 
+	UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
+	TArray<FDIMEModelMetadata> DimeModelData;
+
     TSharedRef<FJsonObject> SerializeStateKeyAssetToJson();
 
+    static TSharedRef<FJsonObject> BuildJsonSchemaCompliantFromKeyInfos(const TMap<FString, FStateKeyInfo>& InKeyInfos, const FString& SchemaTitle);
+
     TSharedRef<FJsonObject> SerializeStateKeyAsset_JsonSchemaCompliant();
+
+	static TSharedPtr<FJsonValue> SerializeDimeModelDataToJsonValue(const TArray<FDIMEModelMetadata>& InDimeModelData);
+	static void DeserializeDimeModelDataFromJsonValue(const TSharedPtr<FJsonValue>& InValue, TArray<FDIMEModelMetadata>& OutData);
+	static TSharedRef<FJsonObject> BuildZLSchemaFileObject(
+		const TMap<FString, FStateKeyInfo>& InKeyInfos,
+		const FString& SchemaTitle,
+		const TArray<FDIMEModelMetadata>& InDimeModelData);
+	TSharedRef<FJsonObject> SerializeStateKeyAsset_ZLSchemaFile();
 };

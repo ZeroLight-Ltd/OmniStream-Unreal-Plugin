@@ -6,9 +6,8 @@
 #include <Runtime/Core/Public/Misc/FileHelper.h>
 #include <ZLTrackedStateBlueprint.h>
 #include "EditorZLCloudPluginSettings.h"
-#if WITH_ZLPLUGINVERSION
-#include "ZLPluginVersion.h"
-#endif
+#include "HAL/IConsoleManager.h"
+#include "ZLPluginVersionRegistry.h"
 
 #if WITH_EDITOR
 #include "Framework/Docking/TabManager.h"
@@ -19,9 +18,32 @@
 #include "Widgets/Text/STextBlock.h"
 #include "SlateBasics.h"
 #include "LevelEditor.h"
+#include "Editor.h"
 #endif
+#include "HAL/PlatformFilemanager.h"
+#include "Misc/Paths.h"
 
 UZLCloudPluginStateManager* UZLCloudPluginStateManager::Singleton = nullptr;
+
+namespace
+{
+static FAutoConsoleCommand ZLConsoleCommandPrintCurrentState(
+	TEXT("zl.state.current"),
+	TEXT("Prints the full current state JSON object."),
+	FConsoleCommandDelegate::CreateLambda([]()
+	{
+		UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager();
+		if (!StateManager)
+		{
+			UE_LOG(LogZLCloudPlugin, Warning, TEXT("[zl.state.current] State manager unavailable."));
+			return;
+		}
+
+		FString CurrentStateJson;
+		StateManager->GetCurrentState(CurrentStateJson);
+		UE_LOG(LogZLCloudPlugin, Display, TEXT("[zl.state.current] Current state: %s"), *CurrentStateJson);
+	}));
+}
 
 #if WITH_EDITOR
 const FName UZLCloudPluginStateManager::DebugUITabId = FName(TEXT("ZLDebugUITab"));
@@ -136,7 +158,6 @@ void UZLCloudPluginStateManager::RebuildDebugUI(UStateKeyInfoAsset* schemaAsset)
 				{
 					DebugUIWidget = Widget;
 					m_lastSetSchema = schemaAsset;
-					DebugUIWidget->SetTargetSchema(schemaAsset);
 					
 					// Set visibility based on mode
 					// If using editor tab, make it visible by default
@@ -149,12 +170,13 @@ void UZLCloudPluginStateManager::RebuildDebugUI(UStateKeyInfoAsset* schemaAsset)
 					}
 #endif
 					DebugUIWidget->SetVisibility(bShouldBeVisible ? ESlateVisibility::Visible : ESlateVisibility::Hidden);
+					DebugUIWidget->SetTargetSchema(schemaAsset);
 
 #if WITH_EDITOR
 					if (bUseEditorTab)
 					{
 						// Create a shared state for the scale value
-						TSharedRef<float> ScaleValue = MakeShared<float>(0.5f);
+						TSharedRef<float> ScaleValue = MakeShared<float>(GetDebugUITabScale());
 						TSharedRef<SWidget> WidgetRef = Widget->TakeWidget();
 						
 						// Register tab spawner (safe to call multiple times)
@@ -181,12 +203,15 @@ void UZLCloudPluginStateManager::RebuildDebugUI(UStateKeyInfoAsset* schemaAsset)
 			}
 			else
 			{
-				// Only update schema if it changed to avoid triggering widget reconstruction
-				// SetTargetSchema calls RebuildDebugUI() which can trigger NativeConstruct again
+				// Always track schema changes on the widget; full rebuild is skipped while hidden.
 				if (m_lastSetSchema != schemaAsset)
 				{
 					m_lastSetSchema = schemaAsset;
 					DebugUIWidget->SetTargetSchema(schemaAsset);
+				}
+				else if (m_debugUIVisible)
+				{
+					DebugUIWidget->TriggerRefreshUI();
 				}
 				
 #if WITH_EDITOR
@@ -201,7 +226,7 @@ void UZLCloudPluginStateManager::RebuildDebugUI(UStateKeyInfoAsset* schemaAsset)
 					DebugUIWidget->SetVisibility(ESlateVisibility::Visible);
 					
 					// Create a shared state for the scale value
-					TSharedRef<float> ScaleValue = MakeShared<float>(0.5f);
+					TSharedRef<float> ScaleValue = MakeShared<float>(GetDebugUITabScale());
 					TSharedRef<SWidget> WidgetRef = DebugUIWidget->TakeWidget();
 					
 					// Register tab spawner (safe to call multiple times - will update existing spawner)
@@ -516,6 +541,27 @@ FString UZLCloudPluginStateManager::MergeDefaultInitialState(FString overrideIni
 
 static TSharedPtr<FJsonValue> StateKeyInfoToDefaultJsonValue(const FStateKeyInfo& Info)
 {
+	if (Info.bAllowNullValue)
+	{
+		if (Info.bDefaultValueIsNull)
+		{
+			return TSharedPtr<FJsonValue>();
+		}
+
+		if (Info.GetDataTypeEnum() == EStateKeyDataType::String && Info.DefaultStringValue.TrimStartAndEnd().IsEmpty())
+		{
+			return TSharedPtr<FJsonValue>();
+		}
+		if (Info.GetDataTypeEnum() == EStateKeyDataType::StringArray && Info.DefaultStringArray.Num() == 0)
+		{
+			return TSharedPtr<FJsonValue>();
+		}
+		if (Info.GetDataTypeEnum() == EStateKeyDataType::NumberArray && Info.DefaultNumberArray.Num() == 0)
+		{
+			return TSharedPtr<FJsonValue>();
+		}
+	}
+
 	switch (Info.GetDataTypeEnum())
 	{
 	case EStateKeyDataType::String:
@@ -546,7 +592,7 @@ static TSharedPtr<FJsonValue> StateKeyInfoToDefaultJsonValue(const FStateKeyInfo
 		return MakeShared<FJsonValueArray>(Arr);
 	}
 	default:
-		return MakeShared<FJsonValueString>(TEXT(""));
+		return TSharedPtr<FJsonValue>();
 	}
 }
 
@@ -748,6 +794,51 @@ TSharedPtr<FJsonObject> MergeRequestStateWithSchemaDefaults(const TSharedPtr<FJs
 	return Merged;
 }
 
+static void CollectJsonLeafKeysRecursive(const TSharedPtr<FJsonObject>& JsonObject, const FString& Prefix, TArray<FString>& OutLeafKeys)
+{
+	if (!JsonObject.IsValid())
+	{
+		return;
+	}
+
+	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : JsonObject->Values)
+	{
+		if (!Pair.Value.IsValid())
+		{
+			continue;
+		}
+
+		const FString FullKey = Prefix.IsEmpty() ? Pair.Key : Prefix + TEXT(".") + Pair.Key;
+		if (Pair.Value->Type == EJson::Object)
+		{
+			CollectJsonLeafKeysRecursive(Pair.Value->AsObject(), FullKey, OutLeafKeys);
+		}
+		else
+		{
+			OutLeafKeys.Add(FullKey);
+		}
+	}
+}
+
+static TArray<FString> GetJsonLeafKeys(const TSharedPtr<FJsonObject>& JsonObject, const FString& ExcludedTopLevelKey)
+{
+	TArray<FString> LeafKeys;
+	CollectJsonLeafKeysRecursive(JsonObject, TEXT(""), LeafKeys);
+
+	LeafKeys.RemoveAll([&ExcludedTopLevelKey](const FString& Key)
+	{
+		if (ExcludedTopLevelKey.IsEmpty())
+		{
+			return false;
+		}
+		return Key.Equals(ExcludedTopLevelKey, ESearchCase::CaseSensitive) ||
+			Key.StartsWith(ExcludedTopLevelKey + TEXT("."), ESearchCase::CaseSensitive);
+	});
+
+	LeafKeys.Sort();
+	return LeafKeys;
+}
+
 TArray<FString> UZLCloudPluginStateManager::CurrentStateCompareDiffs_Keys(TSharedPtr<FJsonObject> ComparisonJsonObject)
 {
 	TArray<FString> diffKeys;
@@ -878,32 +969,7 @@ void UZLCloudPluginStateManager::ProcessState(FString jsonString, bool doCurrent
 
 	if (jsonString.Contains(s_GetVersion))
 	{
-		TSharedPtr<FJsonObject> JsonVersionData;
-		
-#if WITH_ZLPLUGINVERSION
-		// Get all plugin versions from ZLPluginVersion (includes all registered plugins)
-		// GetAllZLPluginVersionsAsJson will broadcast the delegate internally to collect additional version info
-		JsonVersionData = GetAllZLPluginVersionsAsJson(true);
-#else
-		// Fallback: manually get ZLCloudPlugin version if ZLPluginVersion is not available
-		FString pluginVersion = "1.0.0";
-		IPluginManager& PluginManager = IPluginManager::Get();
-		TSharedPtr<IPlugin> ZlCloudStreamPlugin = PluginManager.FindPlugin("ZLCloudPlugin");
-		if (ZlCloudStreamPlugin)
-		{
-			const FPluginDescriptor& Descriptor = ZlCloudStreamPlugin->GetDescriptor();
-			pluginVersion = *Descriptor.VersionName;
-		}
-		
-		JsonVersionData = MakeShareable(new FJsonObject);
-		JsonVersionData->SetStringField("ZLCloudPlugin ", pluginVersion);
-		
-		// Broadcast delegate to allow other plugins to add their version info
-		if (UZLCloudPluginDelegates* Delegates = UZLCloudPluginDelegates::GetZLCloudPluginDelegates())
-		{
-			Delegates->OnGetVersionInfoNative.Broadcast(JsonVersionData);
-		}
-#endif
+		TSharedPtr<FJsonObject> JsonVersionData = GetAllZLPluginVersionsAsJson(true);
 
 		SendFJsonObjectToWeb(JsonVersionData);
 		return;
@@ -1124,12 +1190,10 @@ void UZLCloudPluginStateManager::Update(LauncherComms* launcherComms)
 				{
 					if ((currTime - m_lastStateWarningPrintTime) > 1.0) //Only print every 1 sec
 					{
-						TArray<FString> diffKeys = CurrentStateCompareDiffs_Keys(JsonObject_processingState);
-						if (diffKeys.Contains(s_requestIdStr)) //Dont need to log this
-							diffKeys.Remove(s_requestIdStr);
+						const TArray<FString> pendingRequestedLeafKeys = GetJsonLeafKeys(JsonObject_processingState, s_requestIdStr);
 
-						UE_LOG(LogZLCloudPlugin, Display, TEXT("State request %s still waiting for %d state objects to match..."), *requestId, diffKeys.Num());
-						for (FString key : diffKeys)
+						UE_LOG(LogZLCloudPlugin, Display, TEXT("State request %s still waiting for %d requested state keys..."), *requestId, pendingRequestedLeafKeys.Num());
+						for (const FString& key : pendingRequestedLeafKeys)
 						{
 							UE_LOG(LogZLCloudPlugin, Display, TEXT("Request waiting for %f on %s state"), round(elapsedTime), *key);
 						}
@@ -1142,14 +1206,12 @@ void UZLCloudPluginStateManager::Update(LauncherComms* launcherComms)
 					TSharedPtr<FJsonObject> unprocessed = nullptr;
 					if (JsonObject_processingStateLeafCount < JsonObject_requestedStateLeafCount) //Some requested states were ignored
 					{
-						unprocessed = CurrentStateCompareDiffs(JsonObject_out_requestedState);
-						TArray<FString> diffKeys = CurrentStateCompareDiffs_Keys(JsonObject_processingState);
-						for (FString key : diffKeys) //Strip timed out values to report any unprocessed
+						unprocessed = MakeShared<FJsonObject>();
+						FJsonObject::Duplicate(JsonObject_out_requestedState.ToSharedRef(), unprocessed);
+						const TArray<FString> processingLeafKeys = GetJsonLeafKeys(JsonObject_processingState, s_requestIdStr);
+						for (const FString& key : processingLeafKeys) //Strip in-flight processing values to report any unprocessed
 						{
-							if (unprocessed->TryGetField(key))
-							{
-								unprocessed->RemoveField(key);
-							}
+							RemoveNestedKey(key, unprocessed);
 						}
 						if (unprocessed->HasField(s_requestIdStr))
 							unprocessed->RemoveField(s_requestIdStr);
@@ -1347,7 +1409,7 @@ void UZLCloudPluginStateManager::ConfirmStateChange(FString FieldName, bool& Suc
 			Success = false;
 		}
 
-		if (Success && DebugUIWidget && DebugUIWidget->IsVisible())
+		if (Success && DebugUIWidget && DebugUIWidget->IsDebugUIPresented())
 			DebugUIWidget->TriggerRefreshUI();
 
 	}
@@ -2118,6 +2180,7 @@ void UZLCloudPluginStateManager::SetCurrentSchema(UStateKeyInfoAsset* Asset)
 	if (Asset)
 	{
 		ActiveSchema->KeyInfos = Asset->KeyInfos;
+		ActiveSchema->DimeModelData = Asset->DimeModelData;
 
 		RebuildDebugUI(Asset);
 	}
@@ -2149,6 +2212,63 @@ void UZLCloudPluginStateManager::AppendCurrentSchema(UStateKeyInfoAsset* Asset)
 			else
 			{
 				ActiveSchema->KeyInfos.Add(Key, IncomingInfo);
+			}
+		}
+
+		for (const FDIMEModelMetadata& IncomingModelMetadata : Asset->DimeModelData)
+		{
+			const FString IncomingModelName = IncomingModelMetadata.ModelName.TrimStartAndEnd();
+			if (IncomingModelName.IsEmpty())
+			{
+				continue;
+			}
+
+			FDIMEModelMetadata* ExistingModelMetadata = ActiveSchema->DimeModelData.FindByPredicate([&IncomingModelName](const FDIMEModelMetadata& ExistingModel)
+			{
+				return ExistingModel.ModelName.Equals(IncomingModelName, ESearchCase::IgnoreCase);
+			});
+
+			if (!ExistingModelMetadata)
+			{
+				FDIMEModelMetadata NewModelMetadata = IncomingModelMetadata;
+				NewModelMetadata.ModelName = IncomingModelName;
+				ActiveSchema->DimeModelData.Add(MoveTemp(NewModelMetadata));
+				continue;
+			}
+
+			ExistingModelMetadata->ModelName = IncomingModelName;
+			for (const TPair<int32, FString>& DescriptionPair : IncomingModelMetadata.DescriptionLookupById)
+			{
+				ExistingModelMetadata->DescriptionLookupById.FindOrAdd(DescriptionPair.Key) = DescriptionPair.Value;
+			}
+
+			for (const FDIMEModelCodeMetadata& IncomingCodeMetadata : IncomingModelMetadata.Codes)
+			{
+				const FString IncomingCode = IncomingCodeMetadata.Code.TrimStartAndEnd();
+				const FString IncomingGroup = IncomingCodeMetadata.Group.TrimStartAndEnd();
+				if (IncomingCode.IsEmpty() || IncomingGroup.IsEmpty())
+				{
+					continue;
+				}
+
+				FDIMEModelCodeMetadata* ExistingCodeMetadata = ExistingModelMetadata->Codes.FindByPredicate(
+					[&IncomingCode, &IncomingGroup](const FDIMEModelCodeMetadata& ExistingCode)
+				{
+					return ExistingCode.Code.Equals(IncomingCode, ESearchCase::IgnoreCase) &&
+						ExistingCode.Group.Equals(IncomingGroup, ESearchCase::IgnoreCase);
+				});
+
+				if (!ExistingCodeMetadata)
+				{
+					FDIMEModelCodeMetadata NewCodeMetadata = IncomingCodeMetadata;
+					NewCodeMetadata.Code = IncomingCode;
+					NewCodeMetadata.Group = IncomingGroup;
+					ExistingModelMetadata->Codes.Add(MoveTemp(NewCodeMetadata));
+				}
+				else if (IncomingCodeMetadata.DescriptionId != INDEX_NONE)
+				{
+					ExistingCodeMetadata->DescriptionId = IncomingCodeMetadata.DescriptionId;
+				}
 			}
 		}
 
@@ -2186,6 +2306,68 @@ void UZLCloudPluginStateManager::RemoveFromCurrentSchema(UStateKeyInfoAsset* Ass
 					ActiveSchema->KeyInfos.Remove(Key);
 			}
 		}
+
+		for (const FDIMEModelMetadata& IncomingModelMetadata : Asset->DimeModelData)
+		{
+			const FString IncomingModelName = IncomingModelMetadata.ModelName.TrimStartAndEnd();
+			if (IncomingModelName.IsEmpty())
+			{
+				continue;
+			}
+
+			const int32 ExistingModelIndex = ActiveSchema->DimeModelData.IndexOfByPredicate([&IncomingModelName](const FDIMEModelMetadata& ExistingModel)
+			{
+				return ExistingModel.ModelName.Equals(IncomingModelName, ESearchCase::IgnoreCase);
+			});
+
+			if (ExistingModelIndex == INDEX_NONE)
+			{
+				continue;
+			}
+
+			FDIMEModelMetadata& ExistingModelMetadata = ActiveSchema->DimeModelData[ExistingModelIndex];
+
+			if (IncomingModelMetadata.Codes.Num() == 0 && IncomingModelMetadata.DescriptionLookupById.Num() == 0)
+			{
+				ActiveSchema->DimeModelData.RemoveAt(ExistingModelIndex);
+				continue;
+			}
+
+			for (const FDIMEModelCodeMetadata& IncomingCodeMetadata : IncomingModelMetadata.Codes)
+			{
+				const FString IncomingCode = IncomingCodeMetadata.Code.TrimStartAndEnd();
+				const FString IncomingGroup = IncomingCodeMetadata.Group.TrimStartAndEnd();
+				if (IncomingCode.IsEmpty() || IncomingGroup.IsEmpty())
+				{
+					continue;
+				}
+
+				ExistingModelMetadata.Codes.RemoveAll([&IncomingCode, &IncomingGroup](const FDIMEModelCodeMetadata& ExistingCode)
+				{
+					return ExistingCode.Code.Equals(IncomingCode, ESearchCase::IgnoreCase) &&
+						ExistingCode.Group.Equals(IncomingGroup, ESearchCase::IgnoreCase);
+				});
+			}
+
+			for (const TPair<int32, FString>& DescriptionPair : IncomingModelMetadata.DescriptionLookupById)
+			{
+				ExistingModelMetadata.DescriptionLookupById.Remove(DescriptionPair.Key);
+			}
+
+			for (FDIMEModelCodeMetadata& ExistingCode : ExistingModelMetadata.Codes)
+			{
+				if (ExistingCode.DescriptionId != INDEX_NONE && !ExistingModelMetadata.DescriptionLookupById.Contains(ExistingCode.DescriptionId))
+				{
+					ExistingCode.DescriptionId = INDEX_NONE;
+				}
+			}
+
+			if (ExistingModelMetadata.Codes.Num() == 0 && ExistingModelMetadata.DescriptionLookupById.Num() == 0)
+			{
+				ActiveSchema->DimeModelData.RemoveAt(ExistingModelIndex);
+			}
+		}
+
 		RebuildDebugUI(ActiveSchema);
 		DebugUIWidget->TriggerRefreshUI();
 	}
@@ -2202,6 +2384,7 @@ void UZLCloudPluginStateManager::ClearCurrentSchema()
 	if (ActiveSchema != nullptr)
 	{
 		ActiveSchema->KeyInfos.Empty();
+		ActiveSchema->DimeModelData.Empty();
 	}
 }
 
@@ -2228,7 +2411,7 @@ void UZLCloudPluginStateManager::SetDebugUIVisibility(bool visible)
 				// Ensure widget is in viewport
 				if (GEngine)
 				{
-							// Remove first to ensure clean state
+					// Remove first to ensure clean state
 					SetupViewportMode();
 				}
 			}
@@ -2237,6 +2420,26 @@ void UZLCloudPluginStateManager::SetDebugUIVisibility(bool visible)
 				// Remove from viewport and reset input mode
 				DebugUIWidget->RemoveFromParent();
 			}
+		}
+	}
+
+	if (visible)
+	{
+		if (DebugUIWidget && ActiveSchema)
+		{
+			if (m_lastSetSchema != ActiveSchema)
+			{
+				m_lastSetSchema = ActiveSchema;
+				DebugUIWidget->SetTargetSchema(ActiveSchema);
+			}
+			else
+			{
+				DebugUIWidget->TriggerRefreshUI();
+			}
+		}
+		else if (ActiveSchema)
+		{
+			RebuildDebugUI(ActiveSchema);
 		}
 	}
 }
@@ -2261,7 +2464,7 @@ void UZLCloudPluginStateManager::SetShowDebugUIInEditorTab(bool showInEditorTab)
 			DebugUIWidget->SetVisibility(ESlateVisibility::Visible);
 			
 			// Create a shared state for the scale value
-			TSharedRef<float> ScaleValue = MakeShared<float>(0.5f);
+			TSharedRef<float> ScaleValue = MakeShared<float>(GetDebugUITabScale());
 			TSharedRef<SWidget> WidgetRef = DebugUIWidget->TakeWidget();
 			
 			// Register tab spawner (safe to call multiple times - will update existing spawner)
@@ -2309,6 +2512,88 @@ void UZLCloudPluginStateManager::SetupViewportMode()
 }
 
 #if WITH_EDITOR
+FString UZLCloudPluginStateManager::GetPresetsFilePathForSchema() const
+{
+	if (!ActiveSchema)
+	{
+		return FString();
+	}
+
+	FString SafeName = ActiveSchema->GetName();
+	for (TCHAR& Ch : SafeName)
+	{
+		if (Ch == TEXT('/') || Ch == TEXT('\\') || Ch == TEXT(':') || Ch == TEXT('*') || Ch == TEXT('?') || Ch == TEXT('"') || Ch == TEXT('<') || Ch == TEXT('>') || Ch == TEXT('|'))
+		{
+			Ch = TEXT('_');
+		}
+	}
+
+	return FPaths::ProjectContentDir() / TEXT("ZLSchemaPresets") / (SafeName + TEXT(".zlschemapresets"));
+}
+
+void UZLCloudPluginStateManager::SavePreviousPIESessionPreset() const
+{
+	if (!GIsEditor || !ActiveSchema || !JsonObject_currentState.IsValid())
+	{
+		return;
+	}
+
+	const FString PresetsPath = GetPresetsFilePathForSchema();
+	if (PresetsPath.IsEmpty())
+	{
+		return;
+	}
+
+	FPlatformFileManager::Get().GetPlatformFile().CreateDirectoryTree(*FPaths::GetPath(PresetsPath));
+
+	TSharedPtr<FJsonObject> PresetsRoot = MakeShared<FJsonObject>();
+	if (FPaths::FileExists(PresetsPath))
+	{
+		FString ExistingJson;
+		if (FFileHelper::LoadFileToString(ExistingJson, *PresetsPath))
+		{
+			TSharedPtr<FJsonObject> Parsed;
+			const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ExistingJson);
+			if (FJsonSerializer::Deserialize(Reader, Parsed) && Parsed.IsValid())
+			{
+				PresetsRoot = Parsed;
+			}
+		}
+	}
+
+	TSharedPtr<FJsonObject> CurrentStateCopy = MakeShared<FJsonObject>();
+	FJsonObject::Duplicate(JsonObject_currentState.ToSharedRef(), CurrentStateCopy);
+	PresetsRoot->SetObjectField(TEXT("Previous PIE Session"), CurrentStateCopy);
+
+	FString Out;
+	TSharedRef<TJsonWriter<TCHAR>> Writer = TJsonWriterFactory<TCHAR>::Create(&Out, 1);
+	FJsonSerializer::Serialize(PresetsRoot.ToSharedRef(), Writer);
+	Writer->Close();
+
+	if (!FFileHelper::SaveStringToFile(Out, *PresetsPath))
+	{
+		UE_LOG(LogZLCloudPlugin, Warning, TEXT("Failed to write Previous PIE Session preset: %s"), *PresetsPath);
+	}
+}
+
+float UZLCloudPluginStateManager::GetDebugUITabScale() const
+{
+	if (const UZLDebugUIProjectSettings* Settings = GetDefault<UZLDebugUIProjectSettings>())
+	{
+		return FMath::Clamp(Settings->debugUITabScale, 0.1f, 3.0f);
+	}
+	return 0.75f;
+}
+
+void UZLCloudPluginStateManager::SetDebugUITabScale(float NewScale) const
+{
+	if (UZLDebugUIProjectSettings* Settings = GetMutableDefault<UZLDebugUIProjectSettings>())
+	{
+		Settings->debugUITabScale = FMath::Clamp(NewScale, 0.1f, 3.0f);
+		Settings->SaveConfig();
+	}
+}
+
 TSharedRef<SDockTab> UZLCloudPluginStateManager::CreateDebugUITabContent(TSharedRef<SWidget> WidgetRef, TSharedRef<float> ScaleValue)
 {
 	return SNew(SDockTab)
@@ -2337,9 +2622,10 @@ TSharedRef<SDockTab> UZLCloudPluginStateManager::CreateDebugUITabContent(TShared
 					.MinValue(0.1f)
 					.MaxValue(3.0f)
 					.Value_Lambda([ScaleValue]() { return *ScaleValue; })
-					.OnValueChanged_Lambda([ScaleValue](float NewValue) 
+					.OnValueChanged_Lambda([this, ScaleValue](float NewValue) 
 					{ 
 						*ScaleValue = NewValue;
+						SetDebugUITabScale(NewValue);
 						// Slate will automatically redraw when the RenderTransform lambda's captured value changes
 					})
 					.MinDesiredWidth(80.0f)
@@ -2427,6 +2713,7 @@ void UZLCloudPluginStateManager::SaveCurrentStateToFile(FString fileName)
 void UZLCloudPluginStateManager::MergeTrackedStateIntoCurrentState(const FString& FieldName, TSharedPtr<FJsonObject> JsonObject)
 {
 	JsonObject_currentState->SetObjectField(FieldName, JsonObject);
+	RebuildDebugUI(ActiveSchema);
 }
 
 
@@ -2447,7 +2734,7 @@ void UZLCloudPluginStateManager::SendCurrentStateToWeb(bool completeState, TShar
 		currentStateJson->SetStringField("status", "complete");
 		currentStateJson->SetObjectField("current_state", (completeState) ? JsonObject_currentState : JsonObject_web_currentState);
 		
-		if (unmatchedRequestState != nullptr)
+		if (unmatchedRequestState.IsValid() && unmatchedRequestState->Values.Num() > 0)
 		{
 			currentStateJson->SetObjectField("unmatched_state", unmatchedRequestState);
 		}
@@ -2516,14 +2803,12 @@ void UZLCloudPluginStateManager::PushStateEventsToWeb()
 					TSharedPtr<FJsonObject> unprocessed = nullptr;
 					if (JsonObject_processingStateLeafCount < JsonObject_requestedStateLeafCount) //Some requested states were ignored
 					{
-						unprocessed = CurrentStateCompareDiffs(JsonObject_out_requestedState);
-						TArray<FString> diffKeys = CurrentStateCompareDiffs_Keys(JsonObject_processingState);
-						for (FString key : diffKeys) //Strip timed out values to report any unprocessed
+						unprocessed = MakeShared<FJsonObject>();
+						FJsonObject::Duplicate(JsonObject_out_requestedState.ToSharedRef(), unprocessed);
+						const TArray<FString> processingLeafKeys = GetJsonLeafKeys(JsonObject_processingState, s_requestIdStr);
+						for (const FString& key : processingLeafKeys) //Strip in-flight processing values to report any unprocessed
 						{
-							if (unprocessed->TryGetField(key))
-							{
-								unprocessed->RemoveField(key);
-							}
+							RemoveNestedKey(key, unprocessed);
 						}
 						if (unprocessed->HasField(s_requestIdStr))
 							unprocessed->RemoveField(s_requestIdStr);
@@ -2662,5 +2947,129 @@ void UZLCloudPluginStateManager::DumpState()
 	else
 	{
 		UE_LOG(LogZLCloudPlugin, Error, TEXT("Failed to save JSON data to file: %s"), *FullFilePath);
+	}
+}
+
+namespace ZLStateRequestJsonHelpers
+{
+static TSharedPtr<FJsonObject> EnsureNestedObjectForLeaf(TSharedPtr<FJsonObject> Root, const FString& FieldName, FString& OutLeafKey)
+{
+	if (!FieldName.Contains(TEXT(".")))
+	{
+		OutLeafKey = FieldName;
+		return Root;
+	}
+	TArray<FString> Keys;
+	FieldName.ParseIntoArray(Keys, TEXT("."), true);
+	OutLeafKey = Keys.Last();
+	TSharedPtr<FJsonObject> Current = Root;
+	for (int32 i = 0; i < Keys.Num() - 1; ++i)
+	{
+		const FString& Key = Keys[i];
+		const TSharedPtr<FJsonObject>* Sub = nullptr;
+		if (Current->TryGetObjectField(Key, Sub))
+		{
+			Current = *Sub;
+		}
+		else
+		{
+			TSharedPtr<FJsonObject> NewSub = MakeShared<FJsonObject>();
+			Current->SetObjectField(Key, NewSub);
+			Current = NewSub;
+		}
+	}
+	return Current;
+}
+} // namespace ZLStateRequestJsonHelpers
+
+FString UZLCloudPluginStateManagerBlueprints::MergeSchemaKeyIntoStateRequestJson(UStateKeyInfoAsset* Asset, FString KeyName,
+	FString InString, float InNumber, bool InBool, TArray<FString> InStringArray, TArray<float> InNumberArray, TArray<bool> InBoolArray,
+	FString ExistingJson)
+{
+	TSharedPtr<FJsonObject> Root;
+	if (!ExistingJson.IsEmpty())
+	{
+		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ExistingJson);
+		FJsonSerializer::Deserialize(Reader, Root);
+	}
+	if (!Root.IsValid())
+	{
+		Root = MakeShared<FJsonObject>();
+	}
+
+	if (!Asset || !Asset->KeyInfos.Contains(KeyName))
+	{
+		FString OutUnchanged;
+		TSharedRef<TJsonWriter<TCHAR>> W = TJsonWriterFactory<TCHAR>::Create(&OutUnchanged, 1);
+		FJsonSerializer::Serialize(Root.ToSharedRef(), W);
+		return OutUnchanged;
+	}
+
+	const EStateKeyDataType DataType = Asset->KeyInfos[KeyName].GetDataTypeEnum();
+	FString LeafKey;
+	TSharedPtr<FJsonObject> Target = ZLStateRequestJsonHelpers::EnsureNestedObjectForLeaf(Root, KeyName, LeafKey);
+
+	switch (DataType)
+	{
+	case EStateKeyDataType::String:
+		Target->SetStringField(LeafKey, InString);
+		break;
+	case EStateKeyDataType::Number:
+		Target->SetNumberField(LeafKey, static_cast<double>(InNumber));
+		break;
+	case EStateKeyDataType::Bool:
+		Target->SetBoolField(LeafKey, InBool);
+		break;
+	case EStateKeyDataType::StringArray:
+	{
+		TArray<TSharedPtr<FJsonValue>> ArrayValues;
+		ArrayValues.Reserve(InStringArray.Num());
+		for (const FString& V : InStringArray)
+		{
+			ArrayValues.Add(MakeShared<FJsonValueString>(V));
+		}
+		Target->SetArrayField(LeafKey, ArrayValues);
+		break;
+	}
+	case EStateKeyDataType::NumberArray:
+	{
+		TArray<TSharedPtr<FJsonValue>> ArrayValues;
+		ArrayValues.Reserve(InNumberArray.Num());
+		for (float V : InNumberArray)
+		{
+			ArrayValues.Add(MakeShared<FJsonValueNumber>(static_cast<double>(V)));
+		}
+		Target->SetArrayField(LeafKey, ArrayValues);
+		break;
+	}
+	case EStateKeyDataType::BoolArray:
+	{
+		TArray<TSharedPtr<FJsonValue>> ArrayValues;
+		ArrayValues.Reserve(InBoolArray.Num());
+		for (bool V : InBoolArray)
+		{
+			ArrayValues.Add(MakeShared<FJsonValueBoolean>(V));
+		}
+		Target->SetArrayField(LeafKey, ArrayValues);
+		break;
+	}
+	default:
+		UE_LOG(LogZLCloudPlugin, Error, TEXT("Unknown or invalid data type for key %s in MergeSchemaKeyIntoStateRequestJson"), *KeyName);
+		break;
+	}
+
+	FString Out;
+	TSharedRef<TJsonWriter<TCHAR>> Writer = TJsonWriterFactory<TCHAR>::Create(&Out, 1);
+	FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
+	return Out;
+}
+
+void UZLCloudPluginStateManagerBlueprints::BroadcastStateRequestJsonAsIncomingData(FString jsonString, bool& Success)
+{
+	Success = false;
+	if (UZLCloudPluginDelegates* Delegates = UZLCloudPluginDelegates::GetZLCloudPluginDelegates())
+	{
+		Delegates->OnRecieveData.Broadcast(jsonString);
+		Success = true;
 	}
 }

@@ -12,4 +12,6 @@
 #define UNREAL_5_1_OR_NEWER (ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 1)
 #define UNREAL_5_0_OR_NEWER (ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 0)
 
+// UE 5.1/5.2 UAT deletes injected game Target.cs when the project is not hybrid; 5.3+ uses NativeProjects hybrid handling.
+#define ZL_USE_LEGACY_BP_PACKAGING (!UNREAL_5_3_OR_NEWER)
 

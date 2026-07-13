@@ -6,65 +6,73 @@ namespace ZLCloudPlugin
 {
 	ZLAudioSubmixCapturer::ZLAudioSubmixCapturer()
 	{
-		if (GEngine)
-			m_AudioDevice = GEngine->GetActiveAudioDevice();
-
 		m_pluginReady = false;
 	}
 
 	ZLAudioSubmixCapturer::~ZLAudioSubmixCapturer()
 	{
-		if (m_AudioDevice)
-			m_AudioDevice.Reset();
+		Uninitialise();
 	}
 
 	bool ZLAudioSubmixCapturer::Initialise()
 	{
 		FScopeLock Lock(&CriticalSection);
 
-		if (GEngine)
+		if (!GEngine)
 		{
-			if (!m_AudioDevice)
-				m_AudioDevice = GEngine->GetActiveAudioDevice();
-
-			if (m_AudioDevice)
-			{
-#if WITH_EDITOR
-				if (m_AudioDevice.GetDeviceID() != GEngine->GetActiveAudioDevice().GetDeviceID())
-				{
-					m_AudioDevice->UnregisterSubmixBufferListener(this);
-					m_AudioDevice.Reset();
-					m_AudioDevice = GEngine->GetActiveAudioDevice();
-
-					if (!m_AudioDevice)
-						return false;
-				}
-#endif		
-				m_AudioDevice->RegisterSubmixBufferListener(this);
-
-				return true;
-			}
-			else
-			{
-				return false;
-			}
-		}
-		else
 			return false;
+		}
+
+		FAudioDeviceHandle ActiveAudioDevice = GEngine->GetActiveAudioDevice();
+		if (!ActiveAudioDevice)
+		{
+			ActiveAudioDevice = GEngine->GetMainAudioDevice();
+		}
+
+		if (!ActiveAudioDevice)
+		{
+			return false;
+		}
+
+		const bool bDeviceChanged = m_AudioDevice && (m_AudioDevice.GetDeviceID() != ActiveAudioDevice.GetDeviceID());
+		if (bDeviceChanged && m_bIsRegistered)
+		{
+			m_AudioDevice->UnregisterSubmixBufferListener(this);
+			m_bIsRegistered = false;
+		}
+
+		if (bDeviceChanged || !m_AudioDevice)
+		{
+			m_AudioDevice = ActiveAudioDevice;
+		}
+
+		if (!m_bIsRegistered)
+		{
+			m_AudioDevice->RegisterSubmixBufferListener(this);
+			m_bIsRegistered = true;
+		}
+
+		return true;
 	}
 
 	bool ZLAudioSubmixCapturer::Uninitialise()
 	{
 		FScopeLock Lock(&CriticalSection);
 
-		if (GEngine && m_AudioDevice)
+		if (m_AudioDevice)
 		{
-			m_AudioDevice->UnregisterSubmixBufferListener(this);
+			if (m_bIsRegistered)
+			{
+				m_AudioDevice->UnregisterSubmixBufferListener(this);
+				m_bIsRegistered = false;
+			}
+
+			m_AudioDevice.Reset();
 
 			return true;
 		}
-		else
-			return false;
+
+		return false;
 	}
 
 	void ZLAudioSubmixCapturer::OnNewSubmixBuffer(const USoundSubmix* OwningSubmix, float* AudioData, int32 NumSamples, int32 NumChannels, const int32 SampleRate, double AudioClock)

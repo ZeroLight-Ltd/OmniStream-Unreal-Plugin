@@ -194,10 +194,11 @@ public:
 	void About();
 	void ShowBuildAndDeployDialog();
 	void ShowPluginSettingsWindow();
-	void ShowStateManagementWindow();
+	void ShowSchemasEditorWindow();
 	FReply CI_TriggerBuildAndDeploy(FString buildPath, bool portalUpload);
 	bool CI_HasValidBuildSettingsAndAuthorised(bool portalUpload);
 	TSharedPtr<FJsonObject> AggregatePredictedJSONSchema() const;
+	TArray<TSharedPtr<FJsonValue>> AggregatePredictedDimeModelConfigData() const;
 	inline static void CI_StartUATBuildTask() { if (s_isCIBuild && s_CIMainButtonPtr != nullptr) s_CIMainButtonPtr->StartBuildAndDeployTask(); }
 	inline static bool s_triggerBuildTask = false;
 	inline static bool s_triggerBuildUpload = false;
@@ -368,7 +369,7 @@ public:
 		}
 	};
 	inline void ClearBuildWindowRef() { BuildAndDeployWnd = nullptr; };
-	inline void ClearStateManagementWindowRef() { StateManagementWnd = nullptr; };
+	inline void ClearSchemasEditorWindowRef() { SchemasEditorWnd = nullptr; };
 
 	inline static bool newerPluginAvailable = false;
 	inline static bool s_userCancelledUpload = false;
@@ -400,6 +401,7 @@ protected:
 	void SetDeployName(const FString& name);
 	void SetBuildID(const FText& id);
 	void SetRunInfoCommandLineParams(const FText& text);
+	void SetPercentageUnusedShaderCompilingThreads(const FText& text);
 	void SetUseExistingBuild(const ECheckBoxState state);
 	void SetUseExistingRunInfoJson(const ECheckBoxState state);
 	void SetRemoveDebugSymbols(const ECheckBoxState state);
@@ -408,6 +410,7 @@ protected:
 	void SetPortalStorageProvider(TSharedPtr<FString> NewValue, ESelectInfo::Type SelectInfo);
 	void SetBuildConfiguration(TSharedPtr<FString> NewValue, ESelectInfo::Type SelectInfo);
 	static FString GetBuildConfiguration();
+	static FString GetPercentageUnusedShaderCompilingThreads();
 	bool OnBuildPackageSuccess() const;
 	FReply AbortCurrentProcessOrReauth();
 	FReply PauseOrResumeUpload();
@@ -418,6 +421,7 @@ protected:
 	FReply OpenGithubReleaseWebPage();
 	FString FindOverrideExeName(FString buildDirectory) const;
 	FString FindOverrideProjectName(FString buildDirectory) const;
+	void EnsureFFmpegInstalledForMediaOnDemandVideosAsync(TFunction<void(bool)> OnComplete) const;
 	bool AddRunInfoJSONAndMetadataToBuild(FString outputFolderPath, FString overrideProjectName, FString overrideExeName = "") const;
 	bool AddCloudPluginConfigToBuild(FString outputFolderPath) const;
 	bool AddRunMode(FString runMode, FString args, TSharedPtr<FJsonObject> jsonObj, FString streamingSwitch = "") const;
@@ -428,7 +432,7 @@ protected:
 	inline static FString githubVersion = "0.0.0";
 	//Accessible UI elements
 	TSharedPtr<SWindow> BuildAndDeployWnd;
-	TSharedPtr<SWindow> StateManagementWnd;
+	TSharedPtr<SWindow> SchemasEditorWnd;
 	TSharedPtr<portalcli, ESPMode::ThreadSafe> portalCLI;
 	 
 	//Data members

@@ -22,6 +22,7 @@
 #include "Tracks/MovieSceneCameraCutTrack.h"
 #include "Sections/MovieSceneCameraCutSection.h"
 #include "LevelSequence.h"
+#include "LevelSequenceActor.h"
 #if UNREAL_5_3_OR_NEWER
 #include "MoviePipelineQueue.h"
 #include "MoviePipeline.h"
@@ -43,6 +44,7 @@
 #endif
 #endif
 #include "ZLCloudPluginStateManager.h"
+#include "ZLCloudPluginModule.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonSerializer.h"
 
@@ -61,6 +63,71 @@ namespace
 	static const FName ZLGlassTag(TEXT("ZLGlass"));
 	static const TCHAR* ZLGlassShaderPath = TEXT("/ZLEditorTools/ZLGlassShader.ZLGlassShader");
 	static const TCHAR* ZLGlassShaderAlphaScreenshotPath = TEXT("/ZLEditorTools/ZLGlassShader_AlphaScreenshot.ZLGlassShader_AlphaScreenshot");
+	static constexpr double ZLMRQProgressSendIntervalSeconds = 5.0;
+
+	struct FMRQVideoProgressState
+	{
+		bool bActive = false;
+		FString OutputDirectory;
+		FString JobUID;
+		FString FrameExtension;
+		int32 TotalFrames = 0;
+		double LastSendTimeSeconds = 0.0;
+		int32 LastPercentSent = -1;
+	};
+
+	FMRQVideoProgressState GMRQVideoProgressState;
+
+	void ResetMRQVideoProgressState()
+	{
+		GMRQVideoProgressState = FMRQVideoProgressState();
+	}
+
+	void BeginMRQVideoProgressState(const FString& InOutputDirectory, const FString& InJobUID, const FString& InFrameExtension, int32 InTotalFrames)
+	{
+		ResetMRQVideoProgressState();
+		GMRQVideoProgressState.bActive = InTotalFrames > 0 && !InOutputDirectory.IsEmpty() && !InJobUID.IsEmpty() && !InFrameExtension.IsEmpty();
+		GMRQVideoProgressState.OutputDirectory = InOutputDirectory;
+		GMRQVideoProgressState.JobUID = InJobUID;
+		GMRQVideoProgressState.FrameExtension = InFrameExtension;
+		GMRQVideoProgressState.TotalFrames = InTotalFrames;
+		GMRQVideoProgressState.LastSendTimeSeconds = FPlatformTime::Seconds();
+	}
+
+	int32 CountCompletedMRQFrames()
+	{
+		if (!GMRQVideoProgressState.bActive)
+		{
+			return 0;
+		}
+
+		FString SearchExtension = GMRQVideoProgressState.FrameExtension;
+
+		// If the extension is jpg or jpeg, use a wildcard to catch both variants
+		if (SearchExtension.Equals(TEXT("jpg"), ESearchCase::IgnoreCase) ||
+			SearchExtension.Equals(TEXT("jpeg"), ESearchCase::IgnoreCase))
+		{
+			SearchExtension = TEXT("jp*g");
+		}
+
+		TArray<FString> FoundFiles;
+		const FString WildcardFilePath = FPaths::Combine(
+			GMRQVideoProgressState.OutputDirectory,
+			GMRQVideoProgressState.JobUID + TEXT(".*.") + SearchExtension);
+		IFileManager::Get().FindFiles(FoundFiles, *WildcardFilePath, true, false);
+		return FoundFiles.Num();
+	}
+
+	int32 CalculateMRQProgressPercent(int32 CompletedFrames)
+	{
+		if (!GMRQVideoProgressState.bActive || GMRQVideoProgressState.TotalFrames <= 0)
+		{
+			return 0;
+		}
+
+		const float ProgressRatio = (static_cast<float>(CompletedFrames) * 100.0f) / static_cast<float>(GMRQVideoProgressState.TotalFrames);
+		return FMath::Clamp(FMath::FloorToInt(ProgressRatio), 0, 99);
+	}
 
 	bool IsMaterialChildOfZLGlassShader(UMaterialInterface* Mat)
 	{
@@ -110,7 +177,15 @@ namespace
 					if (!DynMID) continue;
 
 					if (UMaterialInstance* SourceMI = Cast<UMaterialInstance>(CurrentMat))
+					{
 						DynMID->CopyParameterOverrides(SourceMI);
+						// Copy any base property overrides from the instance
+						DynMID->BasePropertyOverrides = SourceMI->BasePropertyOverrides;
+					}
+
+					// Explicitly force the TwoSided state to match the true evaluated state of the original material
+					DynMID->BasePropertyOverrides.bOverride_TwoSided = true;
+					DynMID->BasePropertyOverrides.TwoSided = CurrentMat->IsTwoSided();
 
 					Job->TransparentGlassMaterialBackups.Add({ SMComp, Idx, CurrentMat });
 					SMComp->SetMaterial(Idx, DynMID);
@@ -134,6 +209,47 @@ namespace
 		Job->TransparentGlassMaterialSwapOuter = nullptr;
 		UE_LOG(LogZLCloudPlugin, Display, TEXT("Transparent screenshot: Restored original materials."));
 	}
+
+	// PNG has sRGB RGB, linear alpha; glass is premultiplied. 
+	// Convert to straight alpha for web browsers (RGB*A + bg*(1-A)).
+	// Bright reflections (>255) are clamped in 8 bit we fake recovery by boosting the alpha channel.
+	void UnpremultiplyAlphaPixel(FColor& Pixel)
+	{
+		const uint8 OrigA = Pixel.A;
+
+		// Skip fully opaque pixels
+		if (OrigA == 255)
+			return;
+
+		FLinearColor LinColor = FLinearColor::FromSRGBColor(Pixel);
+		float AlphaLin = OrigA / 255.0f;
+
+		// Alpha Boosting
+		// Find the brightest linear color channel
+		float MaxColor = FMath::Max3(LinColor.R, LinColor.G, LinColor.B);
+
+		// Use the max color as the alpha to fix issues where the color is already bright, but the alpha is dark.
+		// Which causes the color to be larger than 255, but clamped. 
+		// Due to the clamping the alpha will then overcompensate in the browser and darken too much causing a cutout effect around windows.
+		if (MaxColor > AlphaLin)
+		{
+			AlphaLin = MaxColor;
+		}
+
+		// Unpremultiply safely divide by the new boosted alpha
+		if (AlphaLin >= 1.0f / 255.0f)
+		{
+			LinColor.R /= AlphaLin;
+			LinColor.G /= AlphaLin;
+			LinColor.B /= AlphaLin;
+		}
+
+		// Convert back to 8-bit sRGB space
+		Pixel = LinColor.ToFColor(true);
+
+		// Save the new boosted alpha
+		Pixel.A = (uint8)FMath::Clamp(FMath::RoundToInt(AlphaLin * 255.0f), 0, 255);
+	}
 }
 
 ZLScreenshotJob::ZLScreenshotJob(int32 InWidth, int32 InHeight, FString& InFormat, FString& InPath, FString& InUID, UWorld* InWorld, const TSharedPtr<FJsonObject>* stateRequestData, ScreenshotType InScreenshotType)
@@ -152,6 +268,10 @@ void ZLScreenshotJob::RevertSettings()
 	{
 		sourceMovieScene->SetPlaybackRange(sourcePlaybackRange);
 		sourceMovieScene->SetDisplayRate(sourceFrameRate);
+	}
+	else
+	{
+		UE_LOG(LogZLCloudPlugin, Warning, TEXT("MRQ SequenceState [RevertSettings:Skipped] No sourceMovieScene cached for restore."));
 	}
 }
 
@@ -199,6 +319,29 @@ void ZLScreenshot::Init(class LauncherComms* launcherComms)
 
 void ZLScreenshot::Update()
 {
+	if (!m_CurrentRender.IsValid() && GMRQVideoProgressState.bActive)
+	{
+		ResetMRQVideoProgressState();
+	}
+
+	if (m_CurrentRender.IsValid() && m_CurrentRender->useMRQPipeline && !m_CurrentRender->videoFormat.IsEmpty() && GMRQVideoProgressState.bActive)
+	{
+		const double currentTimeSeconds = FPlatformTime::Seconds();
+		if ((currentTimeSeconds - GMRQVideoProgressState.LastSendTimeSeconds) >= ZLMRQProgressSendIntervalSeconds)
+		{
+			const int32 completedFrames = CountCompletedMRQFrames();
+			const int32 progressPercent = CalculateMRQProgressPercent(completedFrames);
+			if (progressPercent != GMRQVideoProgressState.LastPercentSent)
+			{
+				const FString progress = FString::FromInt(progressPercent);
+				m_LauncherComms->SendLauncherMessage("CAPTUREMEDIAPROGRESS", progress);
+				GMRQVideoProgressState.LastPercentSent = progressPercent;
+			}
+
+			GMRQVideoProgressState.LastSendTimeSeconds = currentTimeSeconds;
+		}
+	}
+
 	if (m_injectMetadata)
 	{
 		std::string outpathStr = std::string(TCHAR_TO_UTF8(*m_finalOutpath));
@@ -260,7 +403,8 @@ void ZLScreenshot::Update()
 #endif //SUPPORT_LEGACY_MESSAGES
 				m_LauncherComms->SendLauncherMessageBinary("CAPTUREMEDIARESULT", imageBytes);
 
-			m_CurrentRender.Reset();
+			ClearCurrentRenderJob();
+			EditorRestoreLocalCapture2DODModeAfterJob();
 
 			m_equirect360JobFinished = false;
 			m_playerController->SetViewTarget(m_initialViewTarget);
@@ -349,7 +493,8 @@ void ZLScreenshot::Update()
 
 						ZLScreenshot::SendImageFailureResponse(errorMsg);
 
-						m_CurrentRender.Reset();
+						ClearCurrentRenderJob();
+						EditorRestoreLocalCapture2DODModeAfterJob();
 						ZLJobTrace::JOBTRACE_TIMER_END("TotalJobTime");
 						return;
 					}
@@ -389,14 +534,22 @@ void ZLScreenshot::Update()
 						ZLJobTrace::JOBTRACE_TIMER_START("Render");
 						m_CurrentRender->captureStartTime = FPlatformTime::Seconds();
 
-						//Removing this as it may cause temporal issues
-						//PauseGameTime();
+						PauseGameTime();
+
 
 						if (m_CurrentRender->useMRQPipeline)
 						{
 							if (m_CurrentRender->transparent)
 								SwapTransparentGlassMaterialsForAlphaScreenshot(m_CurrentRender.Get());
-							PerformMRQCapture(m_CurrentRender->width, m_CurrentRender->height, ContentGenOutputPath, m_CurrentRender->uid);
+							FString errorMsg;
+							if (!PerformMRQCapture(m_CurrentRender->width, m_CurrentRender->height, ContentGenOutputPath, m_CurrentRender->uid, errorMsg))
+							{
+								ZLScreenshot::SendImageFailureResponse(errorMsg);
+								ClearCurrentRenderJob();
+								EditorRestoreLocalCapture2DODModeAfterJob();
+								ResumeGameTime();
+								return;
+							}
 						}
 						else
 						{
@@ -413,7 +566,7 @@ void ZLScreenshot::Update()
 							UE_LOG(LogZLCloudPlugin, Display, TEXT("TakeHighResScreenShot - Start Time %f - Start Frame %11d"), m_CurrentRender->captureStartTime, GFrameCounter);
 							Viewport->TakeHighResScreenShot();
 						}
-						m_CurrentRender->jobCaptureStarted = true;			
+						m_CurrentRender->jobCaptureStarted = true;
 
 					}
 					else if (m_CurrentRender->type == ScreenshotType::EQUIRECT360)
@@ -461,6 +614,7 @@ void ZLScreenshot::Update()
 
 									m_playerController->SetViewTarget(m_panoViewTarget, TransitionParams);
 
+									/*
 									int32 count = m_CurrentRender->world->PostProcessVolumes.Num();
 
 									for (int32 x = 0; x < count; ++x)
@@ -488,10 +642,12 @@ void ZLScreenshot::Update()
 										}
 									}
 
+
 									if (count == 0)
 									{
 										m_CurrentRender->needsCameraPostprocessAdjustmentPerFace = true;
 									}
+									*/
 								}
 
 								if (m_CurrentRender->faceID == 0)
@@ -521,6 +677,7 @@ void ZLScreenshot::Update()
 									ApplyCVarOverridesDirect();
 								}
 
+								/*
 								if (m_CurrentRender->needsCameraPostprocessAdjustmentPerFace)
 								{
 									if (APlayerController* PlayerController = m_CurrentRender->world->GetFirstPlayerController())
@@ -538,7 +695,7 @@ void ZLScreenshot::Update()
 											}
 										}
 									}
-								}
+								}*/
 
 								if (m_CurrentRender->faceID >= 0 && m_CurrentRender->faceID < 6)
 								{
@@ -562,7 +719,8 @@ void ZLScreenshot::Update()
 
 									if (m_CurrentRender->useMRQPipeline)
 									{
-										PerformMRQCapture(m_faceSize, m_faceSize, ContentGenOutputPath, m_CurrentRender->uid + "_FACE_" + FString::FromInt(m_CurrentRender->faceID));
+										FString errorMsg;
+										PerformMRQCapture(m_faceSize, m_faceSize, ContentGenOutputPath, m_CurrentRender->uid + "_FACE_" + FString::FromInt(m_CurrentRender->faceID), errorMsg);
 									}
 									else
 									{
@@ -604,8 +762,10 @@ void ZLScreenshot::Update()
 	}
 }
 
-bool ZLScreenshot::PerformMRQCapture(int width, int height, FString outputPath, FString jobName)
+bool ZLScreenshot::PerformMRQCapture(int width, int height, FString outputPath, FString jobName, FString& errorMsgOut)
 {
+	ResetMRQVideoProgressState();
+
 	if (m_CurrentRender->useMRQPipeline)
 	{
 #if UNREAL_5_3_OR_NEWER
@@ -626,6 +786,7 @@ bool ZLScreenshot::PerformMRQCapture(int width, int height, FString outputPath, 
 		ULevelSequence* LevelSequence = NULL;
 		int32 renderedFrames = 1;
 		int32 startFrame = 0;
+		m_CurrentRender->videoCaptureSequenceAsset = nullptr;
 
 		bool isVideoCapture = !m_CurrentRender->videoFormat.IsEmpty();
 		if (isVideoCapture)
@@ -638,10 +799,20 @@ bool ZLScreenshot::PerformMRQCapture(int width, int height, FString outputPath, 
 				if (m_CurrentRender->videoSequenceName.Equals(assetDatum.AssetName.ToString(), ESearchCase::IgnoreCase))
 				{
 					LevelSequence = Cast<ULevelSequence>(assetDatum.GetAsset());
+					m_CurrentRender->videoCaptureSequenceAsset = LevelSequence;
+					UE_LOG(LogZLCloudPlugin, Display, TEXT("MRQ Sequence lookup matched by name. Requested=%s ResolvedAsset=%s"),
+						*m_CurrentRender->videoSequenceName,
+						LevelSequence ? *LevelSequence->GetPathName() : TEXT("<null>"));
 					startFrame = m_CurrentRender->videoStartFrame;
 					renderedFrames = m_CurrentRender->videoNumFrames;	//use supplied limit, or default (-1) will play the whole sequence
 					break;
 				}
+			}
+
+			if (LevelSequence == NULL)
+			{
+				errorMsgOut = "Failed to find specified sequence";
+				return false;
 			}
 		}
 
@@ -665,7 +836,7 @@ bool ZLScreenshot::PerformMRQCapture(int width, int height, FString outputPath, 
 			m_CurrentRender->sourceFrameRate = MovieScene->GetDisplayRate();
 			//so we can change them back in RevertSettings()
 
-			MovieScene->SetDisplayRate(FFrameRate((int32)(m_CurrentRender->videoFrameRate*1000.0), 1000));	//i.e. accurate to 3 decimal places
+			MovieScene->SetDisplayRate(FFrameRate((int32)(m_CurrentRender->videoFrameRate * 1000.0), 1000));	//i.e. accurate to 3 decimal places
 
 			double ticksPerSecond = MovieScene->GetTickResolution().AsDecimal();
 			double ticksPerFrame = ticksPerSecond / m_CurrentRender->videoFrameRate;
@@ -696,6 +867,16 @@ bool ZLScreenshot::PerformMRQCapture(int width, int height, FString outputPath, 
 		}
 
 		UMoviePipelineExecutorJob* Job = Subsystem->AllocateJob(LevelSequence);
+		if (!Job)
+		{
+			errorMsgOut = TEXT("Failed to allocate MRQ job.");
+			if (m_CurrentRender.IsValid())
+			{
+				UE_LOG(LogZLCloudPlugin, Error, TEXT("MRQ job allocation failed. Restoring captured sequence settings immediately."));
+				m_CurrentRender->RevertSettings();
+			}
+			return false;
+		}
 
 		Job->SetSequence(LevelSequence);
 
@@ -730,6 +911,18 @@ bool ZLScreenshot::PerformMRQCapture(int width, int height, FString outputPath, 
 			OutputSetting->FrameNumberOffset = -startFrame;
 		}
 		Job->JobName = jobName;
+
+		if (isVideoCapture && OutputSetting)
+		{
+			FString frameExtension = m_CurrentRender->format;
+			frameExtension.ToLowerInline();
+			if (frameExtension.IsEmpty())
+			{
+				frameExtension = TEXT("png");
+			}
+
+			BeginMRQVideoProgressState(OutputSetting->OutputDirectory.Path, m_CurrentRender->uid, frameExtension, renderedFrames);
+		}
 
 
 		// Set the output format
@@ -852,6 +1045,17 @@ bool ZLScreenshot::PerformMRQCapture(int width, int height, FString outputPath, 
 		}
 		Job->SetConfiguration(MasterConfig);
 		m_CurrentRender->ActiveRenderJob = Job;
+		UE_LOG(LogZLCloudPlugin, Display, TEXT("MRQ dispatching render job. JobName=%s Sequence=%s"),
+			*Job->JobName,
+			LevelSequence ? *LevelSequence->GetPathName() : TEXT("<null>"));
+
+		// Request state processing has completed in media capture. Producing the video sequence frames must use
+		// media recording so internal sequence state triggers play out normally instead of jumping to end.
+		if (isVideoCapture)
+		{
+			ZLCloudPlugin::FZLCloudPluginModule::GetModule()->SetContentGenerationState(EZLContentGenerationState::MediaRecording);
+		}
+
 		Subsystem->RenderJob(Job);
 #else
 		UE_LOG(LogZLCloudPlugin, Warning, TEXT("MovieRenderQueue 2DOD Support is only available in UE 5.3+"));
@@ -985,37 +1189,65 @@ bool ZLScreenshot::RequestScreenshot(const char* settingsJson, UWorld* InWorld, 
 #endif //SUPPORT_LEGACY_MESSAGES
 
 		bool isVideoCapture = false;
-		if(JsonParsed->TryGetBoolField("videoCapture", isVideoCapture) && isVideoCapture)
+		if (JsonParsed->TryGetBoolField("videoCapture", isVideoCapture) && isVideoCapture)
 		{
+			const UZLCloudPluginSettings* PluginSettings = GetMutableDefault<UZLCloudPluginSettings>();
+			const FString FFmpegExePath = FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("ZLCloudPlugin/Binaries/ThirdParty/ffmpeg/ffmpeg.exe"));
+			IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+			const bool bFfmpegEnabled = PluginSettings->bDownloadFFmpegForMediaOnDemandVideos;
+			const bool bFfmpegExists = PlatformFile.FileExists(*FFmpegExePath);
+
+			if (!bFfmpegEnabled || !bFfmpegExists)
+			{
+				if (!bFfmpegEnabled)
+				{
+					errorMsgOut = TEXT("Video capture is not supported by this application. Enable \"Download ffmpeg for media on demand videos\" in OmniStream Settings (Build and Deploy) and rebuild the application.");
+				}
+				else
+				{
+					errorMsgOut = FString::Printf(
+						TEXT("Video capture requires ffmpeg.exe but it was not found at %s. Enable \"Download ffmpeg for media on demand videos\" in OmniStream Settings (Build and Deploy) and rebuild the application."),
+						*FFmpegExePath);
+				}
+				UE_LOG(LogZLCloudPlugin, Error, TEXT("Video capture request rejected: %s"), *errorMsgOut);
+				m_NextRender.Reset();
+				return false;
+			}
+
 			m_NextRender->videoFormat = m_NextRender->format;
 			SanitizeParam(m_NextRender->videoFormat);
-			if (!JsonParsed->TryGetStringField(FString("videoFrameFormat"), m_NextRender->format))
+			if (!JsonParsed->TryGetStringField(FString("frameFormat"), m_NextRender->format))
 			{
-				m_NextRender->format = "jpg";
+				m_NextRender->format = "png";
 				UE_LOG(LogTemp, Warning, TEXT("No video frame format, defaulted to %s"), *m_NextRender->format);
 			}
-			
-			if (!JsonParsed->TryGetNumberField(FString("videoFrameRate"), m_NextRender->videoFrameRate))
+
+			JsonParsed->TryGetBoolField(FString("debug"), m_NextRender->debug);
+
+			if (!JsonParsed->TryGetNumberField(FString("frameRate"), m_NextRender->videoFrameRate))
 			{
 				m_NextRender->videoFrameRate = 30.0;	//default to 30fps
 				UE_LOG(LogTemp, Display, TEXT("No video frame rate, defaulted to %f fps"), m_NextRender->videoFrameRate);
 			}
-			if (!JsonParsed->TryGetNumberField(FString("videoNumFrames"), m_NextRender->videoNumFrames))
+			if (!JsonParsed->TryGetNumberField(FString("numFrames"), m_NextRender->videoNumFrames))
 			{
 				m_NextRender->videoNumFrames = -1;	//default to playing all of specified sequence
 				UE_LOG(LogTemp, Display, TEXT("No video frame frame count, defaulted to %d"), m_NextRender->videoNumFrames);
 			}
-			if (!JsonParsed->TryGetNumberField(FString("videoStartFrame"), m_NextRender->videoStartFrame))
+			if (!JsonParsed->TryGetNumberField(FString("startFrame"), m_NextRender->videoStartFrame))
 			{
 				m_NextRender->videoStartFrame = 0;	//default to playing from beginning of specified sequence
 				UE_LOG(LogTemp, Display, TEXT("No video start frame, defaulted to %d"), m_NextRender->videoStartFrame);
 			}
-			if(!JsonParsed->TryGetStringField(FString("videoSequence"), m_NextRender->videoSequenceName))
+			if (!JsonParsed->TryGetStringField(FString("sequenceName"), m_NextRender->videoSequenceName))
 			{
-				UE_LOG(LogTemp, Warning, TEXT("No video sequence specified, will generate single frame video"));
+				UE_LOG(LogTemp, Error, TEXT("No video sequence specified"));
+				errorMsgOut = "Video capture requested with no sequence";
+				m_NextRender.Reset();
+				return false;
 			}
 
-			if (JsonParsed->TryGetStringField(FString("videoCodec"), m_NextRender->videoCodec))
+			if (JsonParsed->TryGetStringField(FString("codec"), m_NextRender->videoCodec))
 			{
 				SanitizeParam(m_NextRender->videoCodec);
 			}
@@ -1024,7 +1256,7 @@ bool ZLScreenshot::RequestScreenshot(const char* settingsJson, UWorld* InWorld, 
 				UE_LOG(LogTemp, Display, TEXT("No video codec specified, will use default for video format %s"), *m_NextRender->videoFormat);
 			}
 
-			if (JsonParsed->TryGetStringField(FString("videoPixelFormat"), m_NextRender->videoPixelFormat))
+			if (JsonParsed->TryGetStringField(FString("pixelFormat"), m_NextRender->videoPixelFormat))
 			{
 				SanitizeParam(m_NextRender->videoPixelFormat);
 			}
@@ -1033,14 +1265,20 @@ bool ZLScreenshot::RequestScreenshot(const char* settingsJson, UWorld* InWorld, 
 				UE_LOG(LogTemp, Display, TEXT("No video pixel format specified, will use default for video format %s"), *m_NextRender->videoFormat);
 			}
 
-			if (JsonParsed->TryGetStringArrayField(FString("videoEncodeOptions"), m_NextRender->videoEncodeOptions))
+			if (JsonParsed->TryGetStringArrayField(FString("encodeOptions"), m_NextRender->videoEncodeOptions))
 			{
-				for(FString &param: m_NextRender->videoEncodeOptions)
+				for (FString& param : m_NextRender->videoEncodeOptions)
 					SanitizeParam(param);
 			}
 			else
 			{
-				m_NextRender->videoEncodeOptions.Empty();	//shouldn't be necessary
+				m_NextRender->videoEncodeOptions.Empty();
+				m_NextRender->videoEncodeOptions.Add("-vf \"scale=out_color_matrix=bt709:out_range=limited,format=yuv420p\"");
+				m_NextRender->videoEncodeOptions.Add("-colorspace bt709");
+				m_NextRender->videoEncodeOptions.Add("-color_trc bt709");
+				m_NextRender->videoEncodeOptions.Add("-color_primaries bt709");
+				m_NextRender->videoEncodeOptions.Add("-color_range 1");
+
 				UE_LOG(LogTemp, Display, TEXT("No video options, will use defaults"));
 			}
 
@@ -1160,6 +1398,9 @@ bool ZLScreenshot::RequestScreenshot(const char* settingsJson, UWorld* InWorld, 
 			SetFrameCountCmd = FString::Printf(TEXT("r.HighResScreenshotDelay %d"), delayFrameCount);
 		}
 		GEngine->Exec(InWorld, *SetFrameCountCmd);
+
+		// Enter media capture for state matching and pre-capture processing until the job finishes.
+		ZLCloudPlugin::FZLCloudPluginModule::GetModule()->SetContentGenerationState(EZLContentGenerationState::MediaCapture);
 	}
 	else
 		return false;
@@ -1219,6 +1460,13 @@ void ZLScreenshot::Set2DODMode(bool is2DOD)
 	ZLCloudPlugin::FZLCloudPluginModule::GetModule()->SetOnDemandMode(is2DOD);
 }
 
+void ZLScreenshot::EditorRestoreLocalCapture2DODModeAfterJob()
+{
+#if WITH_EDITOR
+	Set2DODMode(false);
+#endif
+}
+
 bool ZLCloudPlugin::ZLScreenshot::LoadImageAsFColorArray(const FString& ImagePath, TArray<FColor>& OutColorData, int32& OutWidth, int32& OutHeight)
 {
 	TArray<uint8> CompressedData;
@@ -1272,6 +1520,12 @@ void ZLScreenshot::ApplyCVarOverridesDirect()
 			}
 		}
 	}
+}
+
+void ZLScreenshot::ClearCurrentRenderJob()
+{
+	ZLCloudPlugin::FZLCloudPluginModule::GetModule()->SetContentGenerationState(EZLContentGenerationState::None);
+	m_CurrentRender.Reset();
 }
 
 void ZLScreenshot::SendImageFailureResponse(FString& errorMsg)
@@ -1365,7 +1619,8 @@ void ZLScreenshot::OnScreenshotComplete(int32 InSizeX, int32 InSizeY, const TArr
 				UE_LOG(LogZLCloudPlugin, Error, TEXT("CompressImage failed: %ix%i"), InSizeX, InSizeY);
 				FString errorMsg = "CompressImage failed.";
 				ZLScreenshot::SendImageFailureResponse(errorMsg);
-				m_CurrentRender.Reset();
+				ClearCurrentRenderJob();
+				EditorRestoreLocalCapture2DODModeAfterJob();
 				ZLJobTrace::JOBTRACE_TIMER_END("TotalJobTime");
 				return;
 			}
@@ -1393,7 +1648,8 @@ void ZLScreenshot::OnScreenshotComplete(int32 InSizeX, int32 InSizeY, const TArr
 					UE_LOG(LogZLCloudPlugin, Error, TEXT("CompressImage failed: %ix%i"), InSizeX, InSizeY);
 					FString errorMsg = "CompressImage failed.";
 					ZLScreenshot::SendImageFailureResponse(errorMsg);
-					m_CurrentRender.Reset();
+					ClearCurrentRenderJob();
+					EditorRestoreLocalCapture2DODModeAfterJob();
 					ZLJobTrace::JOBTRACE_TIMER_END("TotalJobTime");
 					return;
 				}
@@ -1478,6 +1734,7 @@ void ZLScreenshot::OnScreenshotComplete(int32 InSizeX, int32 InSizeY, const TArr
 					delete[] m_outBuffer;
 					m_outBuffer = nullptr;
 
+					/*
 					int32 count = m_CurrentRender->world->PostProcessVolumes.Num();
 
 					for (int32 x = 0; x < count; ++x)
@@ -1492,11 +1749,13 @@ void ZLScreenshot::OnScreenshotComplete(int32 InSizeX, int32 InSizeY, const TArr
 							settings->VignetteIntensity = m_cacheVignetteIntensity;
 						}
 					}
+					*/
 
 					m_equirect360JobFinished = false;
 					finaliseCleanupEquirectJob = true;
 
-					m_CurrentRender.Reset();
+					ClearCurrentRenderJob();
+					EditorRestoreLocalCapture2DODModeAfterJob();
 					ZLJobTrace::JOBTRACE_TIMER_END("TotalJobTime");
 
 					doEncode = false;
@@ -1543,6 +1802,7 @@ void ZLScreenshot::OnScreenshotComplete(int32 InSizeX, int32 InSizeY, const TArr
 						m_equirect360JobFinished = true;
 					}
 
+					/*
 					int32 count = m_CurrentRender->world->PostProcessVolumes.Num();
 
 					for (int32 x = 0; x < count; ++x)
@@ -1557,6 +1817,7 @@ void ZLScreenshot::OnScreenshotComplete(int32 InSizeX, int32 InSizeY, const TArr
 							settings->VignetteIntensity = m_cacheVignetteIntensity;
 						}
 					}
+					*/
 
 					ZLJobTrace::JOBTRACE_TIMER_END("Encode");
 				}
@@ -1656,7 +1917,7 @@ void ZLScreenshot::OnScreenshotComplete(int32 InSizeX, int32 InSizeY, const TArr
 			imageBytes.Insert(uidStrBytes, sizeof(int32) + responseDataBytes.Num());
 
 #ifdef SUPPORT_LEGACY_MESSAGES
-			if(m_CurrentRender->isLegacyMessage)
+			if (m_CurrentRender->isLegacyMessage)
 				m_LauncherComms->SendLauncherMessageBinary("CAPTUREIMAGERESULT", imageBytes);
 			else
 #endif //SUPPORT_LEGACY_MESSAGES
@@ -1676,7 +1937,8 @@ void ZLScreenshot::OnScreenshotComplete(int32 InSizeX, int32 InSizeY, const TArr
 
 			ZLJobTrace::JOBTRACE_TIMER_END("ImageDataServerResponse");
 			ZLJobTrace::JOBTRACE_TIMER_END("TotalJobTime");
-			m_CurrentRender.Reset();
+			ClearCurrentRenderJob();
+			EditorRestoreLocalCapture2DODModeAfterJob();
 		}
 
 		if (finaliseCleanupEquirectJob)
@@ -1692,6 +1954,18 @@ void ZLScreenshot::OnScreenshotComplete(int32 InSizeX, int32 InSizeY, const TArr
 #if UNREAL_5_3_OR_NEWER
 void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 {
+	UE_LOG(LogZLCloudPlugin, Display, TEXT("OnMoviePipelineFinished called. Success=%s CurrentRenderValid=%s ResultsJob=%s"),
+		Results.bSuccess ? TEXT("true") : TEXT("false"),
+		m_CurrentRender.IsValid() ? TEXT("true") : TEXT("false"),
+		(Results.Job != nullptr) ? *Results.Job->JobName : TEXT("<null>"));
+
+	if (Results.bSuccess && m_CurrentRender.IsValid() && m_CurrentRender->useMRQPipeline && !m_CurrentRender->videoFormat.IsEmpty())
+	{
+		const FString progress = TEXT("100");
+		m_LauncherComms->SendLauncherMessage("CAPTUREMEDIAPROGRESS", progress);
+		GMRQVideoProgressState.LastPercentSent = 100;
+	}
+
 	if (bCreatedCamera && CameraActor)
 	{
 		CameraActor->Destroy();
@@ -1700,9 +1974,50 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 
 	if (m_CurrentRender.IsValid())
 	{
+		if (Results.Job != nullptr && m_CurrentRender->ActiveRenderJob != nullptr && Results.Job != m_CurrentRender->ActiveRenderJob)
+		{
+			UE_LOG(LogZLCloudPlugin, Warning, TEXT("OnMoviePipelineFinished received unexpected job. Expected=%s Actual=%s"),
+				*m_CurrentRender->ActiveRenderJob->JobName,
+				*Results.Job->JobName);
+		}
+
 		if (m_CurrentRender->transparent)
 			RestoreTransparentGlassMaterials(m_CurrentRender.Get());
+		UE_LOG(LogZLCloudPlugin, Display, TEXT("OnMoviePipelineFinished invoking RevertSettings for render uid=%s"), *m_CurrentRender->uid);
 		m_CurrentRender->RevertSettings();
+
+		const bool isVideoCapture = !m_CurrentRender->videoFormat.IsEmpty();
+		if (isVideoCapture && m_CurrentRender->world && m_CurrentRender->videoCaptureSequenceAsset)
+		{
+			TArray<TWeakObjectPtr<ALevelSequenceActor>> ActorsToDestroy;
+			for (TActorIterator<ALevelSequenceActor> It(m_CurrentRender->world); It; ++It)
+			{
+				ALevelSequenceActor* SequenceActor = *It;
+				if (SequenceActor && SequenceActor->GetSequence() == m_CurrentRender->videoCaptureSequenceAsset)
+				{
+					ActorsToDestroy.Add(SequenceActor);
+				}
+			}
+
+			for (const TWeakObjectPtr<ALevelSequenceActor>& SequenceActorPtr : ActorsToDestroy)
+			{
+				if (ALevelSequenceActor* SequenceActor = SequenceActorPtr.Get())
+				{
+					UE_LOG(LogZLCloudPlugin, Display, TEXT("Destroying LevelSequenceActor after video job. Actor=%s Sequence=%s"),
+						*SequenceActor->GetPathName(),
+						*m_CurrentRender->videoCaptureSequenceAsset->GetPathName());
+					SequenceActor->Destroy();
+				}
+			}
+
+			UE_LOG(LogZLCloudPlugin, Display, TEXT("Destroyed %d LevelSequenceActor instance(s) referencing completed video sequence %s."),
+				ActorsToDestroy.Num(),
+				*m_CurrentRender->videoCaptureSequenceAsset->GetPathName());
+		}
+	}
+	else
+	{
+		UE_LOG(LogZLCloudPlugin, Warning, TEXT("OnMoviePipelineFinished had no active render. Nothing to restore."));
 	}
 
 	if (Results.bSuccess && m_CurrentRender.IsValid())
@@ -1742,15 +2057,18 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 
 		bool cleanupFile = m_CurrentRender->path == "";
 
-
 		bool isVideoCapture = !m_CurrentRender->videoFormat.IsEmpty();
 		if (isVideoCapture)
 		{
+			cleanupFile = !m_CurrentRender->debug;
 			FString ffmpegSourcePath = FPaths::Combine(outputDir, m_CurrentRender->uid + TEXT(".%04d.") + Extension);	//%04d must match ZeroPadFrameNumbers in settings
 			FString videoOutputPath = FPaths::Combine(outputDir, m_CurrentRender->uid + TEXT(".") + m_CurrentRender->videoFormat);
-			
+
+			ffmpegSourcePath = IFileManager::Get().ConvertToAbsolutePathForExternalAppForRead(*ffmpegSourcePath);
+			videoOutputPath = IFileManager::Get().ConvertToAbsolutePathForExternalAppForRead(*videoOutputPath);
+
 			FString pluginDir = FPaths::ProjectPluginsDir();
-			FString exePath = FPaths::Combine(pluginDir, "ZLCloudPlugin/Resources/ffmpeg.exe");
+			FString exePath = FPaths::Combine(pluginDir, "ZLCloudPlugin/Binaries/ThirdParty/ffmpeg/ffmpeg.exe");
 			IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
 
 			if (PlatformFile.FileExists(*exePath))
@@ -1759,7 +2077,7 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 
 				int32 intFrameRate = (int32)m_CurrentRender->videoFrameRate;
 				FString frameRateStr = FString::FromInt(intFrameRate);
-				
+
 				int32 milliFrameRate = (int32)(1000.0f * (m_CurrentRender->videoFrameRate - intFrameRate));
 				if (milliFrameRate > 0)
 				{
@@ -1789,7 +2107,7 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 				FString commandArgs = "-framerate " + frameRateStr + " -pattern_type sequence -i \"" + ffmpegSourcePath + "\" " + codecStr + " -y \"" + videoOutputPath + "\"";
 
 				FMonitoredProcess ffmpegProcess(*exePath, *commandArgs, true);
-			//	ffmpegProcess.OnCompleted().BindLambda([&ffmpegReturnCode](int32 _ReturnCode) { ffmpegReturnCode = _ReturnCode; });
+				//	ffmpegProcess.OnCompleted().BindLambda([&ffmpegReturnCode](int32 _ReturnCode) { ffmpegReturnCode = _ReturnCode; });
 				ffmpegProcess.OnOutput().BindLambda([](FString outputLine) { UE_LOG(LogZLCloudPlugin, Display, TEXT("%s"), *outputLine); });
 
 				if (ffmpegProcess.Launch())
@@ -1808,7 +2126,7 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 					}
 
 					FString ffmpegOutput = ffmpegProcess.GetFullOutputWithoutDelegate();
-					if(!ffmpegOutput.IsEmpty())	//almost certainly empty if we supplied a callback for OnOutput
+					if (!ffmpegOutput.IsEmpty())	//almost certainly empty if we supplied a callback for OnOutput
 						UE_LOG(LogZLCloudPlugin, Display, TEXT("ffmpeg final output %s"), *ffmpegOutput);
 				}
 				else
@@ -1837,9 +2155,6 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 			outputFilePath = videoOutputPath;	//we'll send this and delete it later
 		}
 
-
-
-
 		if (m_CurrentRender->type == ScreenshotType::DEFAULT2D)
 		{
 			if (Delegates)
@@ -1854,11 +2169,35 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 			if (FoundFiles.Num() > 0)
 			{
 				FString FilePath = outputFilePath;
-				if (FFileHelper::LoadFileToArray(imageBytes, *FilePath))
-				{
-					ZLJobTrace::JOBTRACE_TIMER_END("Render");
-					ZLJobTrace::JOBTRACE_TIMER_START("Encode");
+				TArray<FColor> UnpremultipliedData;
+				int32 ImgWidth, ImgHeight;
 
+				if (isVideoCapture)
+				{
+					if (!FFileHelper::LoadFileToArray(imageBytes, *FilePath))
+						imageBytes.Empty();
+				}
+				else
+				{
+					imageBytes.Empty();
+					if (LoadImageAsFColorArray(FilePath, UnpremultipliedData, ImgWidth, ImgHeight))
+					{
+						ZLJobTrace::JOBTRACE_TIMER_END("Render");
+						ZLJobTrace::JOBTRACE_TIMER_START("Encode");
+
+						if (m_CurrentRender->transparent)
+						{
+							for (FColor& Pixel : UnpremultipliedData)
+								UnpremultiplyAlphaPixel(Pixel);
+						}
+
+						FImageView ImageView(UnpremultipliedData.GetData(), ImgWidth, ImgHeight);
+						FImageUtils::CompressImage(imageBytes, *Extension, ImageView);
+					}
+				}
+
+				if(!imageBytes.IsEmpty())
+				{
 					ZLJobTrace::JOBTRACE_TIMER_START("ImageDataServerResponse");
 					TSharedPtr<FJsonObject> responseStateData = MakeShareable(new FJsonObject);
 
@@ -1906,7 +2245,8 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 
 					ZLJobTrace::JOBTRACE_TIMER_END("ImageDataServerResponse");
 					ZLJobTrace::JOBTRACE_TIMER_END("TotalJobTime");
-					m_CurrentRender.Reset();
+					ClearCurrentRenderJob();
+					EditorRestoreLocalCapture2DODModeAfterJob();
 
 					if (cleanupFile)
 						IFileManager::Get().Delete(*FilePath, true);
@@ -1915,7 +2255,8 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 				{
 					FString errorMsg = "Failed to load rendered image from disk.";
 					ZLScreenshot::SendImageFailureResponse(errorMsg);
-					m_CurrentRender.Reset();
+					ClearCurrentRenderJob();
+					EditorRestoreLocalCapture2DODModeAfterJob();
 					ZLJobTrace::JOBTRACE_TIMER_END("TotalJobTime");
 				}
 			}
@@ -1923,7 +2264,8 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 			{
 				FString errorMsg = "Movie Render Pipeline failed to render.";
 				ZLScreenshot::SendImageFailureResponse(errorMsg);
-				m_CurrentRender.Reset();
+				ClearCurrentRenderJob();
+				EditorRestoreLocalCapture2DODModeAfterJob();
 				ZLJobTrace::JOBTRACE_TIMER_END("TotalJobTime");
 			}
 		}
@@ -1935,8 +2277,15 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 			{
 				FString errorMsg = "Failed to load rendered MRQ image from disk for stitching.";
 				ZLScreenshot::SendImageFailureResponse(errorMsg);
-				m_CurrentRender.Reset();
+				ClearCurrentRenderJob();
+				EditorRestoreLocalCapture2DODModeAfterJob();
 				return;
+			}
+
+			if (m_CurrentRender->transparent)
+			{
+				for (FColor& Pixel : InImageData)
+					UnpremultiplyAlphaPixel(Pixel);
 			}
 
 			if (m_CurrentRender->path != "")
@@ -1948,7 +2297,8 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 					UE_LOG(LogZLCloudPlugin, Error, TEXT("CompressImage failed: %ix%i"), m_faceSize, m_faceSize);
 					FString errorMsg = "CompressImage failed.";
 					ZLScreenshot::SendImageFailureResponse(errorMsg);
-					m_CurrentRender.Reset();
+					ClearCurrentRenderJob();
+					EditorRestoreLocalCapture2DODModeAfterJob();
 					ZLJobTrace::JOBTRACE_TIMER_END("TotalJobTime");
 					return;
 				}
@@ -2030,6 +2380,7 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 					delete[] m_outBuffer;
 					m_outBuffer = nullptr;
 
+					/*
 					int32 count = m_CurrentRender->world->PostProcessVolumes.Num();
 
 					for (int32 x = 0; x < count; ++x)
@@ -2044,11 +2395,13 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 							settings->VignetteIntensity = m_cacheVignetteIntensity;
 						}
 					}
+					*/
 
 					m_equirect360JobFinished = false;
 					finaliseCleanupEquirectJob = true;
 
-					m_CurrentRender.Reset();
+					ClearCurrentRenderJob();
+					EditorRestoreLocalCapture2DODModeAfterJob();
 					ZLJobTrace::JOBTRACE_TIMER_END("TotalJobTime");
 
 					doEncode = false;
@@ -2096,6 +2449,7 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 						finaliseCleanupEquirectJob = true;
 					}
 
+					/*
 					int32 count = m_CurrentRender->world->PostProcessVolumes.Num();
 
 					for (int32 x = 0; x < count; ++x)
@@ -2110,6 +2464,7 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 							settings->VignetteIntensity = m_cacheVignetteIntensity;
 						}
 					}
+					*/
 
 					ZLJobTrace::JOBTRACE_TIMER_END("Encode");
 				}
@@ -2177,13 +2532,15 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 
 						ZLJobTrace::JOBTRACE_TIMER_END("ImageDataServerResponse");
 						ZLJobTrace::JOBTRACE_TIMER_END("TotalJobTime");
-						m_CurrentRender.Reset();
+						ClearCurrentRenderJob();
+						EditorRestoreLocalCapture2DODModeAfterJob();
 					}
 					else
 					{
 						FString errorMsg = "Movie Render Pipeline failed to render.";
 						ZLScreenshot::SendImageFailureResponse(errorMsg);
-						m_CurrentRender.Reset();
+						ClearCurrentRenderJob();
+						EditorRestoreLocalCapture2DODModeAfterJob();
 						ZLJobTrace::JOBTRACE_TIMER_END("TotalJobTime");
 					}
 				}
@@ -2201,6 +2558,40 @@ void ZLScreenshot::OnMoviePipelineFinished(FMoviePipelineOutputData Results)
 			m_panoViewTarget->Destroy();
 		}
 	}
+	else
+	{
+		UE_LOG(LogZLCloudPlugin, Warning, TEXT("OnMoviePipelineFinished did not enter success path. Success=%s CurrentRenderValid=%s"),
+			Results.bSuccess ? TEXT("true") : TEXT("false"),
+			m_CurrentRender.IsValid() ? TEXT("true") : TEXT("false"));
+	}
+#if WITH_EDITOR
+	if (!Results.bSuccess)
+	{
+		if (m_CurrentRender.IsValid())
+		{
+			ClearCurrentRenderJob();
+		}
+		else
+		{
+			ZLCloudPlugin::FZLCloudPluginModule::GetModule()->SetContentGenerationState(EZLContentGenerationState::None);
+		}
+		EditorRestoreLocalCapture2DODModeAfterJob();
+	}
+#else
+	if (!Results.bSuccess)
+	{
+		if (m_CurrentRender.IsValid())
+		{
+			ClearCurrentRenderJob();
+		}
+		else
+		{
+			ZLCloudPlugin::FZLCloudPluginModule::GetModule()->SetContentGenerationState(EZLContentGenerationState::None);
+		}
+	}
+#endif
+
+	ResetMRQVideoProgressState();
 }
 #endif
 

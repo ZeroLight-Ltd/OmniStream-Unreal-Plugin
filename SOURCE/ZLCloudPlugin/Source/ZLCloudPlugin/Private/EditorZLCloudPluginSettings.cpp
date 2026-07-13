@@ -146,6 +146,8 @@ void UZLCloudPluginSettings::SaveToCustomIni()
 	WRITE_CONFIG("bDisableTextureStreamingOnLaunch", bDisableTextureStreamingOnLaunch ? TEXT("True") : TEXT("False"));
 	WRITE_CONFIG("stateRequestWarningTime", *FString::SanitizeFloat(stateRequestWarningTime));
 	WRITE_CONFIG("stateRequestTimeout", *FString::SanitizeFloat(stateRequestTimeout));
+	WRITE_CONFIG("initialHeartBeatTimeout", *FString::SanitizeFloat(initialHeartBeatTimeout));
+	WRITE_CONFIG("heartBeatTimeout", *FString::SanitizeFloat(heartBeatTimeout));
 	WRITE_CONFIG("screenshotFrameWaitCountOverride", *FString::FromInt(screenshotFrameWaitCountOverride));
 	WRITE_CONFIG("supportsVR", supportsVR ? TEXT("True") : TEXT("False"));
 	WRITE_CONFIG("deployName", *deployName);
@@ -157,6 +159,7 @@ void UZLCloudPluginSettings::SaveToCustomIni()
 	WRITE_CONFIG("httpProxyOverride", *httpProxyOverride);
 	WRITE_CONFIG("runInfoCommandLineParams", *runInfoCommandLineParams);
 	WRITE_CONFIG("buildConfiguration", *buildConfiguration);
+	WRITE_CONFIG("bDownloadFFmpegForMediaOnDemandVideos", bDownloadFFmpegForMediaOnDemandVideos ? TEXT("True") : TEXT("False"));
 	WRITE_CONFIG("showExperimentalFeatures", showExperimentalFeatures ? TEXT("True") : TEXT("False"));
 
 	FString NormalizedPath = RelativeThumbnailPath;

@@ -24,10 +24,12 @@
 #include "GenericPlatform/GenericPlatformProcess.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "HAL/FileManager.h"
 #include "Misc/ConfigCacheIni.h"
 #include "HAL/PlatformFilemanager.h"
 #include "Modules/ModuleManager.h"
 #include "Interfaces/IProjectManager.h"
+#include "Interfaces/IPluginManager.h"
 #include "ProjectDescriptor.h"
 #include "GameProjectUtils.h"
 #include "ISettingsModule.h"
@@ -37,7 +39,9 @@
 #include "OutputLogModule.h"
 #include "ZeroLightEditorStyle.h"
 #include "ZeroLightAboutScreen.h"
-#include "ZLStateEditor.h"
+#include "ZLStateEditorV2.h"
+#include "IZLOmniStream_SchemaAutoPopulate.h"
+#include "Features/IModularFeatures.h"
 #include "CloudStream2.h"
 #include "HttpModule.h"
 #include "Http.h"
@@ -50,13 +54,267 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "K2Node_CallFunction.h"
 #include "Editor.h"
+#include "ZLCloudPluginVersion.h"
+#include "ZLPluginVersionRegistry.h"
+#if UNREAL_5_2_OR_NEWER
+#include "FileUtilities/ZipArchiveReader.h"
+#endif
 #include "Misc/DateTime.h"
 #include "Misc/MessageDialog.h"
-#include "ZLCloudPluginVersion.h"
 
 #define LOCTEXT_NAMESPACE "ZLCloudPlugin"
 
 DEFINE_LOG_CATEGORY(LogPortalCLI);
+
+namespace
+{
+static const TCHAR* FFmpegDownloadUrl = TEXT("https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-full_build.zip");
+static const TCHAR* ZLCloudBuildSettingsSection = TEXT("OmniStreamBuildSettings");
+static const TCHAR* PercentageUnusedShaderCompilingThreadsKey = TEXT("PercentageUnusedShaderCompilingThreads");
+
+static FString GetFFmpegThirdPartyDirectory()
+{
+	IPluginManager& PluginManager = IPluginManager::Get();
+	TSharedPtr<IPlugin> ZLCloudPlugin = PluginManager.FindPlugin(TEXT("ZLCloudPlugin"));
+	const FString PluginBaseDir = ZLCloudPlugin.IsValid() ? ZLCloudPlugin->GetBaseDir() : FPaths::ProjectPluginsDir() / TEXT("ZLCloudPlugin");
+	return FPaths::Combine(PluginBaseDir, TEXT("Binaries"), TEXT("ThirdParty"), TEXT("ffmpeg"));
+}
+
+static bool HasRequiredFFmpegFiles(const FString& FFmpegDirectory)
+{
+	if (!FPaths::FileExists(FPaths::Combine(FFmpegDirectory, TEXT("ffmpeg.exe"))))
+	{
+		return false;
+	}
+
+	TArray<FString> LicenseFiles;
+	IFileManager::Get().FindFiles(LicenseFiles, *(FFmpegDirectory / TEXT("LICENSE*")), true, false);
+	return LicenseFiles.Num() > 0;
+}
+
+static bool CopyFFmpegFilesFromExtractedPackage(const FString& ExtractDirectory, const FString& FFmpegDirectory, FString& OutError)
+{
+	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+
+	FString FFmpegExePath;
+	int32 ExtractedFileCount = 0;
+	TArray<FString> SampleExtractedFiles;
+	PlatformFile.IterateDirectoryRecursively(*ExtractDirectory, [&](const TCHAR* FileOrDirectory, bool bIsDirectory)
+	{
+		if (bIsDirectory)
+		{
+			return true;
+		}
+
+		++ExtractedFileCount;
+
+		if (SampleExtractedFiles.Num() < 10)
+		{
+			SampleExtractedFiles.Add(FString(FileOrDirectory));
+		}
+
+		if (FPaths::GetCleanFilename(FileOrDirectory).Equals(TEXT("ffmpeg.exe"), ESearchCase::IgnoreCase))
+		{
+			FFmpegExePath = FString(FileOrDirectory);
+			return false;
+		}
+
+		return true;
+	});
+
+	if (FFmpegExePath.IsEmpty())
+	{
+		OutError = FString::Printf(TEXT("No ffmpeg.exe found after extracting %s. Extracted file count: %d. Sample files: %s"), *ExtractDirectory, ExtractedFileCount, *FString::Join(SampleExtractedFiles, TEXT(", ")));
+		return false;
+	}
+
+	const FString DestinationFFmpegExe = FPaths::Combine(FFmpegDirectory, TEXT("ffmpeg.exe"));
+	if (!PlatformFile.CopyFile(*DestinationFFmpegExe, *FFmpegExePath))
+	{
+		OutError = FString::Printf(TEXT("Failed to copy %s to %s"), *FFmpegExePath, *DestinationFFmpegExe);
+		return false;
+	}
+
+	TArray<FString> LicenseFiles;
+	const FString PackageRoot = FPaths::GetPath(FPaths::GetPath(FFmpegExePath));
+	TArray<FString> TopLevelLicenseFileNames;
+	IFileManager::Get().FindFiles(TopLevelLicenseFileNames, *(PackageRoot / TEXT("LICENSE*")), true, false);
+	for (const FString& LicenseFileName : TopLevelLicenseFileNames)
+	{
+		LicenseFiles.Add(PackageRoot / LicenseFileName);
+	}
+
+	if (LicenseFiles.Num() == 0)
+	{
+		IFileManager::Get().FindFilesRecursive(LicenseFiles, *ExtractDirectory, TEXT("LICENSE*"), true, false, false);
+	}
+
+	if (LicenseFiles.Num() == 0)
+	{
+		OutError = FString::Printf(TEXT("No LICENSE files found after extracting %s"), *ExtractDirectory);
+		return false;
+	}
+
+	for (const FString& LicenseFile : LicenseFiles)
+	{
+		const FString DestinationLicenseFile = FPaths::Combine(FFmpegDirectory, FPaths::GetCleanFilename(LicenseFile));
+		if (!PlatformFile.CopyFile(*DestinationLicenseFile, *LicenseFile))
+		{
+			OutError = FString::Printf(TEXT("Failed to copy %s to %s"), *LicenseFile, *DestinationLicenseFile);
+			return false;
+		}
+	}
+
+	if (!HasRequiredFFmpegFiles(FFmpegDirectory))
+	{
+		OutError = FString::Printf(TEXT("FFmpeg install verification failed for %s"), *FFmpegDirectory);
+		return false;
+	}
+
+	return true;
+}
+
+static bool InstallFFmpegFilesFromZip(const FString& ZipPath, const FString& FFmpegDirectory, FString& OutError)
+{
+#if !UNREAL_5_2_OR_NEWER
+	OutError = TEXT("Direct zip install requires Unreal Engine 5.2 or newer");
+	return false;
+#else
+	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+	IFileHandle* ZipFileHandle = PlatformFile.OpenRead(*ZipPath);
+	if (ZipFileHandle == nullptr)
+	{
+		OutError = FString::Printf(TEXT("Failed to open FFmpeg zip at %s"), *ZipPath);
+		return false;
+	}
+
+	FZipArchiveReader ZipReader(ZipFileHandle);
+	if (!ZipReader.IsValid())
+	{
+		OutError = FString::Printf(TEXT("FFmpeg zip is not a valid zip archive: %s"), *ZipPath);
+		return false;
+	}
+
+	TArray<FString> FileNames = ZipReader.GetFileNames();
+	TArray<FString> SampleFileNames;
+	for (const FString& FileName : FileNames)
+	{
+		if (SampleFileNames.Num() < 10)
+		{
+			SampleFileNames.Add(FileName);
+		}
+	}
+
+	UE_LOG(LogPortalCLI, Log, TEXT("FFmpeg zip entries: %d. Sample entries: %s"), FileNames.Num(), *FString::Join(SampleFileNames, TEXT(", ")));
+
+	FString FFmpegEntryName;
+	TArray<FString> LicenseEntryNames;
+	for (const FString& FileName : FileNames)
+	{
+		const FString CleanFileName = FPaths::GetCleanFilename(FileName);
+		if (CleanFileName.Equals(TEXT("ffmpeg.exe"), ESearchCase::IgnoreCase))
+		{
+			FFmpegEntryName = FileName;
+		}
+		else if (CleanFileName.StartsWith(TEXT("LICENSE"), ESearchCase::IgnoreCase))
+		{
+			LicenseEntryNames.Add(FileName);
+		}
+	}
+
+	if (FFmpegEntryName.IsEmpty())
+	{
+		OutError = FString::Printf(TEXT("FFmpeg zip did not contain ffmpeg.exe. Entry count: %d. Sample entries: %s"), FileNames.Num(), *FString::Join(SampleFileNames, TEXT(", ")));
+		return false;
+	}
+
+	if (LicenseEntryNames.Num() == 0)
+	{
+		OutError = FString::Printf(TEXT("FFmpeg zip did not contain LICENSE files. Entry count: %d. Sample entries: %s"), FileNames.Num(), *FString::Join(SampleFileNames, TEXT(", ")));
+		return false;
+	}
+
+	TArray<uint8> FileData;
+	if (!ZipReader.TryReadFile(FFmpegEntryName, FileData))
+	{
+		OutError = FString::Printf(TEXT("Failed to read %s from FFmpeg zip"), *FFmpegEntryName);
+		return false;
+	}
+
+	const FString DestinationFFmpegExe = FPaths::Combine(FFmpegDirectory, TEXT("ffmpeg.exe"));
+	if (!FFileHelper::SaveArrayToFile(FileData, *DestinationFFmpegExe))
+	{
+		OutError = FString::Printf(TEXT("Failed to save ffmpeg.exe to %s"), *DestinationFFmpegExe);
+		return false;
+	}
+
+	for (const FString& LicenseEntryName : LicenseEntryNames)
+	{
+		FileData.Reset();
+		if (!ZipReader.TryReadFile(LicenseEntryName, FileData))
+		{
+			OutError = FString::Printf(TEXT("Failed to read %s from FFmpeg zip"), *LicenseEntryName);
+			return false;
+		}
+
+		const FString DestinationLicenseFile = FPaths::Combine(FFmpegDirectory, FPaths::GetCleanFilename(LicenseEntryName));
+		if (!FFileHelper::SaveArrayToFile(FileData, *DestinationLicenseFile))
+		{
+			OutError = FString::Printf(TEXT("Failed to save FFmpeg license file to %s"), *DestinationLicenseFile);
+			return false;
+		}
+	}
+
+	if (!HasRequiredFFmpegFiles(FFmpegDirectory))
+	{
+		OutError = FString::Printf(TEXT("FFmpeg install verification failed for %s"), *FFmpegDirectory);
+		return false;
+	}
+
+	return true;
+#endif // UNREAL_5_2_OR_NEWER
+}
+
+/** Merges JSON root objects from every `*.zlschemapresets` file under `Content/ZLSchemaPresets` (non-recursive). */
+static TSharedPtr<FJsonObject> AggregateZLSchemaPresetsFromDisk()
+{
+	TSharedPtr<FJsonObject> Aggregated = MakeShared<FJsonObject>();
+
+	const FString PresetsDir = FPaths::ProjectContentDir() / TEXT("ZLSchemaPresets");
+	if (!FPaths::DirectoryExists(PresetsDir))
+		return Aggregated;
+
+	TArray<FString> FileNames;
+	IFileManager::Get().FindFiles(FileNames, *PresetsDir, TEXT("zlschemapresets"));
+	FileNames.Sort();
+
+	for (const FString& FileName : FileNames)
+	{
+		const FString FilePath = PresetsDir / FileName;
+		if (!FPaths::FileExists(FilePath))
+			continue;
+
+		FString JsonStr;
+		if (!FFileHelper::LoadFileToString(JsonStr, *FilePath))
+			continue;
+
+		JsonStr.TrimStartAndEndInline();
+		if (JsonStr.IsEmpty())
+			continue;
+
+		TSharedPtr<FJsonObject> Parsed;
+		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonStr);
+		if (!FJsonSerializer::Deserialize(Reader, Parsed) || !Parsed.IsValid())
+			continue;
+
+		TSharedPtr<FJsonObject> Merged = MergeJsonObjectsRecursive(Aggregated, Parsed);
+		if (Merged.IsValid())
+			Aggregated = Merged;
+	}
+
+	return Aggregated;
+}
+}
 
 //add defines for multi platform compile
 #define BUILDPLATFORM "Win64"
@@ -304,6 +562,24 @@ FText FZeroLightMainButton::UpdateProgress() const
 	return s_progressText;
 }
 
+static void CleanupInjectedIntermediateSource()
+{
+	const FString ProjectName = FApp::GetProjectName();
+	const FString IntermediateSourceDir = FPaths::ProjectIntermediateDir() / TEXT("Source");
+	if (FPaths::DirectoryExists(IntermediateSourceDir))
+	{
+		IFileManager::Get().DeleteDirectory(*IntermediateSourceDir, false, true);
+		UE_LOG(LogPortalCLI, Log, TEXT("Removed injected intermediate source directory: %s"), *IntermediateSourceDir);
+	}
+
+	const FString DummyEditorTargetFile = FPaths::ProjectDir() / TEXT("Binaries") / TEXT("Win64") / (ProjectName + TEXT("Editor.target"));
+	if (FPaths::FileExists(DummyEditorTargetFile))
+	{
+		IFileManager::Get().Delete(*DummyEditorTargetFile);
+		UE_LOG(LogPortalCLI, Log, TEXT("Removed dummy editor target file: %s"), *DummyEditorTargetFile);
+	}
+}
+
 void InjectTempTargetFiles()
 {
 	FString ProjectName = FApp::GetProjectName();
@@ -427,7 +703,12 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 	}
 	else
 	{
+#if ZL_USE_LEGACY_BP_PACKAGING
+		// UE 5.1/5.2 UAT deletes injected game Target.cs and leaves orphan editor targets; use installed content-project packaging instead.
+		CleanupInjectedIntermediateSource();
+#else
 		InjectTempTargetFiles();
+#endif
 
 		FString TurnkeyParams = TEXT("-command=VerifySdk -platform=Win64 -UpdateIfNeeded");
 
@@ -444,9 +725,10 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 		FString unrealExeArg = FString::Printf(TEXT(" -unrealexe=\"%s\" "), *unrealExePath);
 		commandArgs += unrealExeArg;
 
+#if !ZL_USE_LEGACY_BP_PACKAGING
 		FString projectStr = FPaths::GetBaseFilename(FPaths::GetProjectFilePath());
-
 		commandArgs += FString("-target=\"" + projectStr + "\" ");
+#endif
 
 		UE_LOG(LogPortalCLI, Log, TEXT("Full build command: %s"), *commandArgs);
 
@@ -454,6 +736,12 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 	}
 	commandArgs += FString("-project=\"" + projectPath + "\" ");
 	commandArgs += FString("-clientconfig=" + ConfigName + " ");
+
+	const FString PercentageUnusedShaderCompilingThreads = GetPercentageUnusedShaderCompilingThreads();
+	if (!PercentageUnusedShaderCompilingThreads.IsEmpty())
+	{
+		commandArgs += FString::Printf(TEXT("-ini:Engine:[DevOptions.Shaders]:PercentageUnusedShaderCompilingThreads=%s "), *PercentageUnusedShaderCompilingThreads);
+	}
 
 	//Ensure we dont have a unclean current build context
 	portalCLI->ClearCurrentBuild();
@@ -494,26 +782,49 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 		}
 	};
 
-	SetProgressText(FText::FromString("Building..."));
+	SetProgressText(FText::FromString("Preparing build..."));
 
 	if (s_isCIBuild)
 		UE_LOG(LogPortalCLI, Log, TEXT("Running UATHelper..."));
 
 	SetBuildFolder(outFolderName);
 	s_isCurrentlyBuilding = true;
-	
-	s_buildStartTime = FDateTime::Now();
-	
-	IUATHelperModule& uatHelper = FModuleManager::LoadModuleChecked<IUATHelperModule>("UATHelper");
-	uatHelper.CreateUatTask(
-		commandArgs,
-		FText::FromString("Win64"),
-		LOCTEXT("PackagingProjectTaskName", "Packaging Project"),
-		LOCTEXT("PackagingTaskName", "Packaging"),
-		FAppStyle::Get().GetBrush(TEXT("MainFrame.PackageProject")),
-		nullptr,
-		OnBuildFinished,
-		outFolderName);
+
+	TFunction<void()> StartUATBuild = [commandArgs, OnBuildFinished, outFolderName]()
+	{
+		FZeroLightMainButton::SetProgressText(FText::FromString("Building..."));
+		s_buildStartTime = FDateTime::Now();
+
+		IUATHelperModule& uatHelper = FModuleManager::LoadModuleChecked<IUATHelperModule>("UATHelper");
+		uatHelper.CreateUatTask(
+			commandArgs,
+			FText::FromString("Win64"),
+			LOCTEXT("PackagingProjectTaskName", "Packaging Project"),
+			LOCTEXT("PackagingTaskName", "Packaging"),
+			FAppStyle::Get().GetBrush(TEXT("MainFrame.PackageProject")),
+			nullptr,
+			OnBuildFinished,
+			outFolderName);
+	};
+
+	EnsureFFmpegInstalledForMediaOnDemandVideosAsync([StartUATBuild](bool bSuccess)
+	{
+		if (!bSuccess)
+		{
+			s_sendBuildFailed = true;
+			s_isCurrentlyBuilding = false;
+
+			if (s_isCIBuild)
+			{
+				UE_LOG(LogPortalCLI, Error, TEXT("OmniStream Build & Upload CI - Failed to install FFmpeg. Aborting..."));
+				std::exit(-1);
+			}
+
+			return;
+		}
+
+		StartUATBuild();
+	});
 }
 
 void FZeroLightMainButton::StartExistingBuildDeployTask() const
@@ -615,10 +926,10 @@ TSharedRef<SWidget> FZeroLightMainButton::GetMenu()
 		FText::FromString("Advanced Utilities"),
 		FNewMenuDelegate::CreateLambda([this](FMenuBuilder& SubMenuBuilder) {
 		SubMenuBuilder.AddMenuEntry(
-			FText::FromString("State Management Editor"),
-			FText::FromString("Utility for defining and managing application state JSON"),
+			FText::FromString("Schemas Editor"),
+			FText::FromString("Utility for defining and managing application schemas"),
 			FSlateIcon(),
-			FUIAction(FExecuteAction::CreateSP(this, &FZeroLightMainButton::ShowStateManagementWindow))
+			FUIAction(FExecuteAction::CreateSP(this, &FZeroLightMainButton::ShowSchemasEditorWindow))
 		);
 		SubMenuBuilder.AddMenuEntry(
 			FText::FromString("Show State Debug UI in editor tab"),
@@ -857,6 +1168,15 @@ void FZeroLightMainButton::SetRunInfoCommandLineParams(const FText& text)
 	}
 }
 
+void FZeroLightMainButton::SetPercentageUnusedShaderCompilingThreads(const FText& text)
+{
+	if (!s_savedIniPath.IsEmpty())
+	{
+		GConfig->SetString(ZLCloudBuildSettingsSection, PercentageUnusedShaderCompilingThreadsKey, *text.ToString().TrimStartAndEnd(), s_savedIniPath);
+		GConfig->Flush(false, s_savedIniPath);
+	}
+}
+
 void FZeroLightMainButton::SetBuildFolder(const FString& path)
 {
 	if (s_cloudstreamSettings != nullptr)
@@ -972,6 +1292,17 @@ FString FZeroLightMainButton::GetBuildConfiguration()
 		return Config;
 	}
 	return TEXT("Development");
+}
+
+FString FZeroLightMainButton::GetPercentageUnusedShaderCompilingThreads()
+{
+	FString Value;
+	if (!s_savedIniPath.IsEmpty())
+	{
+		GConfig->GetString(ZLCloudBuildSettingsSection, PercentageUnusedShaderCompilingThreadsKey, Value, s_savedIniPath);
+	}
+	Value = Value.TrimStartAndEnd();
+	return Value.IsEmpty() ? TEXT("10") : Value;
 }
 
 void FZeroLightMainButton::SetBuildConfiguration(TSharedPtr<FString> NewValue, ESelectInfo::Type SelectInfo)
@@ -1133,6 +1464,30 @@ FReply FZeroLightMainButton::TriggerBuildAndDeploy(FString buildFolderOverride)
 			else
 			{
 				outFolderName = buildFolderOverride;
+			}
+
+			FString normalizedOutFolder = FPaths::ConvertRelativePathToFull(outFolderName);
+			FPaths::NormalizeDirectoryName(normalizedOutFolder);
+
+			const bool isContentDirectory = FPaths::GetCleanFilename(normalizedOutFolder).Equals(TEXT("Content"), ESearchCase::IgnoreCase);
+			if (isContentDirectory)
+			{
+				const FString projectRootDirectory = FPaths::GetPath(normalizedOutFolder);
+				TArray<FString> uprojectFiles;
+				IFileManager::Get().FindFiles(uprojectFiles, *(projectRootDirectory / TEXT("*.uproject")), true, false);
+
+				if (uprojectFiles.Num() > 0)
+				{
+					const FText title = FText::FromString(TEXT("Invalid Build Folder"));
+					const FText message = FText::FromString(TEXT("Build output cannot be an Unreal project's Content directory. Please select a different folder."));
+#if UNREAL_5_3_OR_NEWER
+					FMessageDialog::Open(EAppMsgType::Ok, EAppReturnType::Ok, message, title);
+#else
+					FMessageDialog::Open(EAppMsgType::Ok, message, &title);
+#endif
+					success = false;
+					return FReply::Unhandled();
+				}
 			}
 	
 			UE_LOG(LogPortalCLI, Display, TEXT("CloudStream2 : Freeing plugin for build process"));
@@ -1337,6 +1692,193 @@ FString FZeroLightMainButton::FindOverrideProjectName(FString buildDirectory) co
 	return overrideExeName;
 }
 
+void FZeroLightMainButton::EnsureFFmpegInstalledForMediaOnDemandVideosAsync(TFunction<void(bool)> OnComplete) const
+{
+	if (s_cloudstreamSettings == nullptr || !s_cloudstreamSettings->bDownloadFFmpegForMediaOnDemandVideos)
+	{
+		OnComplete(true);
+		return;
+	}
+
+	const FString FFmpegDirectory = GetFFmpegThirdPartyDirectory();
+	if (HasRequiredFFmpegFiles(FFmpegDirectory))
+	{
+		UE_LOG(LogPortalCLI, Log, TEXT("FFmpeg already installed at %s"), *FFmpegDirectory);
+		OnComplete(true);
+		return;
+	}
+
+	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+	if (!PlatformFile.CreateDirectoryTree(*FFmpegDirectory))
+	{
+		SetProgressText(FText::FromString("Failed to create FFmpeg third-party directory"));
+		UE_LOG(LogPortalCLI, Error, TEXT("Failed to create FFmpeg directory: %s"), *FFmpegDirectory);
+		OnComplete(false);
+		return;
+	}
+
+	const FString TempRoot = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("ZLCloudPlugin"), TEXT("FFmpegDownload"));
+	const FString ZipPath = FPaths::Combine(TempRoot, TEXT("ffmpeg-8.0.1-full_build.zip"));
+	const FString ExtractDirectory = FPaths::Combine(TempRoot, TEXT("Extracted"));
+
+	IFileManager::Get().DeleteDirectory(*TempRoot, false, true);
+	if (!PlatformFile.CreateDirectoryTree(*ExtractDirectory))
+	{
+		SetProgressText(FText::FromString("Failed to create temporary FFmpeg download directory"));
+		UE_LOG(LogPortalCLI, Error, TEXT("Failed to create FFmpeg temporary directory: %s"), *ExtractDirectory);
+		OnComplete(false);
+		return;
+	}
+
+	SetProgressText(FText::FromString("Downloading FFmpeg for media on demand videos..."));
+	UE_LOG(LogPortalCLI, Log, TEXT("Downloading FFmpeg from %s"), FFmpegDownloadUrl);
+
+	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = FHttpModule::Get().CreateRequest();
+	Request->SetURL(FFmpegDownloadUrl);
+	Request->SetVerb(TEXT("GET"));
+#if UNREAL_5_4_OR_NEWER
+	Request->OnRequestProgress64().BindLambda([](FHttpRequestPtr RequestPtr, uint64, uint64 BytesReceived)
+	{
+		const int64 ContentLength = RequestPtr.IsValid() && RequestPtr->GetResponse().IsValid() ? RequestPtr->GetResponse()->GetContentLength() : 0;
+		if (ContentLength > 0)
+		{
+			const double Percent = (static_cast<double>(BytesReceived) / static_cast<double>(ContentLength)) * 100.0;
+			FZeroLightMainButton::SetProgressText(FText::FromString(FString::Printf(TEXT("Downloading FFmpeg %.1f%% (%0.1f MB / %0.1f MB)"), Percent, BytesReceived / 1048576.0, ContentLength / 1048576.0)));
+		}
+		else if (BytesReceived > 0)
+		{
+			FZeroLightMainButton::SetProgressText(FText::FromString(FString::Printf(TEXT("Downloading FFmpeg %0.1f MB"), BytesReceived / 1048576.0)));
+		}
+	});
+#else
+	Request->OnRequestProgress().BindLambda([](FHttpRequestPtr RequestPtr, int32, int32 BytesReceived)
+	{
+		const int32 ContentLength = RequestPtr.IsValid() && RequestPtr->GetResponse().IsValid() ? RequestPtr->GetResponse()->GetContentLength() : 0;
+		if (ContentLength > 0)
+		{
+			const double Percent = (static_cast<double>(BytesReceived) / static_cast<double>(ContentLength)) * 100.0;
+			FZeroLightMainButton::SetProgressText(FText::FromString(FString::Printf(TEXT("Downloading FFmpeg %.1f%% (%0.1f MB / %0.1f MB)"), Percent, BytesReceived / 1048576.0, ContentLength / 1048576.0)));
+		}
+		else if (BytesReceived > 0)
+		{
+			FZeroLightMainButton::SetProgressText(FText::FromString(FString::Printf(TEXT("Downloading FFmpeg %0.1f MB"), BytesReceived / 1048576.0)));
+		}
+	});
+#endif
+
+	Request->OnProcessRequestComplete().BindLambda([TempRoot, ZipPath, ExtractDirectory, FFmpegDirectory, OnComplete](FHttpRequestPtr RequestPtr, FHttpResponsePtr Response, bool bWasSuccessful)
+	{
+		if (!bWasSuccessful || !Response.IsValid() || Response->GetResponseCode() < 200 || Response->GetResponseCode() >= 300)
+		{
+			const int32 ResponseCode = Response.IsValid() ? Response->GetResponseCode() : 0;
+			FZeroLightMainButton::SetProgressText(FText::FromString("Failed to download FFmpeg"));
+			UE_LOG(LogPortalCLI, Error, TEXT("FFmpeg download failed. HTTP code: %d"), ResponseCode);
+			IFileManager::Get().DeleteDirectory(*TempRoot, false, true);
+			OnComplete(false);
+			return;
+		}
+
+		if (!FFileHelper::SaveArrayToFile(Response->GetContent(), *ZipPath))
+		{
+			FZeroLightMainButton::SetProgressText(FText::FromString("Failed to save FFmpeg download"));
+			UE_LOG(LogPortalCLI, Error, TEXT("Failed to save FFmpeg zip to %s"), *ZipPath);
+			IFileManager::Get().DeleteDirectory(*TempRoot, false, true);
+			OnComplete(false);
+			return;
+		}
+
+		const int64 ZipSize = IFileManager::Get().FileSize(*ZipPath);
+		UE_LOG(LogPortalCLI, Log, TEXT("Saved FFmpeg zip to %s (%0.1f MB)"), *ZipPath, ZipSize / 1048576.0);
+		FZeroLightMainButton::SetProgressText(FText::FromString("Installing FFmpeg..."));
+
+		AsyncTask(ENamedThreads::AnyThread, [TempRoot, ZipPath, ExtractDirectory, FFmpegDirectory, OnComplete]()
+		{
+			FString ErrorMessage;
+			bool bCopied = InstallFFmpegFilesFromZip(ZipPath, FFmpegDirectory, ErrorMessage);
+			bool bExtracted = bCopied;
+			FString ExtractError;
+			int32 ExtractReturnCode = 0;
+
+			if (!bCopied)
+			{
+				UE_LOG(LogPortalCLI, Warning, TEXT("Direct FFmpeg zip install failed: %s"), *ErrorMessage);
+				ErrorMessage.Empty();
+				ExtractReturnCode = -1;
+				FString ExtractOutput;
+
+				const bool bExtractLaunched = FPlatformProcess::ExecProcess(
+					TEXT("powershell.exe"),
+					*FString::Printf(TEXT("-NoProfile -ExecutionPolicy Bypass -Command \"$ErrorActionPreference = 'Stop'; Expand-Archive -LiteralPath '%s' -DestinationPath '%s' -Force\""), *ZipPath.Replace(TEXT("'"), TEXT("''")), *ExtractDirectory.Replace(TEXT("'"), TEXT("''"))),
+					&ExtractReturnCode,
+					&ExtractOutput,
+					&ExtractError);
+
+				bExtracted = bExtractLaunched && ExtractReturnCode == 0;
+				UE_LOG(LogPortalCLI, Log, TEXT("PowerShell FFmpeg extract launched=%s returnCode=%d output=%s error=%s"), bExtractLaunched ? TEXT("true") : TEXT("false"), ExtractReturnCode, *ExtractOutput, *ExtractError);
+
+				bCopied = bExtracted && CopyFFmpegFilesFromExtractedPackage(ExtractDirectory, FFmpegDirectory, ErrorMessage);
+			}
+
+			if (!bCopied)
+			{
+				UE_LOG(LogPortalCLI, Warning, TEXT("PowerShell FFmpeg extract/install failed: %s"), *ErrorMessage);
+				ErrorMessage.Empty();
+				IFileManager::Get().DeleteDirectory(*ExtractDirectory, false, true);
+				FPlatformFileManager::Get().GetPlatformFile().CreateDirectoryTree(*ExtractDirectory);
+
+				ExtractReturnCode = -1;
+				FString ExtractOutput;
+				ExtractError.Empty();
+
+				const bool bTarLaunched = FPlatformProcess::ExecProcess(
+					TEXT("tar.exe"),
+					*FString::Printf(TEXT("-xf \"%s\" -C \"%s\""), *ZipPath, *ExtractDirectory),
+					&ExtractReturnCode,
+					&ExtractOutput,
+					&ExtractError);
+
+				bExtracted = bTarLaunched && ExtractReturnCode == 0;
+				UE_LOG(LogPortalCLI, Log, TEXT("tar FFmpeg extract launched=%s returnCode=%d output=%s error=%s"), bTarLaunched ? TEXT("true") : TEXT("false"), ExtractReturnCode, *ExtractOutput, *ExtractError);
+
+				bCopied = bExtracted && CopyFFmpegFilesFromExtractedPackage(ExtractDirectory, FFmpegDirectory, ErrorMessage);
+			}
+
+			IFileManager::Get().DeleteDirectory(*TempRoot, false, true);
+
+			AsyncTask(ENamedThreads::GameThread, [bExtracted, bCopied, ExtractReturnCode, ExtractError, ErrorMessage, FFmpegDirectory, OnComplete]()
+			{
+				if (!bExtracted)
+				{
+					FZeroLightMainButton::SetProgressText(FText::FromString("Failed to extract FFmpeg"));
+					UE_LOG(LogPortalCLI, Error, TEXT("Failed to extract FFmpeg zip. Return code: %d. Error: %s"), ExtractReturnCode, *ExtractError);
+					OnComplete(false);
+					return;
+				}
+
+				if (!bCopied)
+				{
+					FZeroLightMainButton::SetProgressText(FText::FromString("Failed to install FFmpeg"));
+					UE_LOG(LogPortalCLI, Error, TEXT("%s"), *ErrorMessage);
+					OnComplete(false);
+					return;
+				}
+
+				FZeroLightMainButton::SetProgressText(FText::FromString("FFmpeg downloaded"));
+				UE_LOG(LogPortalCLI, Log, TEXT("FFmpeg installed at %s"), *FFmpegDirectory);
+				OnComplete(true);
+			});
+		});
+	});
+
+	if (!Request->ProcessRequest())
+	{
+		SetProgressText(FText::FromString("Failed to start FFmpeg download"));
+		UE_LOG(LogPortalCLI, Error, TEXT("Failed to start FFmpeg download request"));
+		IFileManager::Get().DeleteDirectory(*TempRoot, false, true);
+		OnComplete(false);
+	}
+}
+
 bool FZeroLightMainButton::TriggerBuildUpload(FString retryPath) const
 {
 	//if we include more platform support this needs to pull from platform settings
@@ -1524,6 +2066,160 @@ TSharedPtr<FJsonObject> FZeroLightMainButton::AggregatePredictedJSONSchema() con
 	return aggregatedJsonObject;
 }
 
+TArray<TSharedPtr<FJsonValue>> FZeroLightMainButton::AggregatePredictedDimeModelConfigData() const
+{
+	TArray<TSharedPtr<FJsonValue>> AggregatedArray;
+
+#if WITH_DIMECONFIGURATOR
+	struct FAggregatedDimeModel
+	{
+		FString ModelName;
+		TMap<int32, FString> DescriptionLookupById;
+		TMap<FString, FDIMEModelCodeMetadata> CodesByKey;
+	};
+
+	TMap<FString, FAggregatedDimeModel> AggregatedByModelUpper;
+
+	// Collect ALL parseable DIME model data in the project (groups, codes and
+	// description lookups for every model the DIME configurator can discover),
+	// independent of whether any schema asset has been auto-populated with it.
+	// The data is pulled through the OmniStream auto-populate modular feature so
+	// this module does not need a (circular) static dependency on the DIME
+	// configurator plugin; if the DIME plugin is not present nothing is contributed.
+	TArray<FDIMEModelMetadata> AllProjectModelData;
+	{
+		const FName FeatureName = IZLOmniStream_SchemaAutoPopulate::GetModularFeatureName();
+		IModularFeatures& ModularFeatures = IModularFeatures::Get();
+		const int32 NumImpls = ModularFeatures.GetModularFeatureImplementationCount(FeatureName);
+		for (int32 i = 0; i < NumImpls; ++i)
+		{
+			IModularFeature* RawImpl = ModularFeatures.GetModularFeatureImplementation(FeatureName, i);
+			IZLOmniStream_SchemaAutoPopulate* Impl = static_cast<IZLOmniStream_SchemaAutoPopulate*>(RawImpl);
+			if (Impl)
+			{
+				Impl->GetAllProjectModelData(AllProjectModelData);
+			}
+		}
+	}
+
+	for (const FDIMEModelMetadata& ModelMetadata : AllProjectModelData)
+	{
+		const FString ModelName = ModelMetadata.ModelName.TrimStartAndEnd();
+		if (ModelName.IsEmpty())
+		{
+			continue;
+		}
+
+		FAggregatedDimeModel& AggregatedModel = AggregatedByModelUpper.FindOrAdd(ModelName.ToUpper());
+		if (AggregatedModel.ModelName.IsEmpty())
+		{
+			AggregatedModel.ModelName = ModelName;
+		}
+
+		for (const TPair<int32, FString>& DescriptionPair : ModelMetadata.DescriptionLookupById)
+		{
+			const FString Description = DescriptionPair.Value.TrimStartAndEnd();
+			if (Description.IsEmpty())
+			{
+				continue;
+			}
+
+			FString& ExistingDescription = AggregatedModel.DescriptionLookupById.FindOrAdd(DescriptionPair.Key);
+			if (ExistingDescription.IsEmpty())
+			{
+				ExistingDescription = Description;
+			}
+		}
+
+		for (const FDIMEModelCodeMetadata& CodeMetadata : ModelMetadata.Codes)
+		{
+			const FString Code = CodeMetadata.Code.TrimStartAndEnd();
+			const FString Group = CodeMetadata.Group.TrimStartAndEnd();
+			if (Code.IsEmpty())
+			{
+				continue;
+			}
+
+			const FString CodeKey = (Code + TEXT("|") + Group).ToUpper();
+			FDIMEModelCodeMetadata& ExistingCode = AggregatedModel.CodesByKey.FindOrAdd(CodeKey);
+			if (ExistingCode.Code.IsEmpty())
+			{
+				ExistingCode.Code = Code;
+				ExistingCode.Group = Group;
+				ExistingCode.DescriptionId = CodeMetadata.DescriptionId;
+			}
+			else if (ExistingCode.DescriptionId == INDEX_NONE && CodeMetadata.DescriptionId != INDEX_NONE)
+			{
+				ExistingCode.DescriptionId = CodeMetadata.DescriptionId;
+			}
+		}
+	}
+
+	TArray<FString> SortedModelKeys;
+	AggregatedByModelUpper.GetKeys(SortedModelKeys);
+	SortedModelKeys.Sort();
+
+	for (const FString& ModelKey : SortedModelKeys)
+	{
+		const FAggregatedDimeModel& AggregatedModel = AggregatedByModelUpper[ModelKey];
+		if (AggregatedModel.ModelName.IsEmpty() || AggregatedModel.CodesByKey.Num() == 0)
+		{
+			continue;
+		}
+
+		TSharedPtr<FJsonObject> ModelObject = MakeShared<FJsonObject>();
+		ModelObject->SetStringField(TEXT("model_name"), AggregatedModel.ModelName);
+
+		if (AggregatedModel.DescriptionLookupById.Num() > 0)
+		{
+			TSharedPtr<FJsonObject> DescriptionLookupObject = MakeShared<FJsonObject>();
+			TArray<int32> DescriptionIds;
+			AggregatedModel.DescriptionLookupById.GetKeys(DescriptionIds);
+			DescriptionIds.Sort();
+			for (const int32 DescriptionId : DescriptionIds)
+			{
+				if (const FString* Description = AggregatedModel.DescriptionLookupById.Find(DescriptionId))
+				{
+					DescriptionLookupObject->SetStringField(FString::FromInt(DescriptionId), *Description);
+				}
+			}
+			ModelObject->SetObjectField(TEXT("description_lookup"), DescriptionLookupObject);
+		}
+
+		TArray<FDIMEModelCodeMetadata> SortedCodes;
+		AggregatedModel.CodesByKey.GenerateValueArray(SortedCodes);
+		SortedCodes.Sort([](const FDIMEModelCodeMetadata& A, const FDIMEModelCodeMetadata& B)
+		{
+			const int32 CodeCompare = A.Code.Compare(B.Code, ESearchCase::IgnoreCase);
+			if (CodeCompare != 0)
+			{
+				return CodeCompare < 0;
+			}
+			return A.Group.Compare(B.Group, ESearchCase::IgnoreCase) < 0;
+		});
+
+		TArray<TSharedPtr<FJsonValue>> CodesArray;
+		for (const FDIMEModelCodeMetadata& CodeMetadata : SortedCodes)
+		{
+			TSharedPtr<FJsonObject> CodeObject = MakeShared<FJsonObject>();
+			CodeObject->SetStringField(TEXT("code"), CodeMetadata.Code);
+			CodeObject->SetStringField(TEXT("group"), CodeMetadata.Group);
+			if (CodeMetadata.DescriptionId != INDEX_NONE)
+			{
+				CodeObject->SetNumberField(TEXT("description_id"), CodeMetadata.DescriptionId);
+			}
+
+			CodesArray.Add(MakeShared<FJsonValueObject>(CodeObject));
+		}
+
+		ModelObject->SetArrayField(TEXT("codes"), CodesArray);
+		AggregatedArray.Add(MakeShared<FJsonValueObject>(ModelObject));
+	}
+#endif
+
+	return AggregatedArray;
+}
+
 bool FZeroLightMainButton::AddRunInfoJSONAndMetadataToBuild(FString outputFolderPath, FString overrideProjectName, FString overrideExeName) const
 {
 	FString projectStr = FPaths::GetBaseFilename(FPaths::GetProjectFilePath());
@@ -1608,6 +2304,14 @@ bool FZeroLightMainButton::AddRunInfoJSONAndMetadataToBuild(FString outputFolder
 	runInfoJsonObj->SetBoolField("rebootOnDisconnect", s_cloudstreamSettings->bRebootAppOnDisconnect);
 	runInfoJsonObj->SetNumberField("stateWarningTime", s_cloudstreamSettings->stateRequestWarningTime);
 	runInfoJsonObj->SetNumberField("stateTimeout", s_cloudstreamSettings->stateRequestTimeout);
+	if (!FMath::IsNearlyEqual(s_cloudstreamSettings->initialHeartBeatTimeout, 260.0f)) //Only add these if non default vals, otherwise server content may be defining or overriding them
+	{
+		runInfoJsonObj->SetNumberField("initialHeartBeatTimeout", s_cloudstreamSettings->initialHeartBeatTimeout);
+	}
+	if (!FMath::IsNearlyEqual(s_cloudstreamSettings->heartBeatTimeout, 100.0f))
+	{
+		runInfoJsonObj->SetNumberField("heartBeatTimeout", s_cloudstreamSettings->heartBeatTimeout);
+	}
 	runInfoJsonObj->SetBoolField("defaultConnectStateSupported", true);
 
 	runInfoJsonObj->SetArrayField("executables", executablesJSONArray);
@@ -1626,6 +2330,7 @@ bool FZeroLightMainButton::AddRunInfoJSONAndMetadataToBuild(FString outputFolder
 		//Misc metadata
 		{
 			metadataJsonObj->SetStringField("portal_display_name", s_cloudstreamSettings->displayName);
+			metadataJsonObj->SetStringField("filtered_keys_list", s_cloudstreamSettings->filteredKeyList);
 		}
 
 		//Versioning metadata
@@ -1663,6 +2368,12 @@ bool FZeroLightMainButton::AddRunInfoJSONAndMetadataToBuild(FString outputFolder
 
 			FString portalVer = FString(portal::get_library_version().c_str);
 			versioningJSONObj->SetStringField("portalclient", portalVer);
+
+			TSharedPtr<FJsonObject> zlPluginsJson = GetAllZLPluginVersionsAsJson(true);
+			if (zlPluginsJson.IsValid())
+			{
+				versioningJSONObj->SetObjectField("zl_plugins", zlPluginsJson);
+			}
 
 			metadataJsonObj->SetObjectField("version", versioningJSONObj);
 		}
@@ -1702,6 +2413,18 @@ bool FZeroLightMainButton::AddRunInfoJSONAndMetadataToBuild(FString outputFolder
 			aggregatedJsonSchema->SetStringField("title", (s_cloudstreamSettings->displayName + " Schema"));
 
 			metadataJsonObj->SetObjectField("state_schema", aggregatedJsonSchema);
+
+#if WITH_DIMECONFIGURATOR
+			TArray<TSharedPtr<FJsonValue>> AggregatedDimeModelConfigData = AggregatePredictedDimeModelConfigData();
+			if (AggregatedDimeModelConfigData.Num() > 0)
+			{
+				metadataJsonObj->SetArrayField("dime_model_config_data", AggregatedDimeModelConfigData);
+			}
+#endif
+
+			TSharedPtr<FJsonObject> SchemaPresetsAggregated = AggregateZLSchemaPresetsFromDisk();
+			if (SchemaPresetsAggregated.IsValid() && SchemaPresetsAggregated->Values.Num() > 0)
+				metadataJsonObj->SetObjectField("schema_presets", SchemaPresetsAggregated);
 		}
 
 		FString metadataJsonStr;
@@ -1874,33 +2597,70 @@ FZeroLightMainButton::~FZeroLightMainButton()
 {
 }
 
-void FZeroLightMainButton::ShowStateManagementWindow()
+void FZeroLightMainButton::ShowSchemasEditorWindow()
 {
-	if (StateManagementWnd != nullptr)
+	if (SchemasEditorWnd != nullptr)
 	{
-		StateManagementWnd->BringToFront();
+		SchemasEditorWnd->BringToFront();
 		return;
 	}
 
-	StateManagementWnd = SNew(SWindow)
-		.Title(FText::FromString("OmniStream: State JSON Editor"))
+	SchemasEditorWnd = SNew(SWindow)
+		.Title(FText::FromString("OmniStream: Schemas Editor"))
 		.CreateTitleBar(true)
 		.FocusWhenFirstShown(true)
 		.SupportsMaximize(false)
 		.SupportsMinimize(false)
-		.ClientSize(FVector2D(800,600))
+		.ClientSize(FVector2D(800, 600))
 		.MinHeight(500)
 		.MinWidth(600)
 		.SizingRule(ESizingRule::UserSized);
 
-	StateManagementWnd->SetOnWindowClosed(FOnWindowClosed::CreateLambda([&](const TSharedRef<SWindow>&)
+	SchemasEditorWnd->SetOnWindowClosed(FOnWindowClosed::CreateLambda([&](const TSharedRef<SWindow>&)
 	{
-		this->ClearStateManagementWindowRef();
+		this->ClearSchemasEditorWindowRef();
 	}));
 
-	StateManagementWnd->SetContent(SNew(FZLStateEditor));
+	const TSharedRef<FZLStateEditorV2> SchemaEditorWidget = SNew(FZLStateEditorV2);
+	SchemasEditorWnd->SetContent(SchemaEditorWidget);
 
-	FSlateApplication::Get().AddWindow(StateManagementWnd.ToSharedRef(), true);
+	SchemasEditorWnd->SetRequestDestroyWindowOverride(FRequestDestroyWindowOverride::CreateLambda(
+		[SchemaEditorWidget](const TSharedRef<SWindow>& WindowToClose)
+		{
+			auto DestroyWindow = [&]()
+			{
+				FSlateApplication::Get().RequestDestroyWindow(WindowToClose);
+			};
+
+			if (!SchemaEditorWidget->HasUnsavedChanges())
+			{
+				DestroyWindow();
+				return;
+			}
+
+			const EAppReturnType::Type Response = FMessageDialog::Open(
+				EAppMsgType::YesNoCancel,
+				LOCTEXT(
+					"SchemaEditorUnsavedClosePrompt",
+					"The schema has unsaved changes.\n\nSave before closing?"));
+
+			switch (Response)
+			{
+			case EAppReturnType::Yes:
+				if (SchemaEditorWidget->PromptSaveAndClose())
+				{
+					DestroyWindow();
+				}
+				break;
+			case EAppReturnType::No:
+				DestroyWindow();
+				break;
+			default:
+				break;
+			}
+		}));
+
+	FSlateApplication::Get().AddWindow(SchemasEditorWnd.ToSharedRef(), true);
 }
 
 void FZeroLightMainButton::ShowBuildAndDeployDialog()
@@ -2311,6 +3071,35 @@ void FZeroLightMainButton::ShowBuildAndDeployDialog()
 											return s_uploadAsyncTask == nullptr;
 								})
 							]
+					]
+
+					+ SVerticalBox::Slot().AutoHeight()
+					.Padding(0, 0, 0, 3)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.Padding(13, 0, 60, 0)
+						.VAlign(EVerticalAlignment::VAlign_Center)
+						[
+							SNew(STextBlock).Text(FText::FromString("Unused Shader Compile Threads (%)"))
+						]
+						+ SHorizontalBox::Slot()
+						.FillWidth(1.0f)
+						.Padding(0, 0, 13, 0)
+						.VAlign(EVerticalAlignment::VAlign_Center)
+						[
+							SNew(SEditableTextBox)
+								.Text_Lambda([this]() { return FText::FromString(GetPercentageUnusedShaderCompilingThreads()); })
+								.OnTextChanged(FOnTextChanged::CreateSP(this, &FZeroLightMainButton::SetPercentageUnusedShaderCompilingThreads))
+								.MinDesiredWidth(200.0f)
+								.IsEnabled_Lambda([this]() {
+									if (s_isCurrentlyBuilding)
+										return false;
+									else
+										return s_uploadAsyncTask == nullptr;
+								})
+						]
 					]
 
 					+ SVerticalBox::Slot().AutoHeight()

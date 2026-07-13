@@ -133,7 +133,7 @@ void LauncherComms::Update()
 		if (realtimeSeconds - m_TimeSinceRefreshRate >= 10.0f)
 		{
 			int fps = 30;
-			SendLauncherMessage("REFRESHRATE:" + fps);
+			SendLauncherMessage("REFRESHRATE", FString::FromInt(fps));
 			m_TimeSinceRefreshRate = realtimeSeconds;
 		}
 	}

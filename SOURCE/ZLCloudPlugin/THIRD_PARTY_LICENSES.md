@@ -94785,3 +94785,35 @@ LICENSE
 
 MIT or Apache-2.0
 
+
+#####################################################################################
+ffmpeg.exe
+#####################################################################################
+
+FFmpeg 8.0.1 full build for Windows
+https://ffmpeg.org/
+
+Binary distribution release page:
+https://github.com/GyanD/codexffmpeg/releases/tag/8.0.1
+
+Binary distribution zip:
+https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-full_build.zip
+
+Build provider:
+https://www.gyan.dev/ffmpeg/builds/
+
+Corresponding source for the upstream FFmpeg 8.0.1 release:
+https://github.com/FFmpeg/FFmpeg/tree/n8.0.1
+
+Corresponding source commit identified by the binary distributor:
+https://github.com/FFmpeg/FFmpeg/commit/894da5ca7d
+
+This binary was not built by ZeroLight. It was downloaded as the precompiled
+ffmpeg-8.0.1-full_build package published by gyan.dev / GyanD.
+
+This build is licensed as GNU General Public License version 3 (GPLv3).
+The build provider states that all gyan.dev FFmpeg builds are 64-bit, static,
+and licensed as GPLv3.
+
+GNU General Public License version 3:
+https://www.gnu.org/licenses/gpl-3.0.txt

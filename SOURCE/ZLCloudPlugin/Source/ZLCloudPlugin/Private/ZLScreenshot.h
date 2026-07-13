@@ -60,16 +60,17 @@ namespace ZLCloudPlugin
 		FString path;
 		FString uid;
 		bool useMRQPipeline = false;
+		bool debug = false;
 		TArray<FString> cVarOverrides;
 		TSharedPtr<FJsonObject> stateData = nullptr;
 		bool stateRequestSent = false;
 		bool transparent = false;
 		double jobStartTime = 0.0f;
 		double captureStartTime = 0.0f;
-		bool needsCameraPostprocessAdjustmentPerFace = false;
+		//bool needsCameraPostprocessAdjustmentPerFace = false;
 		ZLScreenshotAAMode aaMode = ZLScreenshotAAMode::TAA;
-		int spatialSampleCount = 8;
-		int temporalSampleCount = 8;
+		int spatialSampleCount = 4;
+		int temporalSampleCount = 4;
 
 #ifdef SUPPORT_LEGACY_MESSAGES
 		bool isLegacyMessage = false;
@@ -83,6 +84,7 @@ namespace ZLCloudPlugin
 		double videoFrameRate = 30.0;
 		int32 videoStartFrame = 0;
 		int32 videoNumFrames = -1;
+		TObjectPtr<ULevelSequence> videoCaptureSequenceAsset = nullptr;
 
 		UMovieScene *sourceMovieScene = nullptr;
 		FFrameRate sourceFrameRate;
@@ -139,7 +141,7 @@ namespace ZLCloudPlugin
 
 		void Init(LauncherComms* launcherComms);
 		void Update();
-		bool PerformMRQCapture(int width, int height, FString outputPath, FString jobName);
+		bool PerformMRQCapture(int width, int height, FString outputPath, FString jobName, FString& errorMsgOut);
 	#ifdef SUPPORT_LEGACY_MESSAGES
 		bool RequestScreenshot(const char* settingsJson, UWorld* InWorld, FString& errorMsgOut, bool isLegacyMessage);
 	#else //SUPPORT_LEGACY_MESSAGES
@@ -160,6 +162,12 @@ namespace ZLCloudPlugin
 		void OnScreenshotComplete(int32 InSizeX, int32 InSizeY, const TArray<FColor>& InImageData);
 
 		void SendImageFailureResponse(FString& errorMsg);
+
+		/** Clears the active render job and resets content generation state to None. */
+		void ClearCurrentRenderJob();
+
+		/** Clears local-editor 2D on-demand capture mode after a screenshot/video job ends (WITH_EDITOR only). */
+		void EditorRestoreLocalCapture2DODModeAfterJob();
 
 		void PauseGameTime();
 		void ResumeGameTime();

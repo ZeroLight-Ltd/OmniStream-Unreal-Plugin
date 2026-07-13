@@ -100,6 +100,11 @@ public:
 		return JsonString_DefaultInitialState != "";
 	}
 
+	void ResetDefaultInitialState()
+	{
+		JsonString_DefaultInitialState = FString("");
+	}
+
 	TSharedPtr<FJsonObject> GetServerUnmatchedNotifyState()
 	{
 		return JsonObject_serverNotifyUnmatchedState;
@@ -168,6 +173,9 @@ public:
 	// Editor tab toggle
 	bool GetShowDebugUIInEditorTab() const { return m_showDebugUIInEditorTab; }
 	void SetShowDebugUIInEditorTab(bool showInEditorTab);
+#if WITH_EDITOR
+	void SavePreviousPIESessionPreset() const;
+#endif
 
 	//Debug
 	void DumpState();
@@ -261,6 +269,9 @@ private:
 #if WITH_EDITOR
 	// Helper function to create the editor tab content
 	TSharedRef<SDockTab> CreateDebugUITabContent(TSharedRef<SWidget> WidgetRef, TSharedRef<float> ScaleValue);
+	float GetDebugUITabScale() const;
+	void SetDebugUITabScale(float NewScale) const;
+	FString GetPresetsFilePathForSchema() const;
 #endif
 
 #if WITH_EDITOR
@@ -301,6 +312,71 @@ struct ZLCLOUDPLUGIN_API FSubKeyValueResult
 	EStateKeyDataType Type = EStateKeyDataType::String;
 };
 
+namespace ZLRequestedSubKeyHelpers
+{
+/** Empty JSON arrays have no element type; resolve from schema so clears are not ignored. */
+inline bool TryReadEmptyArraySubKey(
+	UZLCloudPluginStateManager* StateManager,
+	const FString& FullKey,
+	bool bRequestedState,
+	bool bInstantConfirm,
+	FSubKeyValueResult& OutResult,
+	bool& OutSuccess)
+{
+	OutSuccess = false;
+	UStateKeyInfoAsset* SchemaAsset = StateManager ? StateManager->GetCurrentSchemaAsset() : nullptr;
+	if (!SchemaAsset)
+	{
+		return false;
+	}
+
+	const FStateKeyInfo* KeyInfo = SchemaAsset->KeyInfos.Find(FullKey);
+	if (!KeyInfo)
+	{
+		return false;
+	}
+
+	switch (KeyInfo->GetDataTypeEnum())
+	{
+	case EStateKeyDataType::StringArray:
+		OutResult.Type = EStateKeyDataType::StringArray;
+		if (bRequestedState)
+		{
+			StateManager->GetRequestedStateValue<TArray<FString>>(FullKey, bInstantConfirm, OutResult.StringArray, OutSuccess);
+		}
+		else
+		{
+			StateManager->GetCurrentStateValue<TArray<FString>>(FullKey, OutResult.StringArray, OutSuccess);
+		}
+		return true;
+	case EStateKeyDataType::NumberArray:
+		OutResult.Type = EStateKeyDataType::NumberArray;
+		if (bRequestedState)
+		{
+			StateManager->GetRequestedStateValue<TArray<float>>(FullKey, bInstantConfirm, OutResult.NumberArray, OutSuccess);
+		}
+		else
+		{
+			StateManager->GetCurrentStateValue<TArray<float>>(FullKey, OutResult.NumberArray, OutSuccess);
+		}
+		return true;
+	case EStateKeyDataType::BoolArray:
+		OutResult.Type = EStateKeyDataType::BoolArray;
+		if (bRequestedState)
+		{
+			StateManager->GetRequestedStateValue<TArray<bool>>(FullKey, bInstantConfirm, OutResult.BoolArray, OutSuccess);
+		}
+		else
+		{
+			StateManager->GetCurrentStateValue<TArray<bool>>(FullKey, OutResult.BoolArray, OutSuccess);
+		}
+		return true;
+	default:
+		return false;
+	}
+}
+}
+
 UCLASS()
 class ZLCLOUDPLUGIN_API UZLCloudPluginStateManagerBlueprints : public UBlueprintFunctionLibrary
 {
@@ -330,6 +406,26 @@ public:
 	}
 
 	/**
+	 * Returns true if content generation is actively recording the frames of a video sequence
+	 *
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Zerolight Omnistream State")
+	static bool IsContentGenerationMediaRecording()
+	{
+		return ZLCloudPlugin::FZLCloudPluginModule::GetModule()->IsContentGenerationMediaRecording();
+	}
+
+	/**
+	 * Returns content generation state
+	 *
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Zerolight Omnistream State")
+	static EZLContentGenerationState GetContentGenerationState()
+	{
+		return ZLCloudPlugin::FZLCloudPluginModule::GetModule()->GetContentGenerationState();
+	}
+
+	/**
 	 * Returns true if the app is serving a CloudXR client
 	 *
 	 */
@@ -349,6 +445,10 @@ public:
 	{
 		UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->ProcessState(jsonString, doCurrentStateCompare, Success);
 	}
+
+	/** Submits merged JSON through the same delegate path as remote state data (OnRecieveData). Used by the Perform State Request K2 node. */
+	UFUNCTION(BlueprintCallable, Category = "Zerolight Omnistream State", meta = (BlueprintInternalUseOnly = "true"))
+	static void BroadcastStateRequestJsonAsIncomingData(FString jsonString, bool& Success);
 
 	/**
 	 * Update current state
@@ -592,11 +692,39 @@ public:
 	static void UpdateSchemaState(UStateKeyInfoAsset* Asset, bool triggerProcessStateNow = false, bool clearPreviousState = false)
 	{
 		TSharedPtr<FJsonObject> OutJsonObject = MakeShared<FJsonObject>();
+		auto ShouldSkipNullableDefault = [](const FStateKeyInfo& InInfo) -> bool
+		{
+			if (!InInfo.bAllowNullValue)
+			{
+				return false;
+			}
+
+			if (InInfo.bDefaultValueIsNull)
+			{
+				return true;
+			}
+
+			switch (InInfo.GetDataTypeEnum())
+			{
+			case EStateKeyDataType::String:
+				return InInfo.DefaultStringValue.TrimStartAndEnd().IsEmpty();
+			case EStateKeyDataType::StringArray:
+				return InInfo.DefaultStringArray.Num() == 0;
+			case EStateKeyDataType::NumberArray:
+				return InInfo.DefaultNumberArray.Num() == 0;
+			default:
+				return false;
+			}
+		};
 
 		for (const auto& Pair : Asset->KeyInfos)
 		{
 			const FString& FullKey = Pair.Key;
 			const FStateKeyInfo& Info = Pair.Value;
+			if (ShouldSkipNullableDefault(Info))
+			{
+				continue;
+			}
 
 			TSharedPtr<FJsonValue> JsonValue;
 
@@ -696,11 +824,12 @@ public:
 	 * Set the current state in state manager to match the provided Schema asset. Note: Correct default values should be specified in the selected schema if using this
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Zerolight Omnistream State")
-	static void SetCurrentSchema(UStateKeyInfoAsset* Asset, bool triggerProcessStateNow = false, bool clearPreviousState = true)
+	static void SetCurrentSchema(UStateKeyInfoAsset* Asset, bool triggerProcessStateNow = false, bool clearPreviousState = true, bool updateSchemaState = true)
 	{
 		if (Asset != nullptr)
 		{
-			UpdateSchemaState(Asset, triggerProcessStateNow, clearPreviousState);
+			if(updateSchemaState)
+				UpdateSchemaState(Asset, triggerProcessStateNow, clearPreviousState);
 
 			UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->SetCurrentSchema(Asset);
 		}
@@ -793,7 +922,7 @@ public:
 				break;
 			}
 
-			if (Success && StateManager->DebugUIWidget && StateManager->DebugUIWidget->IsVisible())
+			if (Success && StateManager->DebugUIWidget && StateManager->DebugUIWidget->IsDebugUIPresented())
 				StateManager->DebugUIWidget->TriggerRefreshUI();
 
 		}
@@ -855,6 +984,11 @@ public:
 
 		}
 	}
+
+	UFUNCTION(BlueprintPure, Category = "Zerolight Omnistream State", meta = (BlueprintInternalUseOnly = "true"))
+	static FString MergeSchemaKeyIntoStateRequestJson(UStateKeyInfoAsset* Asset, FString KeyName,
+		FString InString, float InNumber, bool InBool, TArray<FString> InStringArray, TArray<float> InNumberArray, TArray<bool> InBoolArray,
+		FString ExistingJson);
 
 	UFUNCTION(BlueprintCallable, Category = "Zerolight Omnistream State", meta = (BlueprintInternalUseOnly = "true"))
 	static void GetRequestedSchemaValueSubKeys(UStateKeyInfoAsset* Asset, FString ParentKey, bool InstantConfirm,
@@ -924,7 +1058,7 @@ public:
 
 		Success = AnySuccess;
 
-		if (Success && StateManager->DebugUIWidget && StateManager->DebugUIWidget->IsVisible())
+		if (Success && StateManager->DebugUIWidget && StateManager->DebugUIWidget->IsDebugUIPresented())
 			StateManager->DebugUIWidget->TriggerRefreshUI();
 	}
 
@@ -992,7 +1126,7 @@ public:
 
 				OutObjectString = JsonString;
 
-				if (Success && StateManager->DebugUIWidget && StateManager->DebugUIWidget->IsVisible())
+				if (Success && StateManager->DebugUIWidget && StateManager->DebugUIWidget->IsDebugUIPresented())
 					StateManager->DebugUIWidget->TriggerRefreshUI();
 			}
 		}
@@ -1091,7 +1225,8 @@ public:
 						continue;
 					}
 				}
-				else
+				else if (!ZLRequestedSubKeyHelpers::TryReadEmptyArraySubKey(
+					StateManager, FullKey, true, InstantConfirm, Result, EntrySuccess))
 				{
 					continue;
 				}
@@ -1117,7 +1252,7 @@ public:
 
 		Success = AnySuccess;
 
-		if (Success && StateManager->DebugUIWidget && StateManager->DebugUIWidget->IsVisible())
+		if (Success && StateManager->DebugUIWidget && StateManager->DebugUIWidget->IsDebugUIPresented())
 			StateManager->DebugUIWidget->TriggerRefreshUI();
 	}
 
@@ -1214,7 +1349,8 @@ public:
 						continue;
 					}
 				}
-				else
+				else if (!ZLRequestedSubKeyHelpers::TryReadEmptyArraySubKey(
+					StateManager, FullKey, false, false, Result, EntrySuccess))
 				{
 					continue;
 				}

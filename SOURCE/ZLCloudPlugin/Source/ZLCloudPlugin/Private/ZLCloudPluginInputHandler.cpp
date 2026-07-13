@@ -53,6 +53,36 @@ const float g_NormalisedScale = 1.0f;
 
 namespace ZLCloudPlugin
 {
+	namespace
+	{
+		/**
+		 * Platform user for routed gamepad events.
+		 * Use Slate user 0 only: FSlateApplication gamepad routing can map a single primary user (TArray size 1).
+		 * Returning FPlatformUserId from a different Slate user index can make Slate resolve platform user → index -1 and crash (Array.h).
+		 */
+		FPlatformUserId GetZLPrimaryPlatformUserForGamepad()
+		{
+			if (const TSharedPtr<FSlateUser> SlateUser = FSlateApplication::Get().GetUser(0); SlateUser.IsValid())
+			{
+				const FPlatformUserId UserId = SlateUser->GetPlatformUserId();
+				if (UserId.IsValid())
+				{
+					return UserId;
+				}
+			}
+			return FPlatformUserId();
+		}
+
+		/**
+		 * Single local gamepad for cloud streaming: Slate often tracks one device in a size-1 table.
+		 * Non-zero FInputDeviceId from the wire can map to -1 and hit UserIndex / TArray asserts (SlateApplication.cpp).
+		 */
+		FInputDeviceId ZLGamepadInputDeviceIdForSlate()
+		{
+			return FInputDeviceId::CreateFromInternalId(0);
+		}
+	}
+
     FZLCloudPluginInputHandler::FZLCloudPluginInputHandler(TSharedPtr<FZLCloudPluginApplicationWrapper> InApplicationWrapper, const TSharedPtr<FGenericApplicationMessageHandler>& InTargetHandler)
     : TargetViewport(nullptr)
     , NumActiveTouches(0)
@@ -73,11 +103,9 @@ namespace ZLCloudPlugin
         RegisterMessageHandler("TouchMove", [this](TArray<FString>& message) { HandleOnTouchMoved(message); });
         RegisterMessageHandler("TouchEnd", [this](TArray<FString>& message) { HandleOnTouchEnded(message); });
 
-		/*
         RegisterMessageHandler("GamepadAnalog", [this](TArray<FString>& message) { HandleOnControllerAnalog(message); });
         RegisterMessageHandler("GamepadButtonPressed", [this](TArray<FString>& message) { HandleOnControllerButtonPressed(message); });
         RegisterMessageHandler("GamepadButtonReleased", [this](TArray<FString>& message) { HandleOnControllerButtonReleased(message); });
-		*/
 
         RegisterMessageHandler("MouseEnter", [this](TArray<FString>& message) { HandleOnMouseEnter(message); });
         RegisterMessageHandler("MouseLeave", [this](TArray<FString>& message) { HandleOnMouseLeave(message); });
@@ -157,6 +185,7 @@ namespace ZLCloudPlugin
             (*Message.Handler)(Message.Data);
         }
 
+		ProcessLatestAnalogInputFromThisTick();
     	BroadcastActiveTouchMoveEvents();
     }
 
@@ -299,6 +328,13 @@ namespace ZLCloudPlugin
 		return focusIsInput;
 	}
 
+	uint8 FZLCloudPluginInputHandler::NormalizePressedTouchForce(uint8 RawForce, uint8 Valid)
+	{
+		// On iOS devices without pressure support, browser Touch.force can legitimately be 0 for an active touch.
+		// UE's touch polling path treats force == 0 as "not pressed", so keep valid touches at a minimal non-zero value.
+		return (Valid != 0 && RawForce == 0) ? 1 : RawForce;
+	}
+
     void FZLCloudPluginInputHandler::HandleOnKeyDown(TArray<FString>& message)
     {
 		int KeyCode = FCString::Atoi(*message[1]);
@@ -392,6 +428,18 @@ namespace ZLCloudPlugin
 
 					FSlateApplication::Get().ProcessKeyCharEvent(CharEvent);
 				}
+				else if (inputChar.Len() == 1 && !bIsTabOrEnter)
+				{
+					// LibZL sends the typed character in message[3]; use it when FInputKeyManager has no char (e.g. Invalid key index).
+					FCharacterEvent CharEvent(
+						(TCHAR)inputChar[0],
+						modKeysState,
+						SlateApp.GetUserIndexForKeyboard(),
+						Repeat
+					);
+
+					FSlateApplication::Get().ProcessKeyCharEvent(CharEvent);
+				}
 				else
 				{
 					FKeyEvent KeyEvent(
@@ -421,8 +469,8 @@ namespace ZLCloudPlugin
 			uint16 PosX = FCString::Atoi(*message[offset + 2]);
 			uint16 PosY = FCString::Atoi(*message[offset + 3]);
 			uint8 TouchIndexV = FCString::Atoi(*message[offset + 4]);
-			uint8 Force = FCString::Atoi(*message[offset + 5]);
 			uint8 Valid = FCString::Atoi(*message[offset + 6]);
+			uint8 Force = NormalizePressedTouchForce(FCString::Atoi(*message[offset + 5]), Valid);
 
 
 			// If Touch is valid
@@ -487,8 +535,8 @@ namespace ZLCloudPlugin
 			uint16 PosX = FCString::Atoi(*message[offset + 2]);
 			uint16 PosY = FCString::Atoi(*message[offset + 3]);
 			uint8 TouchIndexV = FCString::Atoi(*message[offset + 4]);
-			uint8 Force = FCString::Atoi(*message[offset + 5]);
 			uint8 Valid = FCString::Atoi(*message[offset + 6]);
+			uint8 Force = NormalizePressedTouchForce(FCString::Atoi(*message[offset + 5]), Valid);
 
 			if (Valid != 0)
 			{
@@ -584,47 +632,144 @@ namespace ZLCloudPlugin
 		}
 	}
 
-	/*
+    // GamepadAnalog wire values: expect libZL (browser) to apply deadzone / scaling and to coalesce sends.
+    void FZLCloudPluginInputHandler::HandleOnControllerAnalog(TArray<FString>& message)
+    {
+    	if (!ensure(MessageHandler) || message.Num() < 4)
+    	{
+    		return;
+    	}
 
-	void FZLCloudPluginInputHandler::HandleOnControllerAnalog(FMemoryReader Ar)
+    	const uint8 ControllerIndex = static_cast<uint8>(FCString::Atoi(*message[1]));
+    	const uint8 AnalogAxis = static_cast<uint8>(FCString::Atoi(*message[2]));
+    	const double AnalogValue = FCString::Atod(*message[3]);
+
+    	FGamepadKeyNames::Type AxisName = ConvertAxisIndexToGamepadAxis(AnalogAxis);
+    	if (AxisName == FGamepadKeyNames::Invalid)
+    	{
+    		return;
+    	}
+
+    	const FPlatformUserId UserId = GetZLPrimaryPlatformUserForGamepad();
+    	if (!UserId.IsValid())
+    	{
+    		UE_LOG(LogZLCloudPluginInputHandler, Warning, TEXT("GAMEPAD_ANALOG: No valid FPlatformUserId; drop event (Axis=%s)."), *AxisName.ToString());
+    		return;
+    	}
+    	const FInputDeviceId ControllerId = ZLGamepadInputDeviceIdForSlate();
+
+    	FZLAnalogValue AnalogVal;
+    	AnalogVal.Value = AnalogValue;
+    	AnalogVal.bKeepUnlessZero = (AnalogAxis == 5 || AnalogAxis == 6 || AnalogAxis == 7);
+    	AnalogVal.bIsRepeat = false;
+
+    	AnalogEventsReceivedThisTick.FindOrAdd(ControllerId).FindOrAdd(AnalogAxis) = AnalogVal;
+
+    	UE_LOG(LogZLCloudPluginInputHandler, Verbose, TEXT("GAMEPAD_ANALOG (queued): ControllerId = %d; Axis = %s; Value = %.4f (wireController=%d)"), ControllerId.GetId(), *AxisName.ToString(), AnalogValue, static_cast<int32>(ControllerIndex));
+    }
+
+	void FZLCloudPluginInputHandler::ProcessLatestAnalogInputFromThisTick()
 	{
-		TPayloadThreeParam<uint8, uint8, double> Payload(Ar);
+		for (auto AnalogInputIt = AnalogEventsReceivedThisTick.CreateIterator(); AnalogInputIt; ++AnalogInputIt)
+		{
+			for (auto AxisIt = AnalogInputIt->Value.CreateIterator(); AxisIt; ++AxisIt)
+			{
+				const FInputDeviceId& ControllerId = AnalogInputIt->Key;
+				const uint8 AxisIndex = AxisIt->Key;
+				FZLAnalogValue AnalogValue = AxisIt->Value;
 
-		FInputDeviceId ControllerId = FInputDeviceId::CreateFromInternalId((int32)Payload.Param1);
-		FGamepadKeyNames::Type Button = ConvertAxisIndexToGamepadAxis(Payload.Param2);
-		float AnalogValue = (float)Payload.Param3;
-		FPlatformUserId UserId = IPlatformInputDeviceMapper::Get().GetPrimaryPlatformUser();
+				FGamepadKeyNames::Type AxisName = ConvertAxisIndexToGamepadAxis(AxisIndex);
+				if (AxisName == FGamepadKeyNames::Invalid)
+				{
+					AxisIt.RemoveCurrent();
+					continue;
+				}
 
-		UE_LOG(LogZLCloudPluginInputHandler, Verbose, TEXT("GAMEPAD_ANALOG: ControllerId = %d; KeyName = %s; AnalogValue = %.4f;"), ControllerId.GetId(), *Button.ToString(), AnalogValue);
-        MessageHandler->OnControllerAnalog(Button, UserId, ControllerId, AnalogValue);
+				FSlateApplication& SlateApplication = FSlateApplication::Get();
+				const FAnalogInputEvent AnalogInputEvent(
+					AxisName,
+					SlateApplication.GetPlatformApplication()->GetModifierKeys(),
+					ControllerId,
+					AnalogValue.bIsRepeat,
+					0,
+					0,
+					static_cast<float>(AnalogValue.Value),
+					0);
+
+				const bool bHandled = FSlateApplication::Get().ProcessAnalogInputEvent(AnalogInputEvent);
+				UE_LOG(LogZLCloudPluginInputHandler, Verbose, TEXT("GAMEPAD_ANALOG tick: ControllerId = %d; Axis = %s; Value = %.4f; Handled = %s"), ControllerId.GetId(), *AxisName.ToString(), AnalogValue.Value, bHandled ? TEXT("True") : TEXT("False"));
+
+				if (!AnalogValue.bKeepUnlessZero)
+				{
+					AxisIt.RemoveCurrent();
+				}
+				else if (AnalogValue.bKeepUnlessZero && AnalogValue.Value == 0.0)
+				{
+					AxisIt->Value.bIsRepeat = true;
+					AxisIt->Value.bKeepUnlessZero = false;
+				}
+				else
+				{
+					AxisIt->Value.bIsRepeat = true;
+				}
+			}
+		}
 	}
 
-    void FZLCloudPluginInputHandler::HandleOnControllerButtonPressed(FMemoryReader Ar)
+    void FZLCloudPluginInputHandler::HandleOnControllerButtonPressed(TArray<FString>& message)
     {
-        TPayloadThreeParam<uint8, uint8, uint8> Payload(Ar);
+    	if (!ensure(MessageHandler) || message.Num() < 4)
+    	{
+    		return;
+    	}
 
-        FInputDeviceId ControllerId = FInputDeviceId::CreateFromInternalId((int32) Payload.Param1);
-        FGamepadKeyNames::Type Button = ConvertButtonIndexToGamepadButton(Payload.Param2);
-        bool bIsRepeat = Payload.Param3 != 0;
-        FPlatformUserId UserId = IPlatformInputDeviceMapper::Get().GetPrimaryPlatformUser();
-        
-        UE_LOG(LogZLCloudPluginInputHandler, Verbose, TEXT("GAMEPAD_PRESSED: ControllerId = %d; KeyName = %s; IsRepeat = %s;"), ControllerId.GetId(), *Button.ToString(), bIsRepeat ? TEXT("True") : TEXT("False"));
-        MessageHandler->OnControllerButtonPressed(Button, UserId, ControllerId, bIsRepeat);
+    	const uint8 ControllerIndex = static_cast<uint8>(FCString::Atoi(*message[1]));
+    	const uint8 ButtonIndex = static_cast<uint8>(FCString::Atoi(*message[2]));
+    	const bool bIsRepeat = FCString::Atoi(*message[3]) != 0;
+
+    	FGamepadKeyNames::Type Button = ConvertButtonIndexToGamepadButton(ButtonIndex);
+    	if (Button == FGamepadKeyNames::Invalid)
+    	{
+    		return;
+    	}
+
+    	const FPlatformUserId UserId = GetZLPrimaryPlatformUserForGamepad();
+    	if (!UserId.IsValid())
+    	{
+    		UE_LOG(LogZLCloudPluginInputHandler, Warning, TEXT("GAMEPAD_PRESSED: No valid FPlatformUserId; drop event (Button=%s)."), *Button.ToString());
+    		return;
+    	}
+    	const FInputDeviceId ControllerId = ZLGamepadInputDeviceIdForSlate();
+    	UE_LOG(LogZLCloudPluginInputHandler, Verbose, TEXT("GAMEPAD_PRESSED: ControllerId = %d; KeyName = %s; Repeat = %s (wireController=%d)"), ControllerId.GetId(), *Button.ToString(), bIsRepeat ? TEXT("true") : TEXT("false"), static_cast<int32>(ControllerIndex));
+    	MessageHandler->OnControllerButtonPressed(Button, UserId, ControllerId, bIsRepeat);
     }
 
-    void FZLCloudPluginInputHandler::HandleOnControllerButtonReleased(FMemoryReader Ar)
+    void FZLCloudPluginInputHandler::HandleOnControllerButtonReleased(TArray<FString>& message)
     {
-        TPayloadTwoParam<uint8, uint8> Payload(Ar);
+    	if (!ensure(MessageHandler) || message.Num() < 3)
+    	{
+    		return;
+    	}
 
-        FInputDeviceId ControllerId = FInputDeviceId::CreateFromInternalId((int32) Payload.Param1);
-        FGamepadKeyNames::Type Button = ConvertButtonIndexToGamepadButton(Payload.Param2);
-        FPlatformUserId UserId = IPlatformInputDeviceMapper::Get().GetPrimaryPlatformUser();
+    	const uint8 ControllerIndex = static_cast<uint8>(FCString::Atoi(*message[1]));
+    	const uint8 ButtonIndex = static_cast<uint8>(FCString::Atoi(*message[2]));
 
-        UE_LOG(LogZLCloudPluginInputHandler, Verbose, TEXT("GAMEPAD_RELEASED: ControllerId = %d; KeyName = %s;"), ControllerId.GetId(), *Button.ToString());
-        MessageHandler->OnControllerButtonReleased(Button, UserId, ControllerId, false);
+    	FGamepadKeyNames::Type Button = ConvertButtonIndexToGamepadButton(ButtonIndex);
+    	if (Button == FGamepadKeyNames::Invalid)
+    	{
+    		return;
+    	}
+
+    	const FPlatformUserId UserId = GetZLPrimaryPlatformUserForGamepad();
+    	if (!UserId.IsValid())
+    	{
+    		UE_LOG(LogZLCloudPluginInputHandler, Warning, TEXT("GAMEPAD_RELEASED: No valid FPlatformUserId; drop event (Button=%s)."), *Button.ToString());
+    		return;
+    	}
+    	const FInputDeviceId ControllerId = ZLGamepadInputDeviceIdForSlate();
+    	UE_LOG(LogZLCloudPluginInputHandler, Verbose, TEXT("GAMEPAD_RELEASED: ControllerId = %d; KeyName = %s (wireController=%d)"), ControllerId.GetId(), *Button.ToString(), static_cast<int32>(ControllerIndex));
+    	MessageHandler->OnControllerButtonReleased(Button, UserId, ControllerId, false);
     }
-
-	*/
 
     /**
      * Mouse events
@@ -1237,6 +1382,12 @@ namespace ZLCloudPlugin
 			break;
 			case 6:
 			{
+				return FGamepadKeyNames::RightTriggerAnalog;
+			}
+			break;
+			case 7:
+			{
+				// Some wire / browser stacks use axis index 7 for an extra trigger channel
 				return FGamepadKeyNames::RightTriggerAnalog;
 			}
 			break;

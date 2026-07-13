@@ -76,6 +76,7 @@ namespace ZLCloudPlugin
 		void PopulateProtocol();
 		void GetOnDemandOverrideDefaults();
 		void SetOnDemandMode(bool onDemandMode) override;
+		void SetContentGenerationState(EZLContentGenerationState state) override;
 
 		void SetAppReadyToStream_Internal(bool readyToStream);
 

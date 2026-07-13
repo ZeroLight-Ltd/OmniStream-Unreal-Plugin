@@ -33,7 +33,6 @@ class ZLCLOUDPLUGIN_API UZLCloudPluginSettings : public UDeveloperSettings
 	GENERATED_UCLASS_BODY()
 
 public:
-
 	/**
 	 * Defines the startup GameMode asset where ZLCloudPlugin blueprint nodes are used.
 	 * This searches the blueprint in the editor and appends metadata used for determining app capabilities/startup behaviours
@@ -93,6 +92,19 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = Cloud, meta = (ClampMin = "10.0", UIMin = "10.0"))
 	float stateRequestTimeout = 20.0;
+
+
+	/**
+	 * Initial heartbeat timeout (in seconds) used for session startup. If left at default, this is omitted from runInfo.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = Cloud, meta = (ClampMin = "10.0", UIMin = "10.0"))
+	float initialHeartBeatTimeout = 260.0f;
+
+	/**
+	 * Heartbeat timeout (in seconds) used after startup. If left at default, this is omitted from runInfo.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = Cloud, meta = (ClampMin = "10.0", UIMin = "10.0"))
+	float heartBeatTimeout = 100.0f;
 
 	/**
 	 * Project override for the number of frames waited before capturing content generation screenshot jobs after state is matched. If set to 0, plugin defaults are used (8 frames by default, 32 frames by default for projects with r.RayTracing enabled.)
@@ -160,6 +172,12 @@ public:
 	*/
 	UPROPERTY(config, EditAnywhere, Category = BuildAndDeploy)
 	FString buildConfiguration = "Development";
+
+	/**
+	* Downloads FFmpeg when building, used for media on demand video generation.
+	*/
+	UPROPERTY(config, EditAnywhere, Category = BuildAndDeploy, meta = (DisplayName = "Download ffmpeg for media on demand videos"))
+	bool bDownloadFFmpegForMediaOnDemandVideos = false;
 
 	/**
 	* Specifies a filepath on-disk to a jpeg/png image that will be used as the thumbnail for the project in Portal

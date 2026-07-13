@@ -76,12 +76,14 @@ namespace ZLCloudPlugin
         virtual void HandleOnTouchStarted(TArray<FString>& message);
         virtual void HandleOnTouchMoved(TArray<FString>& message);
         virtual void HandleOnTouchEnded(TArray<FString>& message);
+		// UE touch state polling uses force as a pressed gate (force != 0), so clamp valid touches away from 0.
+		static uint8 NormalizePressedTouchForce(uint8 RawForce, uint8 Valid);
         /**
-         * Controller handling
+         * Controller handling (wire format matches ZLCloudPluginModule gamepad protocol: controllerId, index, value/repeat)
          */
-//        virtual void HandleOnControllerAnalog(FMemoryReader Ar);
-//        virtual void HandleOnControllerButtonPressed(FMemoryReader Ar);
-///        virtual void HandleOnControllerButtonReleased(FMemoryReader Ar);
+        virtual void HandleOnControllerAnalog(TArray<FString>& message);
+        virtual void HandleOnControllerButtonPressed(TArray<FString>& message);
+        virtual void HandleOnControllerButtonReleased(TArray<FString>& message);
         /**
          * Mouse handling
          */
@@ -131,6 +133,17 @@ namespace ZLCloudPlugin
 
 		// Sends Touch Moved events for any touch index which is currently down but wasn't already updated this frame
 		void BroadcastActiveTouchMoveEvents();
+
+		/** Queued analog applied once per tick via ProcessAnalogInputEvent; latest value per axis per tick; triggers use bKeepUnlessZero. */
+		struct FZLAnalogValue
+		{
+			double Value = 0.0;
+			bool bKeepUnlessZero = false;
+			bool bIsRepeat = false;
+		};
+
+		TMap<FInputDeviceId, TMap<uint8, FZLAnalogValue>> AnalogEventsReceivedThisTick;
+		void ProcessLatestAnalogInputFromThisTick();
 
 		void FindFocusedWidget();
 		bool FocusIsInputField(TSharedPtr<SWidget> &outFocusWidget);

@@ -84,18 +84,6 @@ public class ZLCloudPlugin : ModuleRules
 				"MovieRenderPipelineCore"
 		});
 		
-		// Add ZLPluginVersion dependency only if the plugin is available
-		string ZLPluginVersionModulePath = Path.Combine(ModuleDirectory, "..", "..", "..", "ZLStats", "Source", "ZLPluginVersion");
-		if (Directory.Exists(ZLPluginVersionModulePath))
-		{
-			PublicDependencyModuleNames.Add("ZLPluginVersion");
-			PublicDefinitions.Add("WITH_ZLPLUGINVERSION=1");
-		}
-		else
-		{
-			PublicDefinitions.Add("WITH_ZLPLUGINVERSION=0");
-		}
-
 		string DLSSModulePath = Path.Combine(ModuleDirectory, "..", "..", "..", "NvidiaDLSS", "DLSS");
 		string DLSSMRQModulePath = Path.Combine(ModuleDirectory, "..", "..", "..", "NvidiaDLSS", "DLSSMoviePipelineSupport");
 		if (Directory.Exists(DLSSModulePath) && Directory.Exists(DLSSMRQModulePath))
@@ -107,6 +95,26 @@ public class ZLCloudPlugin : ModuleRules
 		else
 		{
 			PublicDefinitions.Add("WITH_DLSS=0");
+		}
+
+		string ZLEditorToolsPath = Path.Combine(ModuleDirectory, "..", "..", "..", "ZLEditorTools");
+		if (Directory.Exists(ZLEditorToolsPath))
+		{
+			PublicDefinitions.Add("WITH_ZLEDITORTOOLS=1");
+		}
+		else
+		{
+			PublicDefinitions.Add("WITH_ZLEDITORTOOLS=0");
+		}
+
+		string DIMEConfiguratorPath = Path.Combine(ModuleDirectory, "..", "..", "..", "DIMEConfigurator");
+		if (Directory.Exists(DIMEConfiguratorPath))
+		{
+			PublicDefinitions.Add("WITH_DIMECONFIGURATOR=1");
+		}
+		else
+		{
+			PublicDefinitions.Add("WITH_DIMECONFIGURATOR=0");
 		}
 
 		if (version_5_1_or_newer)
@@ -187,7 +195,8 @@ public class ZLCloudPlugin : ModuleRules
 					"Portal",
 					"GameProjectGeneration",
 					"AssetRegistry",
-					"MovieRenderPipelineEditor"
+					"MovieRenderPipelineEditor",
+					"PythonScriptPlugin"
 			});
 
 			PublicIncludePaths.Add(Path.Combine(PluginDirectory, "Source/ThirdParty/Portal/include"));
@@ -227,5 +236,45 @@ public class ZLCloudPlugin : ModuleRules
 		{
 			PrivateIncludePaths.Add(Path.Combine(EngineDir, "Source/Runtime/VulkanRHI/Private/Linux"));
 		}
+
+		string FFmpegDirectory = Path.Combine(PluginDirectory, "Binaries/ThirdParty/ffmpeg");
+		string FFmpegExePath = Path.Combine(FFmpegDirectory, "ffmpeg.exe");
+		if (ShouldStageFFmpegForMediaOnDemandVideos(Target, FFmpegExePath))
+		{
+			// Register when ffmpeg is already present or when enabled in settings, so staging picks up
+			// ffmpeg downloaded after an earlier UBT run (e.g. OmniStream CI download before UAT -build -stage).
+			RuntimeDependencies.Add(FFmpegExePath);
+
+			if (Directory.Exists(FFmpegDirectory))
+			{
+				foreach (string LicenseFile in Directory.GetFiles(FFmpegDirectory, "LICENSE*", SearchOption.TopDirectoryOnly))
+				{
+					RuntimeDependencies.Add(LicenseFile);
+				}
+			}
+		}
+	}
+
+	private static bool ShouldStageFFmpegForMediaOnDemandVideos(ReadOnlyTargetRules Target, string FFmpegExePath)
+	{
+		if (File.Exists(FFmpegExePath))
+		{
+			return true;
+		}
+
+		if (Target.ProjectFile == null)
+		{
+			return false;
+		}
+
+		string SettingsIniPath = Path.Combine(Target.ProjectFile.Directory.FullName, "Config", "DefaultZLCloudPluginSettings.ini");
+		if (!File.Exists(SettingsIniPath))
+		{
+			return false;
+		}
+
+		string SettingsIniContent = File.ReadAllText(SettingsIniPath);
+		Match SettingMatch = Regex.Match(SettingsIniContent, @"bDownloadFFmpegForMediaOnDemandVideos\s*=\s*(True|False)", RegexOptions.IgnoreCase);
+		return SettingMatch.Success && SettingMatch.Groups[1].Value.Equals("True", StringComparison.OrdinalIgnoreCase);
 	}
 }
