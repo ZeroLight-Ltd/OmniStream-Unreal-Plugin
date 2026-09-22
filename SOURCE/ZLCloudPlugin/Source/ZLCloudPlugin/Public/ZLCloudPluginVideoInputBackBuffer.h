@@ -9,6 +9,9 @@
 #include "Widgets/SWindow.h"
 #include "RHI.h"
 #include "Delegates/IDelegateInstance.h"
+#if UNREAL_5_8_OR_NEWER
+#include "Slate/SlateViewportProvider.h"
+#endif
 
 /*
  * Use this if you want to send the UE backbuffer as video input.
@@ -22,7 +25,9 @@ public:
 private:
 	FZLCloudPluginVideoInputBackBuffer() = default;
 
-#if UNREAL_5_5_OR_NEWER
+#if UNREAL_5_8_OR_NEWER
+	void OnBackBufferReady(SWindow& SlateWindow, ISlateViewportProvider& ViewportProvider);
+#elif UNREAL_5_5_OR_NEWER
 	void OnBackBufferReady(SWindow& SlateWindow, const FTextureRHIRef& FrameBuffer);
 #else
 	void OnBackBufferReady(SWindow& SlateWindow, const FTexture2DRHIRef& FrameBuffer);

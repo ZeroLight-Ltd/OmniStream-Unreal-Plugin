@@ -69,6 +69,9 @@ struct FStateKeyInfo
     bool bAllowDynamicArraySize = false;
 
     UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
+    int32 MaximumAdditionalModelSlots = 0;
+
+    UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
     bool bAllowNullValue = false;
 
     UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
@@ -134,6 +137,48 @@ struct FDIMEModelMetadata
 	TArray<FDIMEModelCodeMetadata> Codes;
 };
 
+inline bool ZLNaturalStringLessThan(const FString& Left, const FString& Right)
+{
+	const TCHAR* A = *Left;
+	const TCHAR* B = *Right;
+
+	while (*A != 0 && *B != 0)
+	{
+		if (FChar::IsDigit(*A) && FChar::IsDigit(*B))
+		{
+			int64 NumA = 0;
+			int64 NumB = 0;
+			while (FChar::IsDigit(*A))
+			{
+				NumA = (NumA * 10) + (*A - TEXT('0'));
+				++A;
+			}
+			while (FChar::IsDigit(*B))
+			{
+				NumB = (NumB * 10) + (*B - TEXT('0'));
+				++B;
+			}
+			if (NumA != NumB)
+			{
+				return NumA < NumB;
+			}
+			continue;
+		}
+
+		const TCHAR CharA = FChar::ToLower(*A);
+		const TCHAR CharB = FChar::ToLower(*B);
+		if (CharA != CharB)
+		{
+			return CharA < CharB;
+		}
+
+		++A;
+		++B;
+	}
+
+	return *A == 0 && *B != 0;
+}
+
 UCLASS(BlueprintType)
 class ZLCLOUDPLUGIN_API UStateKeyInfoAsset : public UObject
 {
@@ -145,8 +190,6 @@ public:
 
 	UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
 	TArray<FDIMEModelMetadata> DimeModelData;
-
-    TSharedRef<FJsonObject> SerializeStateKeyAssetToJson();
 
     static TSharedRef<FJsonObject> BuildJsonSchemaCompliantFromKeyInfos(const TMap<FString, FStateKeyInfo>& InKeyInfos, const FString& SchemaTitle);
 

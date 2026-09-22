@@ -38,11 +38,15 @@ THIRD_PARTY_INCLUDES_END
 #endif
 
 #include "RenderingThread.h"
+#include "Misc/Paths.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 #include "RendererInterface.h"
 #include "Rendering/SlateRenderer.h"
 #include "Framework/Application/SlateApplication.h"
+#if UNREAL_5_8_OR_NEWER
+#include "Slate/SlateViewportProvider.h"
+#endif
 #include "Misc/ConfigCacheIni.h"
 #include "GameFramework/GameModeBase.h"
 #include "Dom/JsonObject.h"
@@ -236,6 +240,10 @@ void ZLCloudPlugin::FZLCloudPluginModule::OnEndPIE(bool bIsSimulating)
 /** IModuleInterface implementation */
 void ZLCloudPlugin::FZLCloudPluginModule::StartupModule()
 {
+	// NOTE: global shaders and their /Plugin/ZLCloudPlugin virtual shader path are registered by the
+	// ZLCloudPluginShaders module (LoadingPhase PostConfigInit), which must load before shader types
+	// are finalised. This module loads too late (PreDefault) to register global shaders itself.
+
 	// Register this plugin's version
 	REGISTER_ZL_PLUGIN_VERSION("ZLCloudPlugin", ZLCLOUDPLUGIN_VERSION);
 
@@ -486,7 +494,9 @@ void ZLCloudPlugin::FZLCloudPluginModule::ShutdownModule()
 	if (FSlateApplication::IsInitialized())
 	{
 		FSlateApplication::Get().GetRenderer()->OnBackBufferReadyToPresent().RemoveAll(this);
+#if !UNREAL_5_8_OR_NEWER
 		FSlateApplication::Get().GetRenderer()->OnPreResizeWindowBackBuffer().RemoveAll(this);
+#endif
 	}
 
 #if UNREAL_5_1_OR_NEWER
@@ -596,19 +606,38 @@ bool ZLCloudPlugin::FZLCloudPluginModule::IsPlatformCompatible() const
 
 void ZLCloudPlugin::FZLCloudPluginModule::UpdateViewport(FSceneViewport* Viewport)
 {
+#if !UNREAL_5_8_OR_NEWER
 	FRHIViewport* const ViewportRHI = Viewport->GetViewportRHI().GetReference();
+	(void)ViewportRHI;
+#else
+	(void)Viewport;
+#endif
 }
 
-#if UNREAL_5_5_OR_NEWER
-void ZLCloudPlugin::FZLCloudPluginModule::OnBackBufferReady_RenderThread(SWindow& SlateWindow, const FTextureRHIRef& BackBuffer)
-#else
-void ZLCloudPlugin::FZLCloudPluginModule::OnBackBufferReady_RenderThread(SWindow& SlateWindow, const FTexture2DRHIRef& BackBuffer)
-#endif
+#if UNREAL_5_8_OR_NEWER
+void ZLCloudPlugin::FZLCloudPluginModule::OnBackBufferReady_RenderThread(SWindow& SlateWindow, ISlateViewportProvider& ViewportProvider)
 {
 	check(IsInRenderingThread());
-
+	FRHITexture* BackBuffer = ViewportProvider.GetBackBufferResource();
+	if (!BackBuffer)
+	{
+		return;
+	}
+	CloudStream2::OnFrame(FTextureRHIRef(BackBuffer));
+}
+#elif UNREAL_5_5_OR_NEWER
+void ZLCloudPlugin::FZLCloudPluginModule::OnBackBufferReady_RenderThread(SWindow& SlateWindow, const FTextureRHIRef& BackBuffer)
+{
+	check(IsInRenderingThread());
 	CloudStream2::OnFrame(BackBuffer);
 }
+#else
+void ZLCloudPlugin::FZLCloudPluginModule::OnBackBufferReady_RenderThread(SWindow& SlateWindow, const FTexture2DRHIRef& BackBuffer)
+{
+	check(IsInRenderingThread());
+	CloudStream2::OnFrame(BackBuffer);
+}
+#endif
 
 TSharedPtr<IInputDevice> ZLCloudPlugin::FZLCloudPluginModule::CreateInputDevice(const TSharedRef<FGenericApplicationMessageHandler>& InMessageHandler)
 {
@@ -909,8 +938,15 @@ void ZLCloudPlugin::FZLCloudPluginModule::Tick(float DeltaTime)
 			if (ActiveLevelViewport.IsValid())
 			{
 				FLevelEditorViewportClient& LevelViewportClient = ActiveLevelViewport->GetLevelViewportClient();
+#if UNREAL_5_8_OR_NEWER
+				FSceneViewport* SceneViewport = LevelViewportClient.Viewport ? LevelViewportClient.Viewport->AsSceneViewport() : nullptr;
+#else
 				FSceneViewport* SceneViewport = static_cast<FSceneViewport*>(LevelViewportClient.Viewport);
-				TargetViewport = SceneViewport->GetViewportWidget();
+#endif
+				if (SceneViewport)
+				{
+					TargetViewport = SceneViewport->GetViewportWidget();
+				}
 			}
 		}
 	}

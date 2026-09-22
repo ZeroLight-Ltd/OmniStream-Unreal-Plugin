@@ -1242,30 +1242,6 @@ void UZLK2Node_SetCurrentStateValue::ExpandNode(FKismetCompilerContext& Compiler
 	if (dataType == EStateKeyDataType::Invalid)
 		dataType = GetDataType();
 
-	UK2Node_MakeArray* MakeStrArrayNode = CompilerContext.SpawnIntermediateNode<UK2Node_MakeArray>(this, SourceGraph);
-	MakeStrArrayNode->AllocateDefaultPins();
-	UK2Node_MakeArray* MakeNumArrayNode = CompilerContext.SpawnIntermediateNode<UK2Node_MakeArray>(this, SourceGraph);
-	MakeNumArrayNode->AllocateDefaultPins();
-	UK2Node_MakeArray* MakeBoolArrayNode = CompilerContext.SpawnIntermediateNode<UK2Node_MakeArray>(this, SourceGraph);
-	MakeBoolArrayNode->AllocateDefaultPins();
-	UEdGraphPin* InputStrArray = CallNode->FindPin(TEXT("InStringArray"));
-	UEdGraphPin* InputNumArray = CallNode->FindPin(TEXT("InNumberArray"));
-	UEdGraphPin* InputBoolArray = CallNode->FindPin(TEXT("InBoolArray"));
-
-	UEdGraphPin* StrArrayOutPin = MakeStrArrayNode->FindPin(TEXT("Array"), EGPD_Output);
-	UEdGraphPin* NumArrayOutPin = MakeNumArrayNode->FindPin(TEXT("Array"), EGPD_Output);
-	UEdGraphPin* BoolArrayOutPin = MakeBoolArrayNode->FindPin(TEXT("Array"), EGPD_Output);
-	const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
-
-	K2Schema->TryCreateConnection(StrArrayOutPin, InputStrArray);
-	K2Schema->TryCreateConnection(NumArrayOutPin, InputNumArray);
-	K2Schema->TryCreateConnection(BoolArrayOutPin, InputBoolArray);
-
-	//CompilerContext.MovePinLinksToIntermediate(*ArrayOutPin, *InputStrArray);
-	//CompilerContext.MovePinLinksToIntermediate(*ArrayOutPin, *InputNumArray);
-	//CompilerContext.MovePinLinksToIntermediate(*ArrayOutPin, *InputBoolArray);
-
-
 	switch (dataType)
 	{
 	case EStateKeyDataType::String:
@@ -1292,6 +1268,36 @@ void UZLK2Node_SetCurrentStateValue::ExpandNode(FKismetCompilerContext& Compiler
 		return;
 	}
 
+	// Empty MakeArray stubs for unused array params only. Pre-wiring the target
+	// array pin blocks MovePinLinksToIntermediate ("Replace existing input connections").
+	UK2Node_MakeArray* MakeStrArrayNode = CompilerContext.SpawnIntermediateNode<UK2Node_MakeArray>(this, SourceGraph);
+	MakeStrArrayNode->AllocateDefaultPins();
+	UK2Node_MakeArray* MakeNumArrayNode = CompilerContext.SpawnIntermediateNode<UK2Node_MakeArray>(this, SourceGraph);
+	MakeNumArrayNode->AllocateDefaultPins();
+	UK2Node_MakeArray* MakeBoolArrayNode = CompilerContext.SpawnIntermediateNode<UK2Node_MakeArray>(this, SourceGraph);
+	MakeBoolArrayNode->AllocateDefaultPins();
+	UEdGraphPin* InputStrArray = CallNode->FindPin(TEXT("InStringArray"));
+	UEdGraphPin* InputNumArray = CallNode->FindPin(TEXT("InNumberArray"));
+	UEdGraphPin* InputBoolArray = CallNode->FindPin(TEXT("InBoolArray"));
+
+	UEdGraphPin* StrArrayOutPin = MakeStrArrayNode->FindPin(TEXT("Array"), EGPD_Output);
+	UEdGraphPin* NumArrayOutPin = MakeNumArrayNode->FindPin(TEXT("Array"), EGPD_Output);
+	UEdGraphPin* BoolArrayOutPin = MakeBoolArrayNode->FindPin(TEXT("Array"), EGPD_Output);
+	const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
+
+	if (dataType != EStateKeyDataType::StringArray)
+	{
+		K2Schema->TryCreateConnection(StrArrayOutPin, InputStrArray);
+	}
+	if (dataType != EStateKeyDataType::NumberArray)
+	{
+		K2Schema->TryCreateConnection(NumArrayOutPin, InputNumArray);
+	}
+	if (dataType != EStateKeyDataType::BoolArray)
+	{
+		K2Schema->TryCreateConnection(BoolArrayOutPin, InputBoolArray);
+	}
+
 	UEdGraphPin* execTopPin = GetExecPin();
 	UEdGraphPin* execInternalPin = CallNode->GetExecPin();
 
@@ -1303,7 +1309,23 @@ void UZLK2Node_SetCurrentStateValue::ExpandNode(FKismetCompilerContext& Compiler
 
 	if (InputPin && ValuePin)
 	{
-		CompilerContext.MovePinLinksToIntermediate(*FindPin(ReturnPinName), *CallNode->FindPin(*TargetInputPin));
+		CompilerContext.MovePinLinksToIntermediate(*ValuePin, *InputPin);
+
+		if (InputPin->LinkedTo.Num() == 0)
+		{
+			if (dataType == EStateKeyDataType::StringArray)
+			{
+				K2Schema->TryCreateConnection(StrArrayOutPin, InputStrArray);
+			}
+			else if (dataType == EStateKeyDataType::NumberArray)
+			{
+				K2Schema->TryCreateConnection(NumArrayOutPin, InputNumArray);
+			}
+			else if (dataType == EStateKeyDataType::BoolArray)
+			{
+				K2Schema->TryCreateConnection(BoolArrayOutPin, InputBoolArray);
+			}
+		}
 	}
 
 	CompilerContext.MovePinLinksToIntermediate(*execTopPin, *execInternalPin);
@@ -1442,23 +1464,50 @@ FText UZLK2Node_PerformStateRequest::GetTooltipText() const
 	return LOCTEXT(
 		"PerformStateRequestTooltip",
 		"Build a JSON state object from multiple schema keys and broadcast it on OnRecieveData (same path as remote state). "
-		"Right-click the node (not a pin) and use the State Request menu to add/remove slots, or edit Num Key Slots in the Details panel if your editor shows graph node properties.");
+		"Right-click the node to add/remove the last slot, or right-click a Key/Value pin to remove that specific slot. "
+		"You can also edit Num Key Slots in the Details panel if your editor shows graph node properties.");
 }
 
 void UZLK2Node_PerformStateRequest::GetNodeContextMenuActions(UToolMenu* Menu, UGraphNodeContextMenuContext* Context) const
 {
 	Super::GetNodeContextMenuActions(Menu, Context);
 
-	if (!Context || Context->bIsDebugging || Context->Pin != nullptr)
+	if (!Context || Context->bIsDebugging)
 	{
+		return;
+	}
+
+	UZLK2Node_PerformStateRequest* MutableThis = const_cast<UZLK2Node_PerformStateRequest*>(this);
+
+	if (Context->Pin != nullptr)
+	{
+		const FString PinStr = Context->Pin->PinName.ToString();
+		int32 SlotIdx = INDEX_NONE;
+		const bool bIsKeyOrValuePin =
+			ParseSlotIndexFromPinName(PinStr, TEXT("Key_"), SlotIdx)
+			|| ParseSlotIndexFromPinName(PinStr, TEXT("Value_"), SlotIdx);
+
+		if (bIsKeyOrValuePin && SlotIdx >= 0)
+		{
+			FToolMenuSection& PinSection = Menu->AddSection(
+				"ZLPerformStateRequestPin",
+				LOCTEXT("ZLPerformStateRequestSection", "State Request"));
+
+			PinSection.AddMenuEntry(
+				"ZLRemoveThisKeyCtx",
+				LOCTEXT("ZLRemoveThisKeyCtx", "Remove this key from request"),
+				LOCTEXT("ZLRemoveThisKeyCtxTooltip", "Removes this schema key/value slot. Later slots shift up. At least one slot remains."),
+				FSlateIcon(),
+				FUIAction(
+					FExecuteAction::CreateUObject(MutableThis, &UZLK2Node_PerformStateRequest::RemoveKeySlotFromRequest, SlotIdx),
+					FCanExecuteAction::CreateUObject(MutableThis, &UZLK2Node_PerformStateRequest::CanRemoveKeySlot, SlotIdx)));
+		}
 		return;
 	}
 
 	FToolMenuSection& Section = Menu->AddSection(
 		"ZLPerformStateRequest",
 		LOCTEXT("ZLPerformStateRequestSection", "State Request"));
-
-	UZLK2Node_PerformStateRequest* MutableThis = const_cast<UZLK2Node_PerformStateRequest*>(this);
 
 	Section.AddMenuEntry(
 		"ZLAddKeyToRequestCtx",
@@ -1529,15 +1578,53 @@ void UZLK2Node_PerformStateRequest::AddKeyToRequest()
 	}
 }
 
+bool UZLK2Node_PerformStateRequest::CanRemoveKeySlot(int32 SlotIndex) const
+{
+	return NumKeySlots > 1 && SlotIndex >= 0 && SlotIndex < NumKeySlots;
+}
+
 void UZLK2Node_PerformStateRequest::RemoveLastKeyFromRequest()
 {
-	if (NumKeySlots <= 1)
+	RemoveKeySlotFromRequest(NumKeySlots - 1);
+}
+
+void UZLK2Node_PerformStateRequest::RemoveKeySlotFromRequest(int32 SlotIndex)
+{
+	if (!CanRemoveKeySlot(SlotIndex))
 	{
 		return;
 	}
-	OrphanedPinSaveMode = ESaveOrphanPinMode::SaveNone;
-	NumKeySlots--;
+
 	Modify();
+	OrphanedPinSaveMode = ESaveOrphanPinMode::SaveNone;
+
+	auto RemoveSlotPin = [this](const FName PinName)
+	{
+		if (UEdGraphPin* Pin = FindPin(PinName, EGPD_Input))
+		{
+			Pin->BreakAllPinLinks();
+			RemovePin(Pin);
+		}
+	};
+
+	RemoveSlotPin(*FString::Printf(TEXT("Key_%d"), SlotIndex));
+	RemoveSlotPin(*FString::Printf(TEXT("Value_%d"), SlotIndex));
+
+	// Shift later slots down so ReconstructNode can rematch defaults/links by pin name.
+	for (int32 i = SlotIndex + 1; i < NumKeySlots; ++i)
+	{
+		const int32 NewIndex = i - 1;
+		if (UEdGraphPin* KeyPin = FindPin(*FString::Printf(TEXT("Key_%d"), i), EGPD_Input))
+		{
+			KeyPin->PinName = *FString::Printf(TEXT("Key_%d"), NewIndex);
+		}
+		if (UEdGraphPin* ValuePin = FindPin(*FString::Printf(TEXT("Value_%d"), i), EGPD_Input))
+		{
+			ValuePin->PinName = *FString::Printf(TEXT("Value_%d"), NewIndex);
+		}
+	}
+
+	NumKeySlots--;
 	ReconstructNode();
 	ScheduleVisualRefreshAfterSlotChange();
 	if (UBlueprint* BP = GetBlueprint())
@@ -1920,20 +2007,6 @@ void UZLK2Node_PerformStateRequest::ExpandNode(FKismetCompilerContext& CompilerC
 		}
 		JsonAccumulator = MergeCall->GetReturnValuePin();
 
-		UK2Node_MakeArray* MakeStrArrayNode = CompilerContext.SpawnIntermediateNode<UK2Node_MakeArray>(this, SourceGraph);
-		MakeStrArrayNode->AllocateDefaultPins();
-		UK2Node_MakeArray* MakeNumArrayNode = CompilerContext.SpawnIntermediateNode<UK2Node_MakeArray>(this, SourceGraph);
-		MakeNumArrayNode->AllocateDefaultPins();
-		UK2Node_MakeArray* MakeBoolArrayNode = CompilerContext.SpawnIntermediateNode<UK2Node_MakeArray>(this, SourceGraph);
-		MakeBoolArrayNode->AllocateDefaultPins();
-
-		UEdGraphPin* InputStrArray = MergeCall->FindPin(TEXT("InStringArray"));
-		UEdGraphPin* InputNumArray = MergeCall->FindPin(TEXT("InNumberArray"));
-		UEdGraphPin* InputBoolArray = MergeCall->FindPin(TEXT("InBoolArray"));
-		K2Schema->TryCreateConnection(MakeStrArrayNode->GetOutputPin(), InputStrArray);
-		K2Schema->TryCreateConnection(MakeNumArrayNode->GetOutputPin(), InputNumArray);
-		K2Schema->TryCreateConnection(MakeBoolArrayNode->GetOutputPin(), InputBoolArray);
-
 		EStateKeyDataType dataType = EStateKeyDataType::Invalid;
 		if (UserAssetPin && UserAssetPin->DefaultObject)
 		{
@@ -1979,6 +2052,32 @@ void UZLK2Node_PerformStateRequest::ExpandNode(FKismetCompilerContext& CompilerC
 			return;
 		}
 
+		// Empty MakeArray stubs satisfy unused array params. Do NOT pre-wire the
+		// target array pin — MovePinLinksToIntermediate will fail with
+		// "Replace existing input connections" if that pin already has a link.
+		UK2Node_MakeArray* MakeStrArrayNode = CompilerContext.SpawnIntermediateNode<UK2Node_MakeArray>(this, SourceGraph);
+		MakeStrArrayNode->AllocateDefaultPins();
+		UK2Node_MakeArray* MakeNumArrayNode = CompilerContext.SpawnIntermediateNode<UK2Node_MakeArray>(this, SourceGraph);
+		MakeNumArrayNode->AllocateDefaultPins();
+		UK2Node_MakeArray* MakeBoolArrayNode = CompilerContext.SpawnIntermediateNode<UK2Node_MakeArray>(this, SourceGraph);
+		MakeBoolArrayNode->AllocateDefaultPins();
+
+		UEdGraphPin* InputStrArray = MergeCall->FindPin(TEXT("InStringArray"));
+		UEdGraphPin* InputNumArray = MergeCall->FindPin(TEXT("InNumberArray"));
+		UEdGraphPin* InputBoolArray = MergeCall->FindPin(TEXT("InBoolArray"));
+		if (dataType != EStateKeyDataType::StringArray)
+		{
+			K2Schema->TryCreateConnection(MakeStrArrayNode->GetOutputPin(), InputStrArray);
+		}
+		if (dataType != EStateKeyDataType::NumberArray)
+		{
+			K2Schema->TryCreateConnection(MakeNumArrayNode->GetOutputPin(), InputNumArray);
+		}
+		if (dataType != EStateKeyDataType::BoolArray)
+		{
+			K2Schema->TryCreateConnection(MakeBoolArrayNode->GetOutputPin(), InputBoolArray);
+		}
+
 		const FName KeyPinName(*FString::Printf(TEXT("Key_%d"), Slot));
 		const FName ValuePinName(*FString::Printf(TEXT("Value_%d"), Slot));
 		UEdGraphPin* UserKeyPin = FindPin(KeyPinName, EGPD_Input);
@@ -1994,23 +2093,29 @@ void UZLK2Node_PerformStateRequest::ExpandNode(FKismetCompilerContext& CompilerC
 
 		CompilerContext.MovePinLinksToIntermediate(*UserKeyPin, *MergeKeyPin);
 
-		if (TargetInputPin != TEXT("InStringArray") && TargetInputPin != TEXT("InNumberArray") && TargetInputPin != TEXT("InBoolArray"))
+		if (!UserValuePin || !MergeValueIn)
 		{
-			if (!UserValuePin || !MergeValueIn)
-			{
-				CompilerContext.MessageLog.Error(TEXT("Perform State Request: missing value pin."), this);
-				return;
-			}
-			CompilerContext.MovePinLinksToIntermediate(*UserValuePin, *MergeValueIn);
+			CompilerContext.MessageLog.Error(TEXT("Perform State Request: missing value pin."), this);
+			return;
 		}
-		else
+
+		CompilerContext.MovePinLinksToIntermediate(*UserValuePin, *MergeValueIn);
+
+		// If the user left an array value unconnected, keep an empty MakeArray stub.
+		if (MergeValueIn->LinkedTo.Num() == 0)
 		{
-			if (!UserValuePin || !MergeValueIn)
+			if (dataType == EStateKeyDataType::StringArray)
 			{
-				CompilerContext.MessageLog.Error(TEXT("Perform State Request: missing array value pin."), this);
-				return;
+				K2Schema->TryCreateConnection(MakeStrArrayNode->GetOutputPin(), InputStrArray);
 			}
-			CompilerContext.MovePinLinksToIntermediate(*UserValuePin, *MergeValueIn);
+			else if (dataType == EStateKeyDataType::NumberArray)
+			{
+				K2Schema->TryCreateConnection(MakeNumArrayNode->GetOutputPin(), InputNumArray);
+			}
+			else if (dataType == EStateKeyDataType::BoolArray)
+			{
+				K2Schema->TryCreateConnection(MakeBoolArrayNode->GetOutputPin(), InputBoolArray);
+			}
 		}
 	}
 

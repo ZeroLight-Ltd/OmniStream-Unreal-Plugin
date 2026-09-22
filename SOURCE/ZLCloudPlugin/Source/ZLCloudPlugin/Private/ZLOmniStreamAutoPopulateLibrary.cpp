@@ -1,6 +1,7 @@
 // Copyright ZeroLight ltd. All Rights Reserved.
 
 #include "ZLOmniStreamAutoPopulateLibrary.h"
+#include "ZLCloudPluginVersion.h"
 
 #if WITH_EDITOR
 #include "ZLStateEditorV2.h"
@@ -33,6 +34,18 @@ namespace ZLOmniStreamAutoPopulateLibraryInternal
 			CheckboxOut.Label = CheckboxDef.Label;
 			CheckboxOut.bDefaultChecked = CheckboxDef.bDefaultChecked;
 			Out.Checkboxes.Add(MoveTemp(CheckboxOut));
+		}
+
+		for (const FZLAutoPopulateAdvancedNumberDef& NumberDef : Source.NumberInputs)
+		{
+			FZLAutoPopulateAdvancedNumberDesc NumberOut;
+			NumberOut.Id = NumberDef.Id;
+			NumberOut.Label = NumberDef.Label;
+			NumberOut.DefaultValue = NumberDef.DefaultValue;
+			NumberOut.MinValue = NumberDef.MinValue;
+			NumberOut.MaxValue = NumberDef.MaxValue;
+			NumberOut.VisibleWhenCheckboxId = NumberDef.VisibleWhenCheckboxId;
+			Out.NumberInputs.Add(MoveTemp(NumberOut));
 		}
 
 		for (const FZLAutoPopulateAdvancedLevelSelectorDef& SelectorDef : Source.LevelSelectors)
@@ -103,7 +116,7 @@ namespace ZLOmniStreamAutoPopulateLibraryInternal
 			return Parsed;
 		}
 
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& OptionPair : RootObject->Values)
+		for (const auto& OptionPair : RootObject->Values)
 		{
 			if (!OptionPair.Value.IsValid() || OptionPair.Value->Type != EJson::Object)
 			{
@@ -120,11 +133,23 @@ namespace ZLOmniStreamAutoPopulateLibraryInternal
 			const TSharedPtr<FJsonObject>* CheckboxesObject = nullptr;
 			if (OptionObject->TryGetObjectField(TEXT("checkboxes"), CheckboxesObject) && CheckboxesObject && CheckboxesObject->IsValid())
 			{
-				for (const TPair<FString, TSharedPtr<FJsonValue>>& CheckboxPair : (*CheckboxesObject)->Values)
+				for (const auto& CheckboxPair : (*CheckboxesObject)->Values)
 				{
 					if (CheckboxPair.Value.IsValid() && CheckboxPair.Value->Type == EJson::Boolean)
 					{
-						OptionSettings.CheckboxValues.Add(CheckboxPair.Key, CheckboxPair.Value->AsBool());
+						OptionSettings.CheckboxValues.Add(ZL_JSON_KEY_TO_FSTRING(CheckboxPair.Key), CheckboxPair.Value->AsBool());
+					}
+				}
+			}
+
+			const TSharedPtr<FJsonObject>* NumberInputsObject = nullptr;
+			if (OptionObject->TryGetObjectField(TEXT("numberInputs"), NumberInputsObject) && NumberInputsObject && NumberInputsObject->IsValid())
+			{
+				for (const auto& NumberPair : (*NumberInputsObject)->Values)
+				{
+					if (NumberPair.Value.IsValid() && NumberPair.Value->Type == EJson::Number)
+					{
+						OptionSettings.NumberValues.Add(ZL_JSON_KEY_TO_FSTRING(NumberPair.Key), static_cast<int32>(NumberPair.Value->AsNumber()));
 					}
 				}
 			}
@@ -132,7 +157,7 @@ namespace ZLOmniStreamAutoPopulateLibraryInternal
 			const TSharedPtr<FJsonObject>* LevelSelectionsObject = nullptr;
 			if (OptionObject->TryGetObjectField(TEXT("levelSelections"), LevelSelectionsObject) && LevelSelectionsObject && LevelSelectionsObject->IsValid())
 			{
-				for (const TPair<FString, TSharedPtr<FJsonValue>>& SelectorPair : (*LevelSelectionsObject)->Values)
+				for (const auto& SelectorPair : (*LevelSelectionsObject)->Values)
 				{
 					if (!SelectorPair.Value.IsValid() || SelectorPair.Value->Type != EJson::Array)
 					{
@@ -147,14 +172,14 @@ namespace ZLOmniStreamAutoPopulateLibraryInternal
 							SelectedLevels.AddUnique(LevelValue->AsString());
 						}
 					}
-					OptionSettings.LevelSelectionsBySelectorId.Add(SelectorPair.Key, MoveTemp(SelectedLevels));
+					OptionSettings.LevelSelectionsBySelectorId.Add(ZL_JSON_KEY_TO_FSTRING(SelectorPair.Key), MoveTemp(SelectedLevels));
 				}
 			}
 
 			const TSharedPtr<FJsonObject>* ActorSelectionsObject = nullptr;
 			if (OptionObject->TryGetObjectField(TEXT("actorSelections"), ActorSelectionsObject) && ActorSelectionsObject && ActorSelectionsObject->IsValid())
 			{
-				for (const TPair<FString, TSharedPtr<FJsonValue>>& SelectorPair : (*ActorSelectionsObject)->Values)
+				for (const auto& SelectorPair : (*ActorSelectionsObject)->Values)
 				{
 					if (!SelectorPair.Value.IsValid() || SelectorPair.Value->Type != EJson::Array)
 					{
@@ -169,11 +194,11 @@ namespace ZLOmniStreamAutoPopulateLibraryInternal
 							SelectedActors.AddUnique(ActorValue->AsString());
 						}
 					}
-					OptionSettings.ActorSelectionsBySelectorId.Add(SelectorPair.Key, MoveTemp(SelectedActors));
+					OptionSettings.ActorSelectionsBySelectorId.Add(ZL_JSON_KEY_TO_FSTRING(SelectorPair.Key), MoveTemp(SelectedActors));
 				}
 			}
 
-			Parsed.Add(OptionPair.Key, MoveTemp(OptionSettings));
+			Parsed.Add(ZL_JSON_KEY_TO_FSTRING(OptionPair.Key), MoveTemp(OptionSettings));
 		}
 
 		return Parsed;
@@ -276,6 +301,29 @@ bool UZLOmniStreamAutoPopulateLibrary::SetSelectedAutoPopulateOptions(const TArr
 	if (TSharedPtr<FZLStateEditorV2> Live = FZLStateEditorV2::GetLiveInstance().Pin())
 	{
 		Live->SetSelectedAutoPopulateOptions(SelectedOptions);
+		return true;
+	}
+#endif
+	return false;
+}
+
+FString UZLOmniStreamAutoPopulateLibrary::GetAdvancedAutoPopulateSettingsJson()
+{
+#if WITH_EDITOR
+	if (TSharedPtr<FZLStateEditorV2> Live = FZLStateEditorV2::GetLiveInstance().Pin())
+	{
+		return Live->GetAdvancedAutoPopulateSettingsJson();
+	}
+#endif
+	return TEXT("");
+}
+
+bool UZLOmniStreamAutoPopulateLibrary::SetAdvancedAutoPopulateSettingsJson(const FString& AdvancedSettingsJson)
+{
+#if WITH_EDITOR
+	if (TSharedPtr<FZLStateEditorV2> Live = FZLStateEditorV2::GetLiveInstance().Pin())
+	{
+		Live->SetAdvancedAutoPopulateSettingsJson(AdvancedSettingsJson);
 		return true;
 	}
 #endif

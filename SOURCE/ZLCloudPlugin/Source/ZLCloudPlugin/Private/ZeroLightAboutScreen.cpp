@@ -242,8 +242,7 @@ FReply SZeroLightAboutScreen::OnGetLogsZip()
 		FString editorLogPath = FPaths::Combine(projectDir, "Saved", "Logs", editorLogName); //ProjectDir/Saved/Logs/[ProjectName].log
 		FString tempEditorLogPath = FPaths::Combine(selectedFolderPath, editorLogName);
 
-		FString editorExecutablePath = FPaths::ConvertRelativePathToFull(FPaths::GetPath(FPlatformProcess::ExecutablePath()));
-		FString portalLogPath = FPaths::Combine(editorExecutablePath, "portalcli.log"); //Example D:\Unreal\UE_5.3\Engine\Binaries\Win64
+		FString portalLogPath = FPaths::Combine(projectDir, "Saved", "Logs", "portalcli.log"); //ProjectDir/Saved/Logs/portalcli.log
 		FString tempPortalLogPath = FPaths::Combine(selectedFolderPath, "portalcli.log");
 
 		auto copyAndZipLogFile = [](const FString logPath, const FString logDest, FZipArchiveWriter* zipWriter) {

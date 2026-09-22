@@ -1,0 +1,9 @@
+{
+	"BuildId": "55116800",
+	"Modules": 
+	{
+		"ZLCloudPlugin": "UnrealEditor-ZLCloudPlugin.dll",
+		"ZLCloudPluginEditor": "UnrealEditor-ZLCloudPluginEditor.dll",
+		"ZLCloudPluginShaders": "UnrealEditor-ZLCloudPluginShaders.dll"
+	}
+}

@@ -1,6 +1,7 @@
 #include "ZLSpotLightDataDrivenUIManager.h"
 #include "Json.h"
 #include "JsonObjectConverter.h"
+#include "ZLCloudPluginVersion.h"
 
 // Initialize static member
 TMap<FString, UZLSpotLightDataDrivenUIManager*> UZLSpotLightDataDrivenUIManager::RegisteredManagers = TMap<FString, UZLSpotLightDataDrivenUIManager*>();
@@ -89,7 +90,7 @@ FString UZLSpotLightDataDrivenUIManager::SyncDataToServer(bool bSimpleFormat)
                     TSharedPtr<FJsonObject> NewPropertyObject = MakeShared<FJsonObject>();
 
                     // Set common fields
-                    NewPropertyObject->SetStringField(TEXT("DisplayName"), Param.Key);
+                    NewPropertyObject->SetStringField(TEXT("DisplayName"), ZL_JSON_KEY_TO_FSTRING(Param.Key));
                     NewPropertyObject->SetStringField(TEXT("Tooltip"), TEXT(""));
                     NewPropertyObject->SetArrayField(TEXT("PossibleValues"), TArray<TSharedPtr<FJsonValue>>());
                     NewPropertyObject->SetStringField(TEXT("Region"), TEXT(""));
@@ -230,7 +231,7 @@ void UZLSpotLightDataDrivenUIManager::ReceiveDataFromServer(const FString& Serve
             for (const auto& Effect : ZLCertifiedEffects->Values)
             {
                 // Strip "ZLCert_" prefix from the effect name
-                FString ManagerName = Effect.Key;
+                FString ManagerName = ZL_JSON_KEY_TO_FSTRING(Effect.Key);
                 if (ManagerName.StartsWith(TEXT("ZLCert_")))
                 {
                     ManagerName.RightChopInline(7); // Remove "ZLCert_"
@@ -251,7 +252,7 @@ void UZLSpotLightDataDrivenUIManager::ReceiveDataFromServer(const FString& Serve
                             for (const auto& Prop : (*UpdateObject)->Values)
                             {
                                 // Get the existing property
-                                const TSharedPtr<FJsonObject> ExistingProp = ExistingParams->GetObjectField(Prop.Key);
+                                const TSharedPtr<FJsonObject> ExistingProp = ExistingParams->GetObjectField(ZL_JSON_KEY_TO_FSTRING(Prop.Key));
                                 if (ExistingProp.IsValid())
                                 {
                                     FString Type = ExistingProp->GetStringField(TEXT("type"));

@@ -8,12 +8,17 @@
 #include "EditorZLCloudPluginSettings.h"
 #include "HAL/IConsoleManager.h"
 #include "ZLPluginVersionRegistry.h"
+#include "ZLCloudPluginVersion.h"
+#include "IZLCloudPluginInputHandler.h"
 
 #if WITH_EDITOR
 #include "Framework/Docking/TabManager.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Widgets/Docking/SDockTab.h"
+#include "Widgets/SWindow.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/Layout/SSplitter.h"
 #include "Widgets/Input/SSpinBox.h"
 #include "Widgets/Text/STextBlock.h"
 #include "SlateBasics.h"
@@ -25,8 +30,99 @@
 
 UZLCloudPluginStateManager* UZLCloudPluginStateManager::Singleton = nullptr;
 
+static FString MakeStateKeyTraceName(const FString& FieldName)
+{
+	return FString::Printf(TEXT("StateKey:%s"), *FieldName);
+}
+
+static TArray<FString> GetJsonLeafKeys(const TSharedPtr<FJsonObject>& JsonObject, const FString& ExcludedTopLevelKey);
+
+static TSharedPtr<FJsonObject> MakeStatePathPayload(
+	const FString& FieldName,
+	const TSharedPtr<FJsonObject>& SourceObject,
+	const TSharedPtr<FJsonValue>& OverrideValue = nullptr)
+{
+	TArray<FString> PathParts;
+	FieldName.ParseIntoArray(PathParts, TEXT("."), true);
+	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+	if (PathParts.Num() == 0)
+	{
+		return Payload;
+	}
+
+	TSharedPtr<FJsonValue> Value = OverrideValue;
+	if (!Value.IsValid() && SourceObject.IsValid())
+	{
+		TSharedPtr<FJsonObject> CurrentSource = SourceObject;
+		for (int32 Index = 0; Index < PathParts.Num() - 1 && CurrentSource.IsValid(); ++Index)
+		{
+			const TSharedPtr<FJsonObject>* Child = nullptr;
+			CurrentSource = CurrentSource->TryGetObjectField(PathParts[Index], Child) && Child ? *Child : nullptr;
+		}
+		if (CurrentSource.IsValid())
+		{
+			Value = CurrentSource->TryGetField(PathParts.Last());
+		}
+	}
+
+	if (Value.IsValid())
+	{
+		TSharedPtr<FJsonObject> CurrentPayload = Payload;
+		for (int32 Index = 0; Index < PathParts.Num() - 1; ++Index)
+		{
+			TSharedPtr<FJsonObject> Child = MakeShared<FJsonObject>();
+			CurrentPayload->SetObjectField(PathParts[Index], Child);
+			CurrentPayload = Child;
+		}
+		CurrentPayload->SetField(PathParts.Last(), Value);
+	}
+	return Payload;
+}
+
+static void EndOpenStateKeyTraceTimers(const TSharedPtr<FJsonObject>& ProcessingState, const FString& ExcludedTopLevelKey)
+{
+	if (!ProcessingState.IsValid())
+	{
+		return;
+	}
+
+	auto EndTimerIfOpen = [](const FString& FieldName)
+	{
+		const FString TimerName = MakeStateKeyTraceName(FieldName);
+		if (ZLJobTrace::JOBTRACE_IS_CURRENTLY_TIMING(TimerName))
+		{
+			ZLJobTrace::JOBTRACE_TIMER_END(TimerName);
+		}
+	};
+
+	for (const FString& Key : GetJsonLeafKeys(ProcessingState, ExcludedTopLevelKey))
+	{
+		EndTimerIfOpen(Key);
+	}
+
+	// Object-valued keys are claimed/confirmed by top-level FieldName; leaf keys alone would miss them.
+	for (const auto& Pair : ProcessingState->Values)
+	{
+		const FString Key = ZL_JSON_KEY_TO_FSTRING(Pair.Key);
+		if (!ExcludedTopLevelKey.IsEmpty() && Key.Equals(ExcludedTopLevelKey, ESearchCase::CaseSensitive))
+		{
+			continue;
+		}
+		EndTimerIfOpen(Key);
+	}
+}
+
 namespace
 {
+#define ZL_TRACE_STATE_EVENT(RecorderExpression) \
+	do \
+	{ \
+		if (StateEventRecorder.IsRecording()) \
+		{ \
+			StateEventRecorder.RecorderExpression; \
+		} \
+	} while (false)
+
 static FAutoConsoleCommand ZLConsoleCommandPrintCurrentState(
 	TEXT("zl.state.current"),
 	TEXT("Prints the full current state JSON object."),
@@ -42,6 +138,66 @@ static FAutoConsoleCommand ZLConsoleCommandPrintCurrentState(
 		FString CurrentStateJson;
 		StateManager->GetCurrentState(CurrentStateJson);
 		UE_LOG(LogZLCloudPlugin, Display, TEXT("[zl.state.current] Current state: %s"), *CurrentStateJson);
+	}));
+
+#if WITH_EDITOR
+static FAutoConsoleCommand ZLConsoleCommandOpenStateTimeline(
+	TEXT("zl.cloudplugin.state.timeline"),
+	TEXT("Opens the state event timeline in its own window."),
+	FConsoleCommandDelegate::CreateLambda([]()
+	{
+		if (UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager())
+		{
+			StateManager->OpenStateTimeline();
+		}
+	}));
+#endif
+
+static FAutoConsoleCommand ZLConsoleCommandStartStateTimelineRecording(
+	TEXT("zl.cloudplugin.state.record.start"),
+	TEXT("Starts state event timeline recording."),
+	FConsoleCommandDelegate::CreateLambda([]()
+	{
+		if (UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager())
+		{
+			StateManager->StartStateTimelineRecording();
+			UE_LOG(LogZLCloudPlugin, Display, TEXT("[zl.cloudplugin.state.record.start] Recording started."));
+		}
+	}));
+
+static FAutoConsoleCommand ZLConsoleCommandStopStateTimelineRecording(
+	TEXT("zl.cloudplugin.state.record.stop"),
+	TEXT("Stops state event timeline recording without clearing captured events."),
+	FConsoleCommandDelegate::CreateLambda([]()
+	{
+		if (UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager())
+		{
+			StateManager->StopStateTimelineRecording();
+			UE_LOG(LogZLCloudPlugin, Display, TEXT("[zl.cloudplugin.state.record.stop] Recording stopped."));
+		}
+	}));
+
+static FAutoConsoleCommand ZLConsoleCommandDumpStateTimeline(
+	TEXT("zl.cloudplugin.state.dump"),
+	TEXT("Saves the state event timeline JSON to Saved/ZLStateEventTimeline."),
+	FConsoleCommandDelegate::CreateLambda([]()
+	{
+		UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager();
+		if (!StateManager)
+		{
+			UE_LOG(LogZLCloudPlugin, Warning, TEXT("[zl.cloudplugin.state.dump] State manager unavailable."));
+			return;
+		}
+
+		FString FilePath;
+		if (StateManager->SaveStateTimeline(FilePath))
+		{
+			UE_LOG(LogZLCloudPlugin, Display, TEXT("[zl.cloudplugin.state.dump] Saved timeline to %s"), *FilePath);
+		}
+		else
+		{
+			UE_LOG(LogZLCloudPlugin, Error, TEXT("[zl.cloudplugin.state.dump] Failed to save timeline to %s"), *FilePath);
+		}
 	}));
 }
 
@@ -109,6 +265,8 @@ UZLCloudPluginStateManager* UZLCloudPluginStateManager::CreateInstance()
 
 void UZLCloudPluginStateManager::ClearProcessingState()
 {
+	EndOpenStateKeyTraceTimers(JsonObject_processingState, s_requestIdStr);
+
 	JsonObject_out_requestedState.Reset();
 	JsonObject_out_requestedState = MakeShareable(new FJsonObject);
 	JsonObject_in_requestedState.Reset();
@@ -285,6 +443,12 @@ void UZLCloudPluginStateManager::ResetCurrentAppState(FString jsonString)
 		JsonObject_currentState = MakeShareable(new FJsonObject);
 		UE_LOG(LogZLCloudPlugin, Verbose, TEXT("Reset current state to empty"));
 	}
+	ZL_TRACE_STATE_EVENT(RecordJsonString(
+		EZLStateEventType::Mutation,
+		TEXT("ResetCurrentAppState(JSON)"),
+		TEXT("Current state replaced"),
+		jsonString.IsEmpty() ? TEXT("{}") : jsonString,
+		JsonObject_currentState));
 }
 
 void UZLCloudPluginStateManager::ResetCurrentAppState(TSharedPtr<FJsonObject> jsonObj)
@@ -292,6 +456,12 @@ void UZLCloudPluginStateManager::ResetCurrentAppState(TSharedPtr<FJsonObject> js
 	JsonObject_currentState.Reset();
 	JsonObject_currentState = jsonObj;
 	UE_LOG(LogZLCloudPlugin, Verbose, TEXT("Set current state"));
+	ZL_TRACE_STATE_EVENT(Record(
+		EZLStateEventType::Mutation,
+		TEXT("ResetCurrentAppState(Object)"),
+		TEXT("Current state replaced"),
+		jsonObj,
+		JsonObject_currentState));
 }
 
 void UZLCloudPluginStateManager::SetStreamConnected(bool connected)
@@ -373,7 +543,7 @@ TSharedPtr<FJsonObject> CreateDiffJsonObject(const TSharedPtr<FJsonObject>& OldJ
 
 	for (const auto& Pair : NewJsonObject->Values)
 	{
-		const FString& Key = Pair.Key;
+		const FString Key = ZL_JSON_KEY_TO_FSTRING(Pair.Key);
 		const TSharedPtr<FJsonValue>& NewValue = Pair.Value;
 
 		if (OldJsonObject->HasField(Key))
@@ -443,7 +613,7 @@ TSharedPtr<FJsonObject> MergeJsonObjectsRecursive(const TSharedPtr<FJsonObject>&
 
 	for (const auto& Pair : JsonObject2->Values)
 	{
-		const FString& Key = Pair.Key;
+		const FString Key = ZL_JSON_KEY_TO_FSTRING(Pair.Key);
 		const TSharedPtr<FJsonValue>& Val2 = Pair.Value;
 
 		if (Val2->Type == EJson::Object)
@@ -778,9 +948,41 @@ TSharedPtr<FJsonObject> MergeRequestStateWithSchemaDefaults(const TSharedPtr<FJs
 	if (!SchemaAsset || SchemaAsset->KeyInfos.Num() == 0)
 		return Merged;
 
+	TSet<FString> ModelGroupRootNames;
+	for (const FDIMEModelMetadata& ModelMetadata : SchemaAsset->DimeModelData)
+	{
+		const FString ModelRoot = ModelMetadata.ModelName.TrimStartAndEnd();
+		if (!ModelRoot.IsEmpty())
+		{
+			ModelGroupRootNames.Add(ModelRoot);
+		}
+	}
+
+	auto IsDimeModelGroupKey = [&ModelGroupRootNames](const FString& DottedKey) -> bool
+	{
+		if (ModelGroupRootNames.Num() == 0)
+		{
+			return false;
+		}
+
+		FString RootName;
+		FString Remainder;
+		if (DottedKey.Split(TEXT("."), &RootName, &Remainder, ESearchCase::CaseSensitive))
+		{
+			return ModelGroupRootNames.Contains(RootName.TrimStartAndEnd());
+		}
+
+		return ModelGroupRootNames.Contains(DottedKey.TrimStartAndEnd());
+	};
+
 	for (const TPair<FString, FStateKeyInfo>& Pair : SchemaAsset->KeyInfos)
 	{
 		const FString& DottedKey = Pair.Key;
+		if (IsDimeModelGroupKey(DottedKey))
+		{
+			continue;
+		}
+
 		const TSharedPtr<FJsonValue>* ExistingValue = nullptr;
 		if (!GetJsonValueFromNestedKey(DottedKey, Merged, ExistingValue))
 		{
@@ -801,14 +1003,15 @@ static void CollectJsonLeafKeysRecursive(const TSharedPtr<FJsonObject>& JsonObje
 		return;
 	}
 
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : JsonObject->Values)
+	for (const auto& Pair : JsonObject->Values)
 	{
 		if (!Pair.Value.IsValid())
 		{
 			continue;
 		}
 
-		const FString FullKey = Prefix.IsEmpty() ? Pair.Key : Prefix + TEXT(".") + Pair.Key;
+		const FString JsonKey = ZL_JSON_KEY_TO_FSTRING(Pair.Key);
+		const FString FullKey = Prefix.IsEmpty() ? JsonKey : Prefix + TEXT(".") + JsonKey;
 		if (Pair.Value->Type == EJson::Object)
 		{
 			CollectJsonLeafKeysRecursive(Pair.Value->AsObject(), FullKey, OutLeafKeys);
@@ -849,7 +1052,7 @@ TArray<FString> UZLCloudPluginStateManager::CurrentStateCompareDiffs_Keys(TShare
 	for (auto currJsonValue = ComparisonJsonObject->Values.CreateConstIterator(); currJsonValue; ++currJsonValue)
 	{
 		// Get the key name
-		const FString Name = (*currJsonValue).Key;
+		const FString Name = ZL_JSON_KEY_TO_FSTRING((*currJsonValue).Key);
 
 		if (DiffJsonObject->TryGetField(Name))
 		{
@@ -885,7 +1088,7 @@ int32 UZLCloudPluginStateManager::CountLeavesInJsonObject(TSharedPtr<FJsonObject
 
 	for (auto JsonPair : JsonObject->Values)
 	{
-		const FString& Key = JsonPair.Key;
+		const FString Key = ZL_JSON_KEY_TO_FSTRING(JsonPair.Key);
 		const TSharedPtr<FJsonValue>& Value = JsonPair.Value;
 
 		if (Value.IsValid())
@@ -916,7 +1119,7 @@ void SanitizeJsonObject(TSharedPtr<FJsonObject> JsonObject)
 
 	for (const auto& Pair : JsonObject->Values)
 	{
-		const FString& Key = Pair.Key;
+		const FString Key = ZL_JSON_KEY_TO_FSTRING(Pair.Key);
 		const TSharedPtr<FJsonValue>& Value = Pair.Value;
 
 		if (!Value.IsValid() || Value->Type == EJson::Null)
@@ -946,22 +1149,24 @@ void SanitizeJsonObject(TSharedPtr<FJsonObject> JsonObject)
 	}
 }
 
-static FString s_LogSchemaData = "ZEROLIGHT_GET_SCHEMA_DATA";
 static FString s_LogJsonCompliantSchemaData = "GET_JSON_SCHEMA";
 static FString s_GetVersion = "ZEROLIGHT_GET_VERSION";
 
 void UZLCloudPluginStateManager::ProcessState(FString jsonString, bool doCurrentStateCompare, bool& Success)
 {
 	UE_LOG(LogZLCloudPlugin, Display, TEXT("Received State request to process: %s"), *jsonString);
+	ZL_TRACE_STATE_EVENT(RecordJsonString(
+		EZLStateEventType::Inbound,
+		TEXT("ProcessState"),
+		TEXT("State JSON received"),
+		jsonString,
+		JsonObject_currentState));
 
-	if ((jsonString.Contains(s_LogJsonCompliantSchemaData) || jsonString.Contains(s_LogSchemaData)) && ActiveSchema)
+	if (jsonString.Contains(s_LogJsonCompliantSchemaData) && ActiveSchema)
 	{
 		TSharedPtr<FJsonObject> JsonSchemaData;
 
-		if (jsonString.Contains(s_LogSchemaData))
-			JsonSchemaData = ActiveSchema->SerializeStateKeyAssetToJson();
-		else
-			JsonSchemaData = ActiveSchema->SerializeStateKeyAsset_JsonSchemaCompliant();
+		JsonSchemaData = ActiveSchema->SerializeStateKeyAsset_JsonSchemaCompliant();
 
 		SendFJsonObjectToWeb(JsonSchemaData);
 		return;
@@ -996,10 +1201,10 @@ void UZLCloudPluginStateManager::ProcessState(FString jsonString, bool doCurrent
 			if (Module)
 			{
 				TSharedPtr<FJsonObject> jsonForWebObject = MakeShareable(new FJsonObject);
-				jsonForWebObject->SetObjectField("state_queued", JsonObject_requestedState);
+				jsonForWebObject->SetObjectField(TEXT("state_queued"), JsonObject_requestedState);
 
 				//For some reason TQueue doesnt have a length member func, use a counter for queue length
-				jsonForWebObject->SetNumberField("queue_length", s_requestQueueLength);
+				jsonForWebObject->SetNumberField(TEXT("queue_length"), s_requestQueueLength);
 
 				SendFJsonObjectToWeb(jsonForWebObject);
 			}
@@ -1039,6 +1244,12 @@ void UZLCloudPluginStateManager::ProcessState(FString jsonString, bool doCurrent
 
 			//Remove any that are still being processed
 			JsonObject_out_requestedState = CreateDiffJsonObject(JsonObject_processingState, JsonObject_out_requestedState);
+			ZL_TRACE_STATE_EVENT(Record(
+				EZLStateEventType::Processing,
+				TEXT("ProcessState"),
+				doCurrentStateCompare ? TEXT("Request diff accepted") : TEXT("Full request accepted"),
+				JsonObject_out_requestedState,
+				JsonObject_currentState));
 
 			JsonObject_requestedStateLeafCount = CountLeavesInJsonObject(JsonObject_out_requestedState) - 1; //Ignore RequestId
 
@@ -1067,11 +1278,11 @@ void UZLCloudPluginStateManager::ProcessState(FString jsonString, bool doCurrent
 
 					//Return current state to the web
 					TSharedPtr<FJsonObject> currentJson = MakeShareable(new FJsonObject);
-					currentJson->SetStringField("status", "complete");
-					currentJson->SetObjectField("current_state", JsonObject_currentState);
+					currentJson->SetStringField(TEXT("status"), TEXT("complete"));
+					currentJson->SetObjectField(TEXT("current_state"), JsonObject_currentState);
 
 					TSharedPtr<FJsonObject> jsonForWebObject = MakeShareable(new FJsonObject);
-					jsonForWebObject->SetObjectField("state_processing_ended", currentJson);
+					jsonForWebObject->SetObjectField(TEXT("state_processing_ended"), currentJson);
 					jsonForWebObject->SetStringField(s_requestIdStr, requestId); //add in request Id	
 
 					SendFJsonObjectToWeb(jsonForWebObject);
@@ -1094,9 +1305,9 @@ void UZLCloudPluginStateManager::ProcessState(FString jsonString, bool doCurrent
 					requestedJsonObject->RemoveField(s_requestIdStr);
 
 					jsonForWebObject->SetStringField(s_requestIdStr, requestId);
-					jsonForWebObject->SetObjectField("state_processing", requestedJsonObject);
+					jsonForWebObject->SetObjectField(TEXT("state_processing"), requestedJsonObject);
 
-					//jsonForWebObject->SetNumberField("total_leaves", JsonObject_requestedStateLeafCount);
+					//jsonForWebObject->SetNumberField(TEXT("total_leaves"), JsonObject_requestedStateLeafCount);
 
 					SendFJsonObjectToWeb(jsonForWebObject);
 				}
@@ -1162,9 +1373,14 @@ void UZLCloudPluginStateManager::Update(LauncherComms* launcherComms)
 	if (IsProcessingStateRequest())
 	{
 		requestId = JsonObject_processingState->GetStringField(s_requestIdStr);
+		const TArray<FString> PendingProcessingKeys = GetJsonLeafKeys(JsonObject_processingState, s_requestIdStr);
+		const bool bHasPendingProcessingKeys = PendingProcessingKeys.Num() > 0;
 
-		//All requested states processed, send completion message
-		if (JsonObject_requestedStateLeafCount == JsonObject_processingStateFinishedLeaves)
+		//All requested states processed, send completion message.
+		// Require zero pending processing keys so a leaf-count match cannot complete
+		// while keys like environment are still awaiting ConfirmStateChange.
+		if (JsonObject_requestedStateLeafCount == JsonObject_processingStateFinishedLeaves
+			&& !bHasPendingProcessingKeys)
 		{
 			SetStateDirty(EStateDirtyReason::state_processing_ended);
 
@@ -1180,7 +1396,17 @@ void UZLCloudPluginStateManager::Update(LauncherComms* launcherComms)
 		}
 		else 
 		{
-			if (JsonObject_processingState->Values.Num() > 1) //Still waiting on something in-processing
+			if (JsonObject_requestedStateLeafCount == JsonObject_processingStateFinishedLeaves && bHasPendingProcessingKeys)
+			{
+				UE_LOG(LogZLCloudPlugin, Warning,
+					TEXT("State request %s leaf counts match (%d) but %d key(s) still in processing (e.g. async env confirm); deferring completion. Pending: %s"),
+					*requestId,
+					JsonObject_requestedStateLeafCount,
+					PendingProcessingKeys.Num(),
+					*FString::Join(PendingProcessingKeys, TEXT(", ")));
+			}
+
+			if (bHasPendingProcessingKeys) //Still waiting on something in-processing
 			{
 				//State warning prints + timeout sent to web
 				double currTime = FApp::GetCurrentTime();
@@ -1190,12 +1416,28 @@ void UZLCloudPluginStateManager::Update(LauncherComms* launcherComms)
 				{
 					if ((currTime - m_lastStateWarningPrintTime) > 1.0) //Only print every 1 sec
 					{
-						const TArray<FString> pendingRequestedLeafKeys = GetJsonLeafKeys(JsonObject_processingState, s_requestIdStr);
-
-						UE_LOG(LogZLCloudPlugin, Display, TEXT("State request %s still waiting for %d requested state keys..."), *requestId, pendingRequestedLeafKeys.Num());
-						for (const FString& key : pendingRequestedLeafKeys)
+						FString JsonString_PendingProcessing;
 						{
-							UE_LOG(LogZLCloudPlugin, Display, TEXT("Request waiting for %f on %s state"), round(elapsedTime), *key);
+							TSharedPtr<FJsonObject> pendingForLog = MakeShared<FJsonObject>();
+							FJsonObject::Duplicate(JsonObject_processingState.ToSharedRef(), pendingForLog);
+							pendingForLog->RemoveField(s_requestIdStr);
+
+							TSharedRef<TJsonWriter<TCHAR>> JsonWriter = TJsonWriterFactory<TCHAR>::Create(&JsonString_PendingProcessing, 1);
+							FJsonSerializer::Serialize(pendingForLog.ToSharedRef(), JsonWriter);
+							JsonWriter->Close();
+						}
+
+						UE_LOG(LogZLCloudPlugin, Display, TEXT("State request %s still waiting for %d requested state keys (finished %d/%d) after %.0fs. Pending processing state: %s"),
+							*requestId,
+							PendingProcessingKeys.Num(),
+							JsonObject_processingStateFinishedLeaves,
+							JsonObject_requestedStateLeafCount,
+							round(elapsedTime),
+							*JsonString_PendingProcessing);
+
+						for (const FString& key : PendingProcessingKeys)
+						{
+							UE_LOG(LogZLCloudPlugin, Display, TEXT("Request waiting for %.0fs on %s"), round(elapsedTime), *key);
 						}
 						m_lastStateWarningPrintTime = currTime;
 					}
@@ -1208,14 +1450,26 @@ void UZLCloudPluginStateManager::Update(LauncherComms* launcherComms)
 					{
 						unprocessed = MakeShared<FJsonObject>();
 						FJsonObject::Duplicate(JsonObject_out_requestedState.ToSharedRef(), unprocessed);
-						const TArray<FString> processingLeafKeys = GetJsonLeafKeys(JsonObject_processingState, s_requestIdStr);
-						for (const FString& key : processingLeafKeys) //Strip in-flight processing values to report any unprocessed
+						for (const FString& key : PendingProcessingKeys) //Strip in-flight processing values to report any unprocessed
 						{
 							RemoveNestedKey(key, unprocessed);
 						}
 						if (unprocessed->HasField(s_requestIdStr))
 							unprocessed->RemoveField(s_requestIdStr);
 					}
+
+					const FString PendingKeysJoined = FString::Join(PendingProcessingKeys, TEXT(", "));
+					UE_LOG(LogZLCloudPlugin, Warning,
+						TEXT("State request %s timed out after %.0fs waiting for %d key(s): %s"),
+						*requestId,
+						round(elapsedTime),
+						PendingProcessingKeys.Num(),
+						*PendingKeysJoined);
+
+					ZLJobTrace::JOBTRACE_ADD_COMPLETED_TIMER(TEXT("StateRequestTimeout"), elapsedTime);
+					ZLJobTrace::JOBTRACE_ADD_DATA(TEXT("stateRequestTimedOut"), MakeShared<FJsonValueBoolean>(true));
+					ZLJobTrace::JOBTRACE_ADD_DATA(TEXT("stateRequestTimeoutSeconds"), MakeShared<FJsonValueNumber>(elapsedTime));
+					ZLJobTrace::JOBTRACE_ADD_DATA(TEXT("stateRequestTimeoutPendingKeys"), MakeShared<FJsonValueString>(PendingKeysJoined));
 
 					if (stateRequestedContentJob)
 					{
@@ -1409,6 +1663,17 @@ void UZLCloudPluginStateManager::ConfirmStateChange(FString FieldName, bool& Suc
 			Success = false;
 		}
 
+		if (Success)
+		{
+			ZLJobTrace::JOBTRACE_TIMER_END(MakeStateKeyTraceName(FieldName));
+			ZL_TRACE_STATE_EVENT(Record(
+				EZLStateEventType::Mutation,
+				TEXT("ConfirmStateChange"),
+				FString::Printf(TEXT("Confirmed %s into current state"), *FieldName),
+				MakeStatePathPayload(FieldName, JsonObject_currentState),
+				JsonObject_currentState));
+		}
+
 		if (Success && DebugUIWidget && DebugUIWidget->IsDebugUIPresented())
 			DebugUIWidget->TriggerRefreshUI();
 
@@ -1430,6 +1695,12 @@ void UZLCloudPluginStateManager::RemoveCurrentStateValue(FString FieldName)
 	{
 		JsonObject_currentState->RemoveField(FieldName);
 	}
+	ZL_TRACE_STATE_EVENT(Record(
+		EZLStateEventType::Mutation,
+		TEXT("RemoveCurrentStateValue"),
+		FString::Printf(TEXT("Removed %s from current state"), *FieldName),
+		MakeStatePathPayload(FieldName, nullptr, MakeShared<FJsonValueNull>()),
+		JsonObject_currentState));
 }
 
 void UZLCloudPluginStateManager::CopyRequestId()
@@ -1546,6 +1817,8 @@ template <typename T> void UZLCloudPluginStateManager::GetRequestedStateValue(FS
 
 			CopyRequestId();
 
+			ZLJobTrace::JOBTRACE_TIMER_START(MakeStateKeyTraceName(FieldName));
+
 			if (instantConfirm)
 			{
 				ConfirmStateChange(FieldName, Success);
@@ -1645,10 +1918,23 @@ template <typename T> void UZLCloudPluginStateManager::GetRequestedStateValue(FS
 
 			CopyRequestId();
 
+			ZLJobTrace::JOBTRACE_TIMER_START(MakeStateKeyTraceName(FieldName));
+
 			if (instantConfirm)
 			{
 				ConfirmStateChange(FieldName, Success);
 			}
+		}
+
+		if (Success)
+		{
+			const TSharedPtr<FJsonObject>& EventSource = instantConfirm ? JsonObject_currentState : JsonObject_processingState;
+			ZL_TRACE_STATE_EVENT(Record(
+				EZLStateEventType::Processing,
+				TEXT("GetRequestedStateValue"),
+				FString::Printf(TEXT("Claimed requested key %s%s"), *FieldName, instantConfirm ? TEXT(" (instant confirm)") : TEXT("")),
+				MakeStatePathPayload(FieldName, EventSource),
+				JsonObject_currentState));
 		}
 	}
 }
@@ -1786,12 +2072,22 @@ template <typename T> void UZLCloudPluginStateManager::GetCurrentStateValue(FStr
 
 template <typename T> void UZLCloudPluginStateManager::SetCurrentStateValue(FString FieldName, T data, bool SubmitToProcessState)
 {
+	TSharedPtr<FJsonObject> StateBeforeMutation;
+	if (!SubmitToProcessState && StateEventRecorder.IsRecording())
+	{
+		StateBeforeMutation = MakeShared<FJsonObject>();
+		FJsonObject::Duplicate(JsonObject_currentState.ToSharedRef(), StateBeforeMutation);
+	}
+
 	constexpr bool isArray = (std::is_same<T, TArray<double>>::value)
+		|| (std::is_same<T, TArray<float>>::value)
 		|| (std::is_same<T, TArray<bool>>::value)
 		|| (std::is_same<T, TArray<FString>>::value);
 
 	constexpr bool isNumber = (std::is_same<T, double>::value)
-		|| (std::is_same<T, TArray<double>>::value);
+		|| (std::is_same<T, float>::value)
+		|| (std::is_same<T, TArray<double>>::value)
+		|| (std::is_same<T, TArray<float>>::value);
 
 	constexpr bool isBool = (std::is_same<T, bool>::value)
 		|| (std::is_same<T, TArray<bool>>::value);
@@ -1908,6 +2204,13 @@ template <typename T> void UZLCloudPluginStateManager::SetCurrentStateValue(FStr
 
 		if (broadcastValueJson->Values.Num() > 0)
 		{
+			ZL_TRACE_STATE_EVENT(Record(
+				EZLStateEventType::Processing,
+				TEXT("SetCurrentStateValue"),
+				FString::Printf(TEXT("Submitted internal request for %s"), *FieldName),
+				broadcastValueJson,
+				JsonObject_currentState));
+
 			//Broadcast to ProcessState with this
 			if (UZLCloudPluginDelegates* Delegates = UZLCloudPluginDelegates::GetZLCloudPluginDelegates())
 			{
@@ -2038,7 +2341,17 @@ template <typename T> void UZLCloudPluginStateManager::SetCurrentStateValue(FStr
 		SetStateDirty(EStateDirtyReason::state_notify_web);
 
 		RebuildDebugUI(ActiveSchema);
-		DebugUIWidget->TriggerRefreshUI();
+		if (IsValid(DebugUIWidget))
+		{
+			DebugUIWidget->TriggerRefreshUI();
+		}
+
+		ZL_TRACE_STATE_EVENT(Record(
+			EZLStateEventType::Mutation,
+			TEXT("SetCurrentStateValue"),
+			FString::Printf(TEXT("Set %s directly"), *FieldName),
+			CreateDiffJsonObject(StateBeforeMutation, JsonObject_currentState),
+			JsonObject_currentState));
 	}
 }
 
@@ -2046,11 +2359,14 @@ template<typename T>
 void UZLCloudPluginStateManager::Internal_AppendProcessingState(FString FieldName, T data)
 {
 	constexpr bool isArray = (std::is_same<T, TArray<double>>::value)
+		|| (std::is_same<T, TArray<float>>::value)
 		|| (std::is_same<T, TArray<bool>>::value)
 		|| (std::is_same<T, TArray<FString>>::value);
 
 	constexpr bool isNumber = (std::is_same<T, double>::value)
-		|| (std::is_same<T, TArray<double>>::value);
+		|| (std::is_same<T, float>::value)
+		|| (std::is_same<T, TArray<double>>::value)
+		|| (std::is_same<T, TArray<float>>::value);
 
 	constexpr bool isBool = (std::is_same<T, bool>::value)
 		|| (std::is_same<T, TArray<bool>>::value);
@@ -2173,6 +2489,12 @@ void UZLCloudPluginStateManager::Internal_AppendProcessingState(FString FieldNam
 	//To ensure request comes back when this appended internal state is also complete, we incremebt the tick-check state counters
 	UE_LOG(LogZLCloudPlugin, Display, TEXT("Internal state request appended key: %s"), *FieldName);
 	JsonObject_requestedStateLeafCount += 1;
+	ZL_TRACE_STATE_EVENT(Record(
+		EZLStateEventType::Processing,
+		TEXT("Internal_AppendProcessingState"),
+		FString::Printf(TEXT("Appended processing key %s"), *FieldName),
+		MakeStatePathPayload(FieldName, JsonObject_processingState),
+		JsonObject_currentState));
 }
 
 void UZLCloudPluginStateManager::SetCurrentSchema(UStateKeyInfoAsset* Asset)
@@ -2661,8 +2983,41 @@ TSharedRef<SDockTab> UZLCloudPluginStateManager::CreateDebugUITabContent(TShared
 			]
 		];
 }
+
+void UZLCloudPluginStateManager::OpenStateTimeline()
+{
+	if (StateTimelineWindow.IsValid())
+	{
+		StateTimelineWindow->BringToFront();
+		return;
+	}
+
+	StateTimelineWindow = SNew(SWindow)
+		.Title(FText::FromString(TEXT("ZL State Event Timeline")))
+		.ClientSize(FVector2D(1600.0f, 720.0f))
+		.SupportsMaximize(true)
+		.SupportsMinimize(true)
+		[
+			CreateZLStateEventTimelineWidget(&StateEventRecorder)
+		];
+
+	StateTimelineWindow->SetOnWindowClosed(FOnWindowClosed::CreateLambda([this](const TSharedRef<SWindow>& ClosedWindow)
+	{
+		ZLUnregisterLocalInputWindow(ClosedWindow);
+		StateTimelineWindow.Reset();
+	}));
+	FSlateApplication::Get().AddWindow(StateTimelineWindow.ToSharedRef());
+
+	// A connected stream fakes the platform cursor, so this window has to opt back into the real one.
+	ZLRegisterLocalInputWindow(StateTimelineWindow);
+}
+
 #endif
 
+bool UZLCloudPluginStateManager::SaveStateTimeline(FString& OutFilePath)
+{
+	return StateEventRecorder.SaveToFile(OutFilePath);
+}
 
 UZLCloudPluginStateManager::~UZLCloudPluginStateManager()
 {
@@ -2712,7 +3067,32 @@ void UZLCloudPluginStateManager::SaveCurrentStateToFile(FString fileName)
 
 void UZLCloudPluginStateManager::MergeTrackedStateIntoCurrentState(const FString& FieldName, TSharedPtr<FJsonObject> JsonObject)
 {
-	JsonObject_currentState->SetObjectField(FieldName, JsonObject);
+	if (!JsonObject.IsValid())
+		return;
+
+	const TSharedPtr<FJsonObject>* existingStateObject = nullptr;
+	if (JsonObject_currentState->TryGetObjectField(FieldName, existingStateObject) && existingStateObject != nullptr && (*existingStateObject).IsValid())
+	{
+		//Tracked state can be a partial view of the field, so keep any existing keys it does not report on
+		TSharedPtr<FJsonObject> mergedState = MergeJsonObjectsRecursive(*existingStateObject, JsonObject);
+		JsonObject_currentState->SetObjectField(FieldName, mergedState.IsValid() ? mergedState : JsonObject);
+	}
+	else
+	{
+		JsonObject_currentState->SetObjectField(FieldName, JsonObject);
+	}
+
+	if (StateEventRecorder.IsRecording())
+	{
+		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetObjectField(FieldName, JsonObject);
+		StateEventRecorder.Record(
+			EZLStateEventType::Mutation,
+			TEXT("MergeTrackedStateIntoCurrentState"),
+			FString::Printf(TEXT("Tracked state replaced %s"), *FieldName),
+			Payload,
+			JsonObject_currentState);
+	}
 	RebuildDebugUI(ActiveSchema);
 }
 
@@ -2731,22 +3111,28 @@ void UZLCloudPluginStateManager::SendCurrentStateToWeb(bool completeState, TShar
 	{
 		//Return current state to the web
 		TSharedPtr<FJsonObject> currentStateJson = MakeShareable(new FJsonObject);
-		currentStateJson->SetStringField("status", "complete");
-		currentStateJson->SetObjectField("current_state", (completeState) ? JsonObject_currentState : JsonObject_web_currentState);
+		currentStateJson->SetStringField(TEXT("status"), TEXT("complete"));
+		currentStateJson->SetObjectField(TEXT("current_state"), (completeState) ? JsonObject_currentState : JsonObject_web_currentState);
 		
 		if (unmatchedRequestState.IsValid() && unmatchedRequestState->Values.Num() > 0)
 		{
-			currentStateJson->SetObjectField("unmatched_state", unmatchedRequestState);
+			currentStateJson->SetObjectField(TEXT("unmatched_state"), unmatchedRequestState);
 		}
 
 		TSharedPtr<FJsonObject> jsonForWebObject = MakeShareable(new FJsonObject);
-		jsonForWebObject->SetObjectField("state_processing_ended", currentStateJson);
+		jsonForWebObject->SetObjectField(TEXT("state_processing_ended"), currentStateJson);
 
 		FString JsonString_forWeb;
 		TSharedRef<TJsonWriter<TCHAR>> JsonWriter = TJsonWriterFactory<TCHAR>::Create(&JsonString_forWeb, 1);
 		FJsonSerializer::Serialize(jsonForWebObject.ToSharedRef(), JsonWriter);
 		JsonWriter->Close();
 
+		ZL_TRACE_STATE_EVENT(Record(
+			EZLStateEventType::Outbound,
+			TEXT("SendCurrentStateToWeb"),
+			completeState ? TEXT("Sent complete current state") : TEXT("Sent current-state diff"),
+			jsonForWebObject,
+			JsonObject_currentState));
 		Module->SendData(JsonString_forWeb);
 	}
 
@@ -2759,119 +3145,201 @@ void UZLCloudPluginStateManager::SendCurrentStateToWeb(bool completeState, TShar
 /// </summary>
 void UZLCloudPluginStateManager::SetStateDirty(EStateDirtyReason reason)
 {
+	// A request completion must not be overwritten by a mid-request notify (e.g. SetCurrentStateValue).
+	if (m_stateDirty
+		&& m_stateDirtyReason == EStateDirtyReason::state_processing_ended
+		&& reason == EStateDirtyReason::state_notify_web)
+	{
+		return;
+	}
+
 	m_stateDirty = true;
 	m_stateDirtyReason = reason;
+
+	const TCHAR* ReasonLabel = TEXT("unknown");
+	switch (reason)
+	{
+	case EStateDirtyReason::state_processing: ReasonLabel = TEXT("state_processing"); break;
+	case EStateDirtyReason::state_processing_ended: ReasonLabel = TEXT("state_processing_ended"); break;
+	case EStateDirtyReason::state_notify_web: ReasonLabel = TEXT("state_notify_web"); break;
+	}
+	UE_LOG(LogZLCloudPlugin, Verbose, TEXT("SetStateDirty(%s) finishedLeaves=%d requestedLeaves=%d processingLeavesEntered=%d isProcessing=%s"),
+		ReasonLabel,
+		JsonObject_processingStateFinishedLeaves,
+		JsonObject_requestedStateLeafCount,
+		JsonObject_processingStateLeafCount,
+		IsProcessingStateRequest() ? TEXT("true") : TEXT("false"));
 }
 
 void UZLCloudPluginStateManager::PushStateEventsToWeb()
 {
 	FString requestId = "";
+	const EStateDirtyReason DirtyReason = m_stateDirtyReason;
 	m_stateDirty = false;
+
+	UE_LOG(LogZLCloudPlugin, Verbose, TEXT("PushStateEventsToWeb reason=%d finishedLeaves=%d requestedLeaves=%d"),
+		static_cast<int32>(DirtyReason),
+		JsonObject_processingStateFinishedLeaves,
+		JsonObject_requestedStateLeafCount);
 
 	TSharedPtr<FJsonObject> currentJson = MakeShareable(new FJsonObject);
 	TSharedPtr<FJsonObject> jsonForWebObject = MakeShareable(new FJsonObject);
+	const TSharedPtr<FJsonObject> EmptyObject = MakeShareable(new FJsonObject);
 
-	if (IsProcessingStateRequest())
+	auto FinalizePayload = [&](const FString& Status)
+	{
+		currentJson->SetStringField(TEXT("status"), Status);
+		if (!currentJson->HasField(TEXT("current_state")) && JsonObject_currentState.IsValid())
+		{
+			currentJson->SetObjectField(TEXT("current_state"), JsonObject_currentState);
+		}
+		if (!currentJson->HasField(TEXT("timeout_state")))
+		{
+			currentJson->SetObjectField(TEXT("timeout_state"), EmptyObject);
+		}
+		if (!currentJson->HasField(TEXT("unprocessed_state")))
+		{
+			currentJson->SetObjectField(TEXT("unprocessed_state"), EmptyObject);
+		}
+	};
+
+	// SetCurrentStateValue(..., false) dirties state_notify_web for transient mirrors
+	// (cameraStatus=transitioning, config group mirrors, etc.). Those must still reach the web,
+	// but must NOT resolve an in-flight request as status=complete while keys like environment
+	// remain unconfirmed in processing.
+	if (DirtyReason == EStateDirtyReason::state_notify_web)
+	{
+		if (IsProcessingStateRequest())
+		{
+			// Mid-request transient push: include current_state, but omit requestId and use
+			// status "update" so frontends do not treat this as request completion.
+			FinalizePayload(TEXT("update"));
+			jsonForWebObject->SetObjectField(TEXT("state_processing_ended"), currentJson);
+			SendFJsonObjectToWeb(jsonForWebObject);
+			return;
+		}
+
+		FinalizePayload(TEXT("complete"));
+	}
+	else if (IsProcessingStateRequest())
 	{
 		requestId = JsonObject_processingState->GetStringField(s_requestIdStr);
 
+		const TArray<FString> PendingProcessingKeys = GetJsonLeafKeys(JsonObject_processingState, s_requestIdStr);
+		const bool bHasPendingProcessingKeys = PendingProcessingKeys.Num() > 0;
+
 		//All requested states processed, send completion message
-		if (JsonObject_requestedStateLeafCount == JsonObject_processingStateFinishedLeaves)
+		if (JsonObject_requestedStateLeafCount == JsonObject_processingStateFinishedLeaves
+			&& !bHasPendingProcessingKeys)
 		{
-			//Return current state to the web
-			currentJson->SetStringField("status", "complete");
-			currentJson->SetObjectField("current_state", JsonObject_currentState);
+			FinalizePayload(TEXT("complete"));
 		}
-		else
+		else if (bHasPendingProcessingKeys) //Still waiting on something in-processing
 		{
-			if (JsonObject_processingState->Values.Num() > 1) //Still waiting on something in-processing
-			{
-				double currTime = FApp::GetCurrentTime();
-				double elapsedTime = currTime - JsonObject_processingStateStartTime;
+			double currTime = FApp::GetCurrentTime();
+			double elapsedTime = currTime - JsonObject_processingStateStartTime;
 
-				if (elapsedTime > m_stateRequestTimeout)
-				{
-					JsonObject_processingState->RemoveField(s_requestIdStr); //Remove this request
-
-					//Return current state + unprocessed to the web
-					TSharedPtr<FJsonObject> timeoutState = CurrentStateCompareDiffs(JsonObject_processingState);
-
-					currentJson->SetStringField("status", "timeout");
-					currentJson->SetObjectField("current_state", JsonObject_currentState);
-					currentJson->SetObjectField("timeout_state", timeoutState);
-
-					TSharedPtr<FJsonObject> unprocessed = nullptr;
-					if (JsonObject_processingStateLeafCount < JsonObject_requestedStateLeafCount) //Some requested states were ignored
-					{
-						unprocessed = MakeShared<FJsonObject>();
-						FJsonObject::Duplicate(JsonObject_out_requestedState.ToSharedRef(), unprocessed);
-						const TArray<FString> processingLeafKeys = GetJsonLeafKeys(JsonObject_processingState, s_requestIdStr);
-						for (const FString& key : processingLeafKeys) //Strip in-flight processing values to report any unprocessed
-						{
-							RemoveNestedKey(key, unprocessed);
-						}
-						if (unprocessed->HasField(s_requestIdStr))
-							unprocessed->RemoveField(s_requestIdStr);
-
-						currentJson->SetObjectField("unprocessed_state", unprocessed);
-					}
-
-					FString OutputString;
-					TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutputString);
-					FJsonSerializer::Serialize(currentJson.ToSharedRef(), Writer);
-
-					UE_LOG(LogZLCloudPlugin, Display, TEXT("State request timeout: %s"), *OutputString);
-				}
-			}
-			else if (JsonObject_processingStateLeafCount < JsonObject_requestedStateLeafCount) //Some requested states were ignored
+			if (elapsedTime > m_stateRequestTimeout)
 			{
 				JsonObject_processingState->RemoveField(s_requestIdStr); //Remove this request
 
 				//Return current state + unprocessed to the web
-				TSharedPtr<FJsonObject> unprocessedJson = CurrentStateCompareDiffs(JsonObject_out_requestedState);
-				if (unprocessedJson->HasField(s_requestIdStr))
-					unprocessedJson->RemoveField(s_requestIdStr);
+				TSharedPtr<FJsonObject> timeoutState = CurrentStateCompareDiffs(JsonObject_processingState);
 
-				currentJson->SetStringField("status", "unmatched");
-				currentJson->SetObjectField("current_state", JsonObject_currentState);
-				currentJson->SetObjectField("unprocessed_state", unprocessedJson);
+				currentJson->SetObjectField(TEXT("timeout_state"), timeoutState);
 
-				FString JsonString_Unprocessed;
-				TSharedRef<TJsonWriter<TCHAR>> JsonWriterUnprocessed = TJsonWriterFactory<TCHAR>::Create(&JsonString_Unprocessed, 1);
-				FJsonSerializer::Serialize(unprocessedJson.ToSharedRef(), JsonWriterUnprocessed);
-				JsonWriterUnprocessed->Close();
+				if (JsonObject_processingStateLeafCount < JsonObject_requestedStateLeafCount) //Some requested states were ignored
+				{
+					TSharedPtr<FJsonObject> unprocessed = MakeShared<FJsonObject>();
+					FJsonObject::Duplicate(JsonObject_out_requestedState.ToSharedRef(), unprocessed);
+					for (const FString& key : PendingProcessingKeys) //Strip in-flight processing values to report any unprocessed
+					{
+						RemoveNestedKey(key, unprocessed);
+					}
+					if (unprocessed->HasField(s_requestIdStr))
+						unprocessed->RemoveField(s_requestIdStr);
 
-				UE_LOG(LogZLCloudPlugin, Display, TEXT("Unprocessed State in previous request: %s"), *JsonString_Unprocessed);
+					currentJson->SetObjectField(TEXT("unprocessed_state"), unprocessed);
+				}
+
+				FinalizePayload(TEXT("timeout"));
+
+				FString OutputString;
+				TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutputString);
+				FJsonSerializer::Serialize(currentJson.ToSharedRef(), Writer);
+
+				UE_LOG(LogZLCloudPlugin, Display, TEXT("State request timeout: %s"), *OutputString);
 			}
+			else
+			{
+				// processing_ended was raised while leaves are still outstanding — do not
+				// falsely complete the request (this was the premature old-environment case).
+				UE_LOG(LogZLCloudPlugin, Warning,
+					TEXT("PushStateEventsToWeb: ignoring processing_ended for request %s; still waiting on [%s]."),
+					*requestId,
+					*FString::Join(PendingProcessingKeys, TEXT(", ")));
+				return;
+			}
+		}
+		else if (JsonObject_processingStateLeafCount < JsonObject_requestedStateLeafCount) //Some requested states were ignored
+		{
+			JsonObject_processingState->RemoveField(s_requestIdStr); //Remove this request
+
+			//Return current state + unprocessed to the web
+			TSharedPtr<FJsonObject> unprocessedJson = CurrentStateCompareDiffs(JsonObject_out_requestedState);
+			if (unprocessedJson->HasField(s_requestIdStr))
+				unprocessedJson->RemoveField(s_requestIdStr);
+
+			currentJson->SetObjectField(TEXT("unprocessed_state"), unprocessedJson);
+			FinalizePayload(TEXT("unmatched"));
+
+			FString JsonString_Unprocessed;
+			TSharedRef<TJsonWriter<TCHAR>> JsonWriterUnprocessed = TJsonWriterFactory<TCHAR>::Create(&JsonString_Unprocessed, 1);
+			FJsonSerializer::Serialize(unprocessedJson.ToSharedRef(), JsonWriterUnprocessed);
+			JsonWriterUnprocessed->Close();
+
+			UE_LOG(LogZLCloudPlugin, Display, TEXT("Unprocessed State in previous request: %s"), *JsonString_Unprocessed);
+		}
+		else
+		{
+			UE_LOG(LogZLCloudPlugin, Warning, TEXT("PushStateEventsToWeb: ambiguous processing_ended for request %s; defaulting to complete."), *requestId);
+			FinalizePayload(TEXT("complete"));
 		}
 	}
 	else if (JsonObject_requestedStateLeafCount != JsonObject_processingStateFinishedLeaves) //Also need to account for any requests that never entered processing due to invalid fields or instant confirms but were incomplete
 	{
-		requestId = JsonObject_out_requestedState->GetStringField(s_requestIdStr);
+		if (JsonObject_out_requestedState.IsValid() && JsonObject_out_requestedState->HasField(s_requestIdStr))
+		{
+			requestId = JsonObject_out_requestedState->GetStringField(s_requestIdStr);
+		}
 
 		//Return current state + unprocessed to the web
 		TSharedPtr<FJsonObject> unprocessedJson = CurrentStateCompareDiffs(JsonObject_out_requestedState);
-		if (unprocessedJson->HasField(s_requestIdStr))
+		if (unprocessedJson.IsValid() && unprocessedJson->HasField(s_requestIdStr))
 			unprocessedJson->RemoveField(s_requestIdStr);
 
-		currentJson->SetStringField("status", "unmatched");
-		currentJson->SetObjectField("current_state", JsonObject_currentState);
-		currentJson->SetObjectField("unprocessed_state", unprocessedJson);
+		if (unprocessedJson.IsValid())
+		{
+			currentJson->SetObjectField(TEXT("unprocessed_state"), unprocessedJson);
+		}
+		FinalizePayload(TEXT("unmatched"));
 
 		FString JsonString_Unprocessed;
 		TSharedRef<TJsonWriter<TCHAR>> JsonWriterUnprocessed = TJsonWriterFactory<TCHAR>::Create(&JsonString_Unprocessed, 1);
-		FJsonSerializer::Serialize(unprocessedJson.ToSharedRef(), JsonWriterUnprocessed);
+		if (unprocessedJson.IsValid())
+		{
+			FJsonSerializer::Serialize(unprocessedJson.ToSharedRef(), JsonWriterUnprocessed);
+		}
 		JsonWriterUnprocessed->Close();
 
 		UE_LOG(LogZLCloudPlugin, Display, TEXT("Unprocessed State in previous request: %s"), *JsonString_Unprocessed);
 	}
-	else //internal state update, just needs to send complete current state
+	else //internal state update / idle notify, just needs to send complete current state
 	{
-		currentJson->SetStringField("status", "complete");
-		currentJson->SetObjectField("current_state", JsonObject_currentState);
+		FinalizePayload(TEXT("complete"));
 	}
 
-	jsonForWebObject->SetObjectField("state_processing_ended", currentJson);
+	jsonForWebObject->SetObjectField(TEXT("state_processing_ended"), currentJson);
 	if(!requestId.IsEmpty())
 		jsonForWebObject->SetStringField(s_requestIdStr, requestId); //add in request Id	
 
@@ -2888,6 +3356,12 @@ void UZLCloudPluginStateManager::SendFJsonObjectToWeb(TSharedPtr<FJsonObject> Js
 		FJsonSerializer::Serialize(JsonObject.ToSharedRef(), JsonWriter);
 		JsonWriter->Close();
 
+		ZL_TRACE_STATE_EVENT(Record(
+			EZLStateEventType::Outbound,
+			TEXT("SendFJsonObjectToWeb"),
+			TEXT("JSON payload sent to web"),
+			JsonObject,
+			JsonObject_currentState));
 		Module->SendData(JsonString_forWeb);
 	}
 }

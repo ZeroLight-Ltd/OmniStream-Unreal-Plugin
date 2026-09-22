@@ -1,6 +1,7 @@
 // Copyright ZeroLight ltd. All Rights Reserved.
 
 #include "ZLCloudPluginAudioComponent.h"
+#include "ZLCloudPluginVersion.h"
 #include "IZLCloudPluginModule.h"
 #include "ZLCloudPluginPrivate.h"
 #include "CoreMinimal.h"
@@ -249,7 +250,11 @@ int32 ZLWebRTCSoundGenerator::OnGenerateAudio(float* OutAudio, int32 NumSamples)
 		}
 
 		// Remove front NumSamples from the local buffer
+#if UNREAL_5_8_OR_NEWER
+		Buffer.RemoveAt(0, NumSamplesToCopy, EAllowShrinking::No);
+#else
 		Buffer.RemoveAt(0, NumSamplesToCopy, false);
+#endif
 		return NumSamplesToCopy;
 	}
 }

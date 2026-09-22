@@ -31,4 +31,19 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Zerolight Omnistream Delegates")
 	static UZLCloudPluginDelegates* GetZLCloudPluginDelegates();
+
+	/** True when a Play-In-Editor or standalone play session has an active game world. */
+	UFUNCTION(BlueprintPure, Category = "Zerolight Omnistream Capture")
+	static bool IsPiePlayActive();
+
+	/** True when OmniStream Settings has "Download ffmpeg for media on demand videos" enabled. */
+	UFUNCTION(BlueprintPure, Category = "Zerolight Omnistream Capture")
+	static bool IsFfmpegVideoSupportEnabled();
+
+	/**
+	 * Queue a screenshot or video capture job through ZLScreenshot using the same JSON
+	 * payload as a server CAPTUREIMAGE / media request. Requires an active play session.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Zerolight Omnistream Capture")
+	static bool RequestScreenshotJob(const FString& SettingsJson, FString& OutErrorMessage);
 };

@@ -186,6 +186,7 @@ public:
 	~FZeroLightMainButton();
 
 	void Initialize();
+	static void EnsureFFmpegInstalledForMediaOnDemandVideosAsync(TFunction<void(bool)> OnComplete);
 
 	static TSharedPtr<SHorizontalBox> GetUserBox();
 
@@ -195,19 +196,30 @@ public:
 	void ShowBuildAndDeployDialog();
 	void ShowPluginSettingsWindow();
 	void ShowSchemasEditorWindow();
+	void ShowFilteredKeysEditorWindow();
 	FReply CI_TriggerBuildAndDeploy(FString buildPath, bool portalUpload);
 	bool CI_HasValidBuildSettingsAndAuthorised(bool portalUpload);
 	TSharedPtr<FJsonObject> AggregatePredictedJSONSchema() const;
-	TArray<TSharedPtr<FJsonValue>> AggregatePredictedDimeModelConfigData() const;
+	TSharedPtr<FJsonObject> AggregatePredictedDimeModelConfigData() const;
 	inline static void CI_StartUATBuildTask() { if (s_isCIBuild && s_CIMainButtonPtr != nullptr) s_CIMainButtonPtr->StartBuildAndDeployTask(); }
 	inline static bool s_triggerBuildTask = false;
 	inline static bool s_triggerBuildUpload = false;
 	inline static bool s_isCIBuild = false;
 	/** Path just selected in the folder dialog for this build; used so LoadConfig() does not overwrite it. */
 	inline static FString s_pendingBuildFolder;
+	/**
+	 * Portal selection made during this editor session. SaveConfig()/SaveToCustomIni() write straight to the ini file
+	 * without updating GConfig, so a later LoadConfig() would otherwise restore the value GConfig cached at startup.
+	 * Empty means nothing was selected this session and the config values are authoritative.
+	 */
+	inline static FString s_selectedPortalAssetLineId;
+	inline static FString s_selectedPortalDisplayName;
+	inline static FString s_selectedBuildId;
 
 	static void SetProgressText(const FText& text);
 	static void SetPendingBuildFolder(const FString& path);
+	/** Restores this session's Portal selection after a config reload. */
+	static void ReapplyPortalSelection();
 	static void SetIsBuilding(bool state);
 	static void SetIsPortalAuthorised(bool state);
 	static void SetPortalUsername(FString username);
@@ -215,6 +227,8 @@ public:
 	inline static void SetPortalAssetLineID_Static(const FText& id) {
 		if (s_cloudstreamSettings != nullptr)
 		{
+			s_selectedPortalAssetLineId = id.ToString();
+			s_selectedBuildId = id.ToString();
 			s_cloudstreamSettings->portalAssetLineId = id.ToString();
 			s_cloudstreamSettings->buildId = id.ToString();
 			s_cloudstreamSettings->SaveConfig(NULL, *s_savedIniPath);
@@ -224,6 +238,7 @@ public:
 	inline static void SetPortalDisplayName_Static(const FString& name) {
 		if (s_cloudstreamSettings != nullptr)
 		{
+			s_selectedPortalDisplayName = name;
 			s_cloudstreamSettings->displayName = name;
 			s_cloudstreamSettings->SaveConfig(NULL, *s_savedIniPath);
 			s_cloudstreamSettings->SaveToCustomIni();
@@ -421,7 +436,6 @@ protected:
 	FReply OpenGithubReleaseWebPage();
 	FString FindOverrideExeName(FString buildDirectory) const;
 	FString FindOverrideProjectName(FString buildDirectory) const;
-	void EnsureFFmpegInstalledForMediaOnDemandVideosAsync(TFunction<void(bool)> OnComplete) const;
 	bool AddRunInfoJSONAndMetadataToBuild(FString outputFolderPath, FString overrideProjectName, FString overrideExeName = "") const;
 	bool AddCloudPluginConfigToBuild(FString outputFolderPath) const;
 	bool AddRunMode(FString runMode, FString args, TSharedPtr<FJsonObject> jsonObj, FString streamingSwitch = "") const;

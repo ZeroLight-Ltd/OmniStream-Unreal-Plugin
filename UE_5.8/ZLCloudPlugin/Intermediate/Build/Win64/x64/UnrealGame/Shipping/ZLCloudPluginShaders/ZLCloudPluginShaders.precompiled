@@ -1,0 +1,7 @@
+{
+	"OutputFiles": [
+		"ZLCloudPluginShaders.cpp.obj",
+		"ZLCubeToEquirect.cpp.obj"
+	],
+	"ToolChainVersion": "14.50.35737"
+}

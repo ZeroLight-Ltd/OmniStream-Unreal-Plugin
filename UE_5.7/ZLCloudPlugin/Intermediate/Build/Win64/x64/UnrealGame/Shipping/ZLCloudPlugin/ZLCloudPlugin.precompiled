@@ -13,6 +13,7 @@
 		"MessageHandler.cpp.obj",
 		"MessageReader.cpp.obj",
 		"PortalCLI.cpp.obj",
+		"SZLFilteredKeysEditor.cpp.obj",
 		"VideoSource.cpp.obj",
 		"VideoSourceGroup.cpp.obj",
 		"ZeroLightAboutScreen.cpp.obj",
@@ -32,6 +33,7 @@
 		"ZLCloudPluginVideoInputI420.cpp.obj",
 		"ZLCloudPluginVideoInputRHI.cpp.obj",
 		"ZLCloudPluginVideoInputViewport.cpp.obj",
+		"ZLCubemapPanoCapture.cpp.obj",
 		"ZLDebugUIWidget.cpp.obj",
 		"ZLJobTrace.cpp.obj",
 		"ZLOmniStreamAutoPopulateLibrary.cpp.obj",
@@ -40,6 +42,7 @@
 		"ZLSpotLightCameraComponent.cpp.obj",
 		"ZLSpotLightDataDrivenUIManager.cpp.obj",
 		"ZLStateEditorV2.cpp.obj",
+		"ZLStateEventTrace.cpp.obj",
 		"ZLStateKeyInfo.cpp.obj",
 		"ZLTrackedStateBlueprint.cpp.obj",
 		"ZLTransientMaterialSwapOuter.cpp.obj"

@@ -105,10 +105,10 @@ void LauncherComms::Update()
 			}*/
 
 			TSharedPtr<FJsonObject> sentryTagData = MakeShareable(new FJsonObject);
-			sentryTagData->SetStringField("GPU", gpuStr);
-			sentryTagData->SetStringField("CPU", cpuStr);
-			sentryTagData->SetStringField("Windows_Version", osStr);
-			sentryTagData->SetStringField("Engine_Version", unrealVerStr);
+			sentryTagData->SetStringField(TEXT("GPU"), gpuStr);
+			sentryTagData->SetStringField(TEXT("CPU"), cpuStr);
+			sentryTagData->SetStringField(TEXT("Windows_Version"), osStr);
+			sentryTagData->SetStringField(TEXT("Engine_Version"), unrealVerStr);
 
 			FString sentryTagDataStr;
 

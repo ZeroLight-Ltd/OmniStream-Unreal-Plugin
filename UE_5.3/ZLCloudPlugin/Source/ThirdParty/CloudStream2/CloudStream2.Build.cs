@@ -7,6 +7,8 @@ public class CloudStream2 : ModuleRules
 {
 	public CloudStream2(ReadOnlyTargetRules Target) : base(Target)
 	{
+          bUsePrecompiled=true;
+
 		Type = ModuleType.External;
 
 		if (Target.Platform == UnrealTargetPlatform.Win64)

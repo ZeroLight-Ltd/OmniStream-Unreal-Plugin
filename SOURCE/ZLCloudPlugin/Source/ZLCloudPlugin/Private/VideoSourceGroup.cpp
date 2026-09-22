@@ -16,6 +16,8 @@ namespace ZLCloudPlugin
 	}
 
 	FVideoSourceGroup::FVideoSourceGroup()
+		// Fenced CapturerRHI (5.8) completes Off-RT; keep coupled so we push when a
+		// capture finishes (same as PS when CaptureUseFence=true and DecoupleFramerate=false).
 		: bCoupleFramerate(true)
 	{
 

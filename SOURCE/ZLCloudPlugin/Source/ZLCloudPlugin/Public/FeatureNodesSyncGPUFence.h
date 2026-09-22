@@ -7,7 +7,7 @@
 
 DECLARE_LOG_CATEGORY_EXTERN(LogZLFeatureNodesSyncGPUFence, Log, All);
 
-static struct FrameIDFencePair
+struct FrameIDFencePair
 {
 	FrameIDFencePair()
 	{

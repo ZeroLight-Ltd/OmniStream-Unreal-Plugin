@@ -1,0 +1,6 @@
+{
+	"OutputFiles": [
+		"ZLCloudPluginShaders.cpp.obj",
+		"ZLCubeToEquirect.cpp.obj"
+	]
+}

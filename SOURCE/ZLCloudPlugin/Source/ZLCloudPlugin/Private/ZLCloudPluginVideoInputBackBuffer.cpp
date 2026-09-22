@@ -11,6 +11,9 @@
 #include "PixelCaptureBufferFormat.h"
 
 #include "Framework/Application/SlateApplication.h"
+#if UNREAL_5_8_OR_NEWER
+#include "Slate/SlateViewportProvider.h"
+#endif
 
 TSharedPtr<FZLCloudPluginVideoInputBackBuffer> FZLCloudPluginVideoInputBackBuffer::Create()
 {
@@ -45,13 +48,26 @@ FZLCloudPluginVideoInputBackBuffer::~FZLCloudPluginVideoInputBackBuffer()
 	}
 }
 
-#if UNREAL_5_5_OR_NEWER
+#if UNREAL_5_8_OR_NEWER
+void FZLCloudPluginVideoInputBackBuffer::OnBackBufferReady(SWindow& SlateWindow, ISlateViewportProvider& ViewportProvider)
+{
+	FRHITexture* BackBuffer = ViewportProvider.GetBackBufferResource();
+	if (!BackBuffer)
+	{
+		return;
+	}
+	OnFrame(FPixelCaptureInputFrameRHI(FTextureRHIRef(BackBuffer)));
+}
+#elif UNREAL_5_5_OR_NEWER
 void FZLCloudPluginVideoInputBackBuffer::OnBackBufferReady(SWindow& SlateWindow, const FTextureRHIRef& FrameBuffer)
-#else
-void FZLCloudPluginVideoInputBackBuffer::OnBackBufferReady(SWindow& SlateWindow, const FTexture2DRHIRef& FrameBuffer)
-#endif
 {
 	OnFrame(FPixelCaptureInputFrameRHI(FrameBuffer));
 }
+#else
+void FZLCloudPluginVideoInputBackBuffer::OnBackBufferReady(SWindow& SlateWindow, const FTexture2DRHIRef& FrameBuffer)
+{
+	OnFrame(FPixelCaptureInputFrameRHI(FrameBuffer));
+}
+#endif
 
 #endif

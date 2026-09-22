@@ -37,9 +37,14 @@
 #include "IUATHelperModule.h"
 #include <filesystem>
 #include "OutputLogModule.h"
+#include "MessageLogModule.h"
+#include "IMessageLogListing.h"
+#include "Logging/TokenizedMessage.h"
+#include "Misc/OutputDeviceRedirector.h"
 #include "ZeroLightEditorStyle.h"
 #include "ZeroLightAboutScreen.h"
 #include "ZLStateEditorV2.h"
+#include "SZLFilteredKeysEditor.h"
 #include "IZLOmniStream_SchemaAutoPopulate.h"
 #include "Features/IModularFeatures.h"
 #include "CloudStream2.h"
@@ -61,6 +66,7 @@
 #endif
 #include "Misc/DateTime.h"
 #include "Misc/MessageDialog.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 
 #define LOCTEXT_NAMESPACE "ZLCloudPlugin"
 
@@ -71,6 +77,21 @@ namespace
 static const TCHAR* FFmpegDownloadUrl = TEXT("https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-full_build.zip");
 static const TCHAR* ZLCloudBuildSettingsSection = TEXT("OmniStreamBuildSettings");
 static const TCHAR* PercentageUnusedShaderCompilingThreadsKey = TEXT("PercentageUnusedShaderCompilingThreads");
+static bool bFFmpegInstallInProgress = false;
+static TArray<TFunction<void(bool)>> FFmpegInstallCompletionCallbacks;
+
+static void CompleteFFmpegInstall(bool bSuccess)
+{
+	bFFmpegInstallInProgress = false;
+	TArray<TFunction<void(bool)>> CompletionCallbacks = MoveTemp(FFmpegInstallCompletionCallbacks);
+	for (TFunction<void(bool)>& CompletionCallback : CompletionCallbacks)
+	{
+		if (CompletionCallback)
+		{
+			CompletionCallback(bSuccess);
+		}
+	}
+}
 
 static FString GetFFmpegThirdPartyDirectory()
 {
@@ -450,6 +471,14 @@ void FZeroLightMainButton::Initialize()
 			);
 		}
 	));
+
+	EnsureFFmpegInstalledForMediaOnDemandVideosAsync([](bool bSuccess)
+	{
+		if (!bSuccess)
+		{
+			UE_LOG(LogPortalCLI, Warning, TEXT("Failed to install FFmpeg while opening the editor project"));
+		}
+	});
 }
 
 FText FZeroLightMainButton::GetTooltip()
@@ -562,6 +591,113 @@ FText FZeroLightMainButton::UpdateProgress() const
 	return s_progressText;
 }
 
+static void LogTailOfNewestFile(const FString& Directory, const FString& FilePattern, int32 MaxLines)
+{
+	if (!FPaths::DirectoryExists(Directory))
+	{
+		UE_LOG(LogPortalCLI, Warning, TEXT("Packaging diagnostics: directory not found: %s"), *Directory);
+		return;
+	}
+
+	TArray<FString> Files;
+	IFileManager::Get().FindFiles(Files, *(Directory / FilePattern), true, false);
+	if (Files.Num() == 0)
+	{
+		UE_LOG(LogPortalCLI, Warning, TEXT("Packaging diagnostics: no files matching %s in %s"), *FilePattern, *Directory);
+		return;
+	}
+
+	FString NewestFile;
+	FDateTime NewestTime = FDateTime::MinValue();
+	for (const FString& FileName : Files)
+	{
+		const FString FullPath = Directory / FileName;
+		const FDateTime ModifiedTime = IFileManager::Get().GetTimeStamp(*FullPath);
+		if (ModifiedTime > NewestTime)
+		{
+			NewestTime = ModifiedTime;
+			NewestFile = FullPath;
+		}
+	}
+
+	FString FileContents;
+	if (NewestFile.IsEmpty() || !FFileHelper::LoadFileToString(FileContents, *NewestFile))
+	{
+		UE_LOG(LogPortalCLI, Warning, TEXT("Packaging diagnostics: failed to read log file under %s"), *Directory);
+		return;
+	}
+
+	TArray<FString> Lines;
+	FileContents.ParseIntoArrayLines(Lines, false);
+	const int32 StartIndex = FMath::Max(0, Lines.Num() - MaxLines);
+
+	UE_LOG(LogPortalCLI, Error, TEXT("Packaging diagnostics: tail of %s"), *NewestFile);
+	for (int32 Index = StartIndex; Index < Lines.Num(); ++Index)
+	{
+		UE_LOG(LogPortalCLI, Error, TEXT("  %s"), *Lines[Index]);
+	}
+}
+
+static void LogPackagingFailureDiagnostics()
+{
+	UE_LOG(LogPortalCLI, Error, TEXT("===== Packaging failure diagnostics ====="));
+
+	if (FModuleManager::Get().IsModuleLoaded(TEXT("MessageLog")))
+	{
+		FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>(TEXT("MessageLog"));
+		if (MessageLogModule.IsRegisteredLogListing(TEXT("PackagingResults")))
+		{
+			TSharedRef<IMessageLogListing> PackagingResults = MessageLogModule.GetLogListing(TEXT("PackagingResults"));
+			const TArray<TSharedRef<FTokenizedMessage>>& Messages = PackagingResults->GetFilteredMessages();
+
+			int32 ErrorCount = 0;
+			int32 WarningCount = 0;
+			for (const TSharedRef<FTokenizedMessage>& Message : Messages)
+			{
+				if (Message->GetSeverity() == EMessageSeverity::Error)
+				{
+					++ErrorCount;
+					UE_LOG(LogPortalCLI, Error, TEXT("PackagingResults Error: %s"), *Message->ToText().ToString());
+				}
+				else if (Message->GetSeverity() == EMessageSeverity::Warning)
+				{
+					++WarningCount;
+				}
+			}
+
+			UE_LOG(LogPortalCLI, Error, TEXT("PackagingResults summary: %d error(s), %d warning(s)"), ErrorCount, WarningCount);
+			if (ErrorCount == 0)
+			{
+				const FString AllMessages = PackagingResults->GetAllMessagesAsString();
+				if (!AllMessages.IsEmpty())
+				{
+					UE_LOG(LogPortalCLI, Error, TEXT("PackagingResults full dump:\n%s"), *AllMessages);
+				}
+				else
+				{
+					UE_LOG(LogPortalCLI, Error, TEXT("No PackagingResults errors were captured in-editor. Checking AutomationTool/UBT logs..."));
+				}
+			}		}
+		else
+		{
+			UE_LOG(LogPortalCLI, Warning, TEXT("PackagingResults message log listing is not registered"));
+		}
+	}
+
+	const FString AutomationToolLogsDir = FPaths::Combine(FPlatformProcess::UserSettingsDir(), TEXT("Unreal Engine"), TEXT("AutomationTool"), TEXT("Logs"));
+	LogTailOfNewestFile(AutomationToolLogsDir, TEXT("*.txt"), 80);
+
+	const FString LocalAppData = FPlatformMisc::GetEnvironmentVariable(TEXT("LOCALAPPDATA"));
+	if (!LocalAppData.IsEmpty())
+	{
+		LogTailOfNewestFile(FPaths::Combine(LocalAppData, TEXT("UnrealEngine"), TEXT("Common"), TEXT("AutomationTool"), TEXT("Logs")), TEXT("*.txt"), 80);
+		LogTailOfNewestFile(FPaths::Combine(LocalAppData, TEXT("UnrealBuildTool")), TEXT("Log*.txt"), 80);
+		LogTailOfNewestFile(FPaths::Combine(LocalAppData, TEXT("UnrealBuildTool")), TEXT("Log.txt"), 80);
+	}
+
+	UE_LOG(LogPortalCLI, Error, TEXT("===== End packaging failure diagnostics ====="));
+}
+
 static void CleanupInjectedIntermediateSource()
 {
 	const FString ProjectName = FApp::GetProjectName();
@@ -580,30 +716,135 @@ static void CleanupInjectedIntermediateSource()
 	}
 }
 
+static FString MakeValidCppIdentifier(const FString& InName)
+{
+	FString Name;
+	Name.Reserve(InName.Len() + 1);
+	for (int32 i = 0; i < InName.Len(); ++i)
+	{
+		const TCHAR Ch = InName[i];
+		Name.AppendChar((FChar::IsAlnum(Ch) || Ch == TEXT('_')) ? Ch : TEXT('_'));
+	}
+	if (Name.IsEmpty() || FChar::IsDigit(Name[0]))
+	{
+		Name = TEXT("_") + Name;
+	}
+	return Name;
+}
+
+// Every file we generate carries this marker so cleanup can tell our scratch files apart from a
+// real project's source and never delete anything the user wrote.
+static const TCHAR* GInjectedSourceMarker = TEXT("// Generated by the ZeroLight OmniStream plugin for packaging - removed once the build finishes.");
+
+static void DeleteInjectedFileIfOurs(const FString& FilePath)
+{
+	FString Contents;
+	if (FFileHelper::LoadFileToString(Contents, *FilePath) && Contents.Contains(GInjectedSourceMarker))
+	{
+		IFileManager::Get().Delete(*FilePath, false, true, true);
+	}
+}
+
+static void DeleteDirectoryIfEmpty(const FString& Directory)
+{
+	if (!FPaths::DirectoryExists(Directory))
+	{
+		return;
+	}
+
+	TArray<FString> Remaining;
+	IFileManager::Get().FindFilesRecursive(Remaining, *Directory, TEXT("*"), true, true);
+	if (Remaining.Num() == 0)
+	{
+		IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	}
+}
+
+// Leaving these behind would permanently make a Blueprint project look like a code project to the
+// editor, so this runs after the build whether it succeeded or not, and is safe to call at any time.
+static void CleanupInjectedProjectSource()
+{
+	const FString ProjectName = MakeValidCppIdentifier(FPaths::GetBaseFilename(FPaths::GetProjectFilePath()));
+	const FString SourceDir = FPaths::GameSourceDir();
+	const FString ModuleDir = SourceDir / ProjectName;
+
+	DeleteInjectedFileIfOurs(SourceDir / (ProjectName + TEXT(".Target.cs")));
+	DeleteInjectedFileIfOurs(SourceDir / (ProjectName + TEXT("Editor.Target.cs")));
+	DeleteInjectedFileIfOurs(ModuleDir / (ProjectName + TEXT(".Build.cs")));
+	DeleteInjectedFileIfOurs(ModuleDir / (ProjectName + TEXT(".cpp")));
+
+	DeleteDirectoryIfEmpty(ModuleDir);
+	DeleteDirectoryIfEmpty(SourceDir);
+}
+
+static void WriteTargetCs(const FString& SourceDir, const FString& ProjectName, const TCHAR* TypeSuffix, const TCHAR* TargetType)
+{
+	const FString ClassName = ProjectName + TypeSuffix + TEXT("Target");
+	FString Contents;
+	Contents += FString::Printf(TEXT("%s\r\n"), GInjectedSourceMarker);
+	Contents += TEXT("using UnrealBuildTool;\r\n");
+	Contents += TEXT("\r\n");
+	Contents += FString::Printf(TEXT("public class %s : TargetRules\r\n"), *ClassName);
+	Contents += TEXT("{\r\n");
+	Contents += FString::Printf(TEXT("\tpublic %s(TargetInfo Target) : base(Target)\r\n"), *ClassName);
+	Contents += TEXT("\t{\r\n");
+	Contents += TEXT("\t\tDefaultBuildSettings = BuildSettingsVersion.Latest;\r\n");
+	Contents += TEXT("\t\tIncludeOrderVersion = EngineIncludeOrderVersion.Latest;\r\n");
+	Contents += FString::Printf(TEXT("\t\tType = TargetType.%s;\r\n"), TargetType);
+	Contents += FString::Printf(TEXT("\t\tExtraModuleNames.Add(\"%s\");\r\n"), *ProjectName);
+	Contents += TEXT("\t}\r\n");
+	Contents += TEXT("}\r\n");
+
+	FFileHelper::SaveStringToFile(Contents, *(SourceDir / (ProjectName + TypeSuffix + TEXT(".Target.cs"))));
+}
+
 void InjectTempTargetFiles()
 {
-	FString ProjectName = FApp::GetProjectName();
-	FString TargetFile = FPaths::ProjectIntermediateDir() / TEXT("Source") / (ProjectName + TEXT(".Target.cs"));
+	CleanupInjectedIntermediateSource();
+
+	const FString ProjectName = MakeValidCppIdentifier(FPaths::GetBaseFilename(FPaths::GetProjectFilePath()));
+
+	// These go in the project's real Source dir rather than Intermediate/Source. UBT's
+	// ConditionalMakeTempTargetForHybridProject deletes Intermediate/Source mid-build whenever it
+	// decides the project isn't code-based, which it does for a Blueprint project whose only code
+	// plugin is enabled by default. A Source/*.Target.cs makes its ProjectHasCode() check true, so
+	// it leaves us alone and builds a real game exe with the plugin compiled in.
+	const FString SourceDir = FPaths::GameSourceDir();
+	const FString ModuleDir = SourceDir / ProjectName;
+	IFileManager::Get().MakeDirectory(*ModuleDir, true);
+
+	const FString TargetFile = SourceDir / (ProjectName + TEXT(".Target.cs"));
 	UE_LOG(LogPortalCLI, Log, TEXT("Target.cs file path: %s"), *TargetFile);
-	if (!FPaths::FileExists(TargetFile))
-	{
-		FFileHelper::SaveStringToFile(TEXT("using UnrealBuildTool;\npublic class ") + ProjectName + TEXT("Target : TargetRules\n{\npublic ") + ProjectName + TEXT("Target(TargetInfo Target) : base(Target) { DefaultBuildSettings = BuildSettingsVersion.Latest; \n IncludeOrderVersion = EngineIncludeOrderVersion.Latest; \n Type = TargetType.Game; \n ExtraModuleNames.Add(\"" + ProjectName + "\"); }\n}"), *TargetFile);
-	}
-	FString TargetEditorFile = FPaths::ProjectIntermediateDir() / TEXT("Source") / (ProjectName + TEXT("Editor.Target.cs"));
-	if (!FPaths::FileExists(TargetEditorFile))
-	{
-		FFileHelper::SaveStringToFile(TEXT("using UnrealBuildTool;\npublic class ") + ProjectName + TEXT("EditorTarget : TargetRules\n{\npublic ") + ProjectName + TEXT("EditorTarget(TargetInfo Target) : base(Target) { DefaultBuildSettings = BuildSettingsVersion.Latest; \n IncludeOrderVersion = EngineIncludeOrderVersion.Latest; \n Type = TargetType.Editor; \n ExtraModuleNames.Add(\"" + ProjectName + "\"); }\n}"), *TargetEditorFile);
-	}
-	FString TargetCppFile = FPaths::ProjectIntermediateDir() / TEXT("Source") / (ProjectName + TEXT(".cpp"));
-	if (!FPaths::FileExists(TargetCppFile))
-	{
-		FFileHelper::SaveStringToFile(TEXT("#include \"CoreTypes.h\" \n #include \"Modules/ModuleManager.h\" \n IMPLEMENT_PRIMARY_GAME_MODULE(FDefaultModuleImpl, " + ProjectName + ", \"" + ProjectName + "\");"), *TargetCppFile);
-	}
-	FString TargetBuildFile = FPaths::ProjectIntermediateDir() / TEXT("Source") / (ProjectName + TEXT(".Build.cs"));
-	if (!FPaths::FileExists(TargetBuildFile))
-	{
-		FFileHelper::SaveStringToFile(TEXT("using UnrealBuildTool;\npublic class ") + ProjectName + TEXT(" : ModuleRules\n{\npublic ") + ProjectName + TEXT("(ReadOnlyTargetRules Target) : base(Target) { PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs; \n PrivateDependencyModuleNames.Add(\"Core\"); }\n}"), *TargetBuildFile);
-	}
+
+	// UAT's ProjectParams throws "Editor target not found!" for a code-based project with no editor
+	// target, so both are needed. -skipbuildeditor/-nocompileeditor keep it from actually being built.
+	WriteTargetCs(SourceDir, ProjectName, TEXT(""), TEXT("Game"));
+	WriteTargetCs(SourceDir, ProjectName, TEXT("Editor"), TEXT("Editor"));
+
+	FString TargetCpp;
+	TargetCpp += FString::Printf(TEXT("%s\r\n"), GInjectedSourceMarker);
+	TargetCpp += TEXT("#include \"CoreTypes.h\"\r\n");
+	TargetCpp += TEXT("#include \"Modules/ModuleManager.h\"\r\n");
+	TargetCpp += TEXT("\r\n");
+	TargetCpp += FString::Printf(TEXT("IMPLEMENT_PRIMARY_GAME_MODULE(FDefaultModuleImpl, %s, \"%s\");\r\n"), *ProjectName, *ProjectName);
+	FFileHelper::SaveStringToFile(TargetCpp, *(ModuleDir / (ProjectName + TEXT(".cpp"))));
+
+	FString TargetBuild;
+	TargetBuild += FString::Printf(TEXT("%s\r\n"), GInjectedSourceMarker);
+	TargetBuild += TEXT("using UnrealBuildTool;\r\n");
+	TargetBuild += TEXT("\r\n");
+	TargetBuild += FString::Printf(TEXT("public class %s : ModuleRules\r\n"), *ProjectName);
+	TargetBuild += TEXT("{\r\n");
+	TargetBuild += FString::Printf(TEXT("\tpublic %s(ReadOnlyTargetRules Target) : base(Target)\r\n"), *ProjectName);
+	TargetBuild += TEXT("\t{\r\n");
+	TargetBuild += TEXT("\t\tPCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;\r\n");
+	TargetBuild += TEXT("\r\n");
+	TargetBuild += TEXT("\t\tPrivateDependencyModuleNames.Add(\"Core\");\r\n");
+	TargetBuild += TEXT("\t\tPrivateDependencyModuleNames.Add(\"ZLCloudPlugin\");\r\n");
+	TargetBuild += TEXT("\t\tPrivateDependencyModuleNames.Add(\"ZLCloudPluginShaders\");\r\n");
+	TargetBuild += TEXT("\t}\r\n");
+	TargetBuild += TEXT("}\r\n");
+	FFileHelper::SaveStringToFile(TargetBuild, *(ModuleDir / (ProjectName + TEXT(".Build.cs"))));
 
 	//Unclean info but given uat has inherent issues with editor-dependency nested plugins and we dont actually build a real editor target here, this is fine for now
 	static const FString DummyEditorTargetTemplate = TEXT(R"JSON(
@@ -654,6 +895,7 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 	{
 		FString IniPath = FConfigCacheIni::NormalizeConfigIniPath(FPaths::ProjectConfigDir() + TEXT("DefaultZLCloudPluginSettings.ini"));
 		s_cloudstreamSettings->LoadConfig(nullptr, *IniPath);
+		ReapplyPortalSelection();
 	}
 	// Use the folder the user just selected (set by async task before TriggerBuild); otherwise use saved build folder from INI
 	FString outFolderName;
@@ -763,6 +1005,8 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 	TFunction<void(FString result, double timeElapsed)> OnBuildFinished = [this](FString result, double timeElapsed) {
 		s_buildEndTime = FDateTime::Now();
 
+		CleanupInjectedProjectSource();
+
 		if (result == "Completed")
 		{
 			OnBuildPackageSuccess();
@@ -774,9 +1018,16 @@ void FZeroLightMainButton::StartBuildAndDeployTask() const
 			s_sendBuildFailed = true;
 			s_isCurrentlyBuilding = false;
 
+			UE_LOG(LogPortalCLI, Error, TEXT("UATHelper finished with result='%s' after %.1f seconds"), *result, timeElapsed);
+			LogPackagingFailureDiagnostics();
+
 			if (s_isCIBuild)
 			{
-				UE_LOG(LogPortalCLI, Error, TEXT("Command Line Build & Upload failed with engine build errors - see build log for info. Aborting..."));
+				UE_LOG(LogPortalCLI, Error, TEXT("Command Line Build & Upload failed with engine build errors - see diagnostics above / AutomationTool logs. Aborting..."));
+				if (GLog)
+				{
+					GLog->Flush();
+				}
 				std::exit(-1);
 			}
 		}
@@ -932,6 +1183,12 @@ TSharedRef<SWidget> FZeroLightMainButton::GetMenu()
 			FUIAction(FExecuteAction::CreateSP(this, &FZeroLightMainButton::ShowSchemasEditorWindow))
 		);
 		SubMenuBuilder.AddMenuEntry(
+			FText::FromString("Input Key Filter"),
+			FText::FromString("Choose which keyboard keys the browser can send into the streamed app"),
+			FSlateIcon(),
+			FUIAction(FExecuteAction::CreateSP(this, &FZeroLightMainButton::ShowFilteredKeysEditorWindow))
+		);
+		SubMenuBuilder.AddMenuEntry(
 			FText::FromString("Show State Debug UI in editor tab"),
 			FText::FromString("Display the debug state UI in an editor tab"),
 			FSlateIcon(),
@@ -953,6 +1210,17 @@ TSharedRef<SWidget> FZeroLightMainButton::GetMenu()
 			),
 			NAME_None,
 			EUserInterfaceActionType::ToggleButton
+		);
+		SubMenuBuilder.AddMenuEntry(
+			FText::FromString("State Event Timeline"),
+			FText::FromString("Open the state event timeline debugger"),
+			FSlateIcon(),
+			FUIAction(FExecuteAction::CreateLambda([]() {
+				if (UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager())
+				{
+					StateManager->OpenStateTimeline();
+				}
+			}))
 		);
 	}));
 
@@ -999,6 +1267,7 @@ void FZeroLightMainButton::SetPortalDisplayName(const FString& name)
 {
 	if (s_cloudstreamSettings != nullptr)
 	{
+		s_selectedPortalDisplayName = name;
 		s_cloudstreamSettings->displayName = name;
 		s_cloudstreamSettings->SaveConfig(NULL, *s_savedIniPath);
 		s_cloudstreamSettings->SaveToCustomIni();
@@ -1139,6 +1408,8 @@ void FZeroLightMainButton::SetPortalAssetLineID(const FText& id)
 {
 	if (s_cloudstreamSettings != nullptr)
 	{
+		s_selectedPortalAssetLineId = id.ToString();
+		s_selectedBuildId = id.ToString();
 		s_cloudstreamSettings->portalAssetLineId = id.ToString();
 		s_cloudstreamSettings->buildId = id.ToString();
 		s_cloudstreamSettings->SaveConfig(NULL, *s_savedIniPath);
@@ -1181,7 +1452,7 @@ void FZeroLightMainButton::SetBuildFolder(const FString& path)
 {
 	if (s_cloudstreamSettings != nullptr)
 	{
-		s_cloudstreamSettings->buildFolder = path;
+		s_cloudstreamSettings->buildFolder = UZLCloudPluginSettings::ResolveStoredPath(path);
 		s_cloudstreamSettings->SaveConfig(NULL, *s_savedIniPath);
 		s_cloudstreamSettings->SaveToCustomIni();
 	}
@@ -1190,6 +1461,41 @@ void FZeroLightMainButton::SetBuildFolder(const FString& path)
 void FZeroLightMainButton::SetPendingBuildFolder(const FString& path)
 {
 	s_pendingBuildFolder = path;
+}
+
+void FZeroLightMainButton::ReapplyPortalSelection()
+{
+	if (s_cloudstreamSettings == nullptr)
+		return;
+
+	bool reverted = false;
+
+	if (!s_selectedPortalAssetLineId.IsEmpty() && s_cloudstreamSettings->portalAssetLineId != s_selectedPortalAssetLineId)
+	{
+		UE_LOG(LogPortalCLI, Warning, TEXT("Portal asset line ID was reverted to \"%s\" by a config reload; restoring the ID selected this session (\"%s\")."),
+			*s_cloudstreamSettings->portalAssetLineId, *s_selectedPortalAssetLineId);
+
+		s_cloudstreamSettings->portalAssetLineId = s_selectedPortalAssetLineId;
+		reverted = true;
+	}
+
+	if (!s_selectedBuildId.IsEmpty() && s_cloudstreamSettings->buildId != s_selectedBuildId)
+	{
+		s_cloudstreamSettings->buildId = s_selectedBuildId;
+		reverted = true;
+	}
+
+	if (!s_selectedPortalDisplayName.IsEmpty() && s_cloudstreamSettings->displayName != s_selectedPortalDisplayName)
+	{
+		s_cloudstreamSettings->displayName = s_selectedPortalDisplayName;
+		reverted = true;
+	}
+
+	if (reverted)
+	{
+		s_cloudstreamSettings->SaveConfig(NULL, *s_savedIniPath);
+		s_cloudstreamSettings->SaveToCustomIni();
+	}
 }
 
 FString FZeroLightMainButton::GetBuildFolder()
@@ -1201,16 +1507,21 @@ FString FZeroLightMainButton::GetBuildFolder()
 		return defaultBuildFolder;
 	}
 	FString stored = s_cloudstreamSettings->buildFolder.TrimStartAndEnd();
+	if (UZLCloudPluginSettings::IsStoredPathCorrupt(stored))
+	{
+		UE_LOG(LogPortalCLI, Warning, TEXT("Build folder \"%s\" is not a usable path; using \"%s\" and updating settings."), *stored, *defaultBuildFolder);
+		SetBuildFolder(defaultBuildFolder);
+		return defaultBuildFolder;
+	}
 	// User-selected absolute path (e.g. P:\TestProject__main\Build): use as-is so the chosen folder is always used
 	if (!FPaths::IsRelative(stored))
 	{
-		FString normalized = FPaths::ConvertRelativePathToFull(stored);
+		FString normalized = UZLCloudPluginSettings::ResolveStoredPath(stored);
 		FPaths::NormalizeDirectoryName(normalized);
 		return normalized;
 	}
 	// Relative path: resolve against project dir, and only then check it's under project (avoid overwriting user's absolute choice)
-	FString combined = FPaths::Combine(baseDir, stored);
-	FString resolved = FPaths::ConvertRelativePathToFull(combined);
+	FString resolved = UZLCloudPluginSettings::ResolveStoredPath(stored);
 	FString normalizedProjectDir = FPaths::ConvertRelativePathToFull(baseDir);
 	if (!normalizedProjectDir.EndsWith(TEXT("/")) && !normalizedProjectDir.EndsWith(TEXT("\\")))
 	{
@@ -1380,6 +1691,8 @@ FReply FZeroLightMainButton::TriggerBuildAndDeploy(FString buildFolderOverride)
 
 	SetRetryFailedRenameBuildPath("");
 
+	ReapplyPortalSelection();
+
 	OutputMessage assetLineNameResponse = portalCLI->m_client->client_get_asset_line(TCHAR_TO_ANSI(*s_cloudstreamSettings->portalAssetLineId));
 
 	FString assetLineJson = FFIString(portal::output_message_to_json(assetLineNameResponse.m_output_message)).ToFString();
@@ -1388,9 +1701,9 @@ FReply FZeroLightMainButton::TriggerBuildAndDeploy(FString buildFolderOverride)
 	TSharedPtr<FJsonObject> assetLineJsonObj;
 	if (FJsonSerializer::Deserialize(assetLineJsonReader, assetLineJsonObj) && assetLineJsonObj.IsValid())
 	{
-		if (assetLineJsonObj->TryGetField(FString("data")) != nullptr)
+		if (assetLineJsonObj->TryGetField(TEXT("data")) != nullptr)
 		{
-			FString displayName = assetLineJsonObj->GetObjectField(FString("data"))->GetStringField(FString("displayName"));
+			FString displayName = assetLineJsonObj->GetObjectField(TEXT("data"))->GetStringField(TEXT("displayName"));
 			FZeroLightMainButton::SetPortalDisplayName(displayName);
 
 			if (s_isCIBuild)
@@ -1453,7 +1766,10 @@ FReply FZeroLightMainButton::TriggerBuildAndDeploy(FString buildFolderOverride)
 				if(s_cloudstreamSettings->buildFolder != projectDir)
 					ParentBuildFolder = (s_cloudstreamSettings->buildFolder.EndsWith("Windows")) ? FPaths::GetPath(s_cloudstreamSettings->buildFolder) : s_cloudstreamSettings->buildFolder;
 
-				if (!FDesktopPlatformModule::Get()->OpenDirectoryDialog(FSlateApplication::Get().FindBestParentWindowHandleForDialogs(nullptr), TEXT("Package project..."), FPaths::Combine(projectDir, ParentBuildFolder), outFolderName))
+				// ParentBuildFolder may already be absolute, so resolve rather than combine it onto the project dir
+				const FString dialogStartFolder = ParentBuildFolder.IsEmpty() ? projectDir : UZLCloudPluginSettings::ResolveStoredPath(ParentBuildFolder);
+
+				if (!FDesktopPlatformModule::Get()->OpenDirectoryDialog(FSlateApplication::Get().FindBestParentWindowHandleForDialogs(nullptr), TEXT("Package project..."), dialogStartFolder, outFolderName))
 				{
 					success = false;
 					return FReply::Unhandled();
@@ -1692,7 +2008,7 @@ FString FZeroLightMainButton::FindOverrideProjectName(FString buildDirectory) co
 	return overrideExeName;
 }
 
-void FZeroLightMainButton::EnsureFFmpegInstalledForMediaOnDemandVideosAsync(TFunction<void(bool)> OnComplete) const
+void FZeroLightMainButton::EnsureFFmpegInstalledForMediaOnDemandVideosAsync(TFunction<void(bool)> OnComplete)
 {
 	if (s_cloudstreamSettings == nullptr || !s_cloudstreamSettings->bDownloadFFmpegForMediaOnDemandVideos)
 	{
@@ -1708,12 +2024,20 @@ void FZeroLightMainButton::EnsureFFmpegInstalledForMediaOnDemandVideosAsync(TFun
 		return;
 	}
 
+	FFmpegInstallCompletionCallbacks.Add(MoveTemp(OnComplete));
+	if (bFFmpegInstallInProgress)
+	{
+		UE_LOG(LogPortalCLI, Log, TEXT("FFmpeg installation already in progress; waiting for it to complete"));
+		return;
+	}
+	bFFmpegInstallInProgress = true;
+
 	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
 	if (!PlatformFile.CreateDirectoryTree(*FFmpegDirectory))
 	{
 		SetProgressText(FText::FromString("Failed to create FFmpeg third-party directory"));
 		UE_LOG(LogPortalCLI, Error, TEXT("Failed to create FFmpeg directory: %s"), *FFmpegDirectory);
-		OnComplete(false);
+		CompleteFFmpegInstall(false);
 		return;
 	}
 
@@ -1726,7 +2050,7 @@ void FZeroLightMainButton::EnsureFFmpegInstalledForMediaOnDemandVideosAsync(TFun
 	{
 		SetProgressText(FText::FromString("Failed to create temporary FFmpeg download directory"));
 		UE_LOG(LogPortalCLI, Error, TEXT("Failed to create FFmpeg temporary directory: %s"), *ExtractDirectory);
-		OnComplete(false);
+		CompleteFFmpegInstall(false);
 		return;
 	}
 
@@ -1766,7 +2090,7 @@ void FZeroLightMainButton::EnsureFFmpegInstalledForMediaOnDemandVideosAsync(TFun
 	});
 #endif
 
-	Request->OnProcessRequestComplete().BindLambda([TempRoot, ZipPath, ExtractDirectory, FFmpegDirectory, OnComplete](FHttpRequestPtr RequestPtr, FHttpResponsePtr Response, bool bWasSuccessful)
+	Request->OnProcessRequestComplete().BindLambda([TempRoot, ZipPath, ExtractDirectory, FFmpegDirectory](FHttpRequestPtr RequestPtr, FHttpResponsePtr Response, bool bWasSuccessful)
 	{
 		if (!bWasSuccessful || !Response.IsValid() || Response->GetResponseCode() < 200 || Response->GetResponseCode() >= 300)
 		{
@@ -1774,7 +2098,7 @@ void FZeroLightMainButton::EnsureFFmpegInstalledForMediaOnDemandVideosAsync(TFun
 			FZeroLightMainButton::SetProgressText(FText::FromString("Failed to download FFmpeg"));
 			UE_LOG(LogPortalCLI, Error, TEXT("FFmpeg download failed. HTTP code: %d"), ResponseCode);
 			IFileManager::Get().DeleteDirectory(*TempRoot, false, true);
-			OnComplete(false);
+			CompleteFFmpegInstall(false);
 			return;
 		}
 
@@ -1783,7 +2107,7 @@ void FZeroLightMainButton::EnsureFFmpegInstalledForMediaOnDemandVideosAsync(TFun
 			FZeroLightMainButton::SetProgressText(FText::FromString("Failed to save FFmpeg download"));
 			UE_LOG(LogPortalCLI, Error, TEXT("Failed to save FFmpeg zip to %s"), *ZipPath);
 			IFileManager::Get().DeleteDirectory(*TempRoot, false, true);
-			OnComplete(false);
+			CompleteFFmpegInstall(false);
 			return;
 		}
 
@@ -1791,7 +2115,7 @@ void FZeroLightMainButton::EnsureFFmpegInstalledForMediaOnDemandVideosAsync(TFun
 		UE_LOG(LogPortalCLI, Log, TEXT("Saved FFmpeg zip to %s (%0.1f MB)"), *ZipPath, ZipSize / 1048576.0);
 		FZeroLightMainButton::SetProgressText(FText::FromString("Installing FFmpeg..."));
 
-		AsyncTask(ENamedThreads::AnyThread, [TempRoot, ZipPath, ExtractDirectory, FFmpegDirectory, OnComplete]()
+		AsyncTask(ENamedThreads::AnyThread, [TempRoot, ZipPath, ExtractDirectory, FFmpegDirectory]()
 		{
 			FString ErrorMessage;
 			bool bCopied = InstallFFmpegFilesFromZip(ZipPath, FFmpegDirectory, ErrorMessage);
@@ -1845,13 +2169,13 @@ void FZeroLightMainButton::EnsureFFmpegInstalledForMediaOnDemandVideosAsync(TFun
 
 			IFileManager::Get().DeleteDirectory(*TempRoot, false, true);
 
-			AsyncTask(ENamedThreads::GameThread, [bExtracted, bCopied, ExtractReturnCode, ExtractError, ErrorMessage, FFmpegDirectory, OnComplete]()
+			AsyncTask(ENamedThreads::GameThread, [bExtracted, bCopied, ExtractReturnCode, ExtractError, ErrorMessage, FFmpegDirectory]()
 			{
 				if (!bExtracted)
 				{
 					FZeroLightMainButton::SetProgressText(FText::FromString("Failed to extract FFmpeg"));
 					UE_LOG(LogPortalCLI, Error, TEXT("Failed to extract FFmpeg zip. Return code: %d. Error: %s"), ExtractReturnCode, *ExtractError);
-					OnComplete(false);
+					CompleteFFmpegInstall(false);
 					return;
 				}
 
@@ -1859,13 +2183,13 @@ void FZeroLightMainButton::EnsureFFmpegInstalledForMediaOnDemandVideosAsync(TFun
 				{
 					FZeroLightMainButton::SetProgressText(FText::FromString("Failed to install FFmpeg"));
 					UE_LOG(LogPortalCLI, Error, TEXT("%s"), *ErrorMessage);
-					OnComplete(false);
+					CompleteFFmpegInstall(false);
 					return;
 				}
 
 				FZeroLightMainButton::SetProgressText(FText::FromString("FFmpeg downloaded"));
 				UE_LOG(LogPortalCLI, Log, TEXT("FFmpeg installed at %s"), *FFmpegDirectory);
-				OnComplete(true);
+				CompleteFFmpegInstall(true);
 			});
 		});
 	});
@@ -1875,7 +2199,7 @@ void FZeroLightMainButton::EnsureFFmpegInstalledForMediaOnDemandVideosAsync(TFun
 		SetProgressText(FText::FromString("Failed to start FFmpeg download"));
 		UE_LOG(LogPortalCLI, Error, TEXT("Failed to start FFmpeg download request"));
 		IFileManager::Get().DeleteDirectory(*TempRoot, false, true);
-		OnComplete(false);
+		CompleteFFmpegInstall(false);
 	}
 }
 
@@ -1938,7 +2262,7 @@ bool FZeroLightMainButton::TriggerBuildUpload(FString retryPath) const
 			return false;
 		}
 
-		FString thumbnailImageFilePath = FPaths::Combine(FPaths::ProjectDir(), GetThumbnailFilePath());
+		FString thumbnailImageFilePath = UZLCloudPluginSettings::ResolveStoredPath(GetThumbnailFilePath());
 		std::filesystem::path thumbnailImageFilePathStd = TCHAR_TO_UTF8(*thumbnailImageFilePath);
 		if (FPaths::FileExists(thumbnailImageFilePath))
 		{
@@ -2066,9 +2390,10 @@ TSharedPtr<FJsonObject> FZeroLightMainButton::AggregatePredictedJSONSchema() con
 	return aggregatedJsonObject;
 }
 
-TArray<TSharedPtr<FJsonValue>> FZeroLightMainButton::AggregatePredictedDimeModelConfigData() const
+
+TSharedPtr<FJsonObject> FZeroLightMainButton::AggregatePredictedDimeModelConfigData() const
 {
-	TArray<TSharedPtr<FJsonValue>> AggregatedArray;
+	TSharedPtr<FJsonObject> AggregatedObject = MakeShared<FJsonObject>();
 
 #if WITH_DIMECONFIGURATOR
 	struct FAggregatedDimeModel
@@ -2159,6 +2484,8 @@ TArray<TSharedPtr<FJsonValue>> FZeroLightMainButton::AggregatePredictedDimeModel
 	AggregatedByModelUpper.GetKeys(SortedModelKeys);
 	SortedModelKeys.Sort();
 
+	TArray<TSharedPtr<FJsonValue>> ModelsArray;
+
 	for (const FString& ModelKey : SortedModelKeys)
 	{
 		const FAggregatedDimeModel& AggregatedModel = AggregatedByModelUpper[ModelKey];
@@ -2168,22 +2495,50 @@ TArray<TSharedPtr<FJsonValue>> FZeroLightMainButton::AggregatePredictedDimeModel
 		}
 
 		TSharedPtr<FJsonObject> ModelObject = MakeShared<FJsonObject>();
-		ModelObject->SetStringField(TEXT("model_name"), AggregatedModel.ModelName);
+		ModelObject->SetStringField(TEXT("name"), AggregatedModel.ModelName);
 
 		if (AggregatedModel.DescriptionLookupById.Num() > 0)
 		{
-			TSharedPtr<FJsonObject> DescriptionLookupObject = MakeShared<FJsonObject>();
 			TArray<int32> DescriptionIds;
 			AggregatedModel.DescriptionLookupById.GetKeys(DescriptionIds);
 			DescriptionIds.Sort();
-			for (const int32 DescriptionId : DescriptionIds)
+
+
+			const int32 MaxDescriptionId = DescriptionIds.Last();
+			const bool bUsePositionalDescriptions = MaxDescriptionId >= 0 && (MaxDescriptionId + 1) <= (DescriptionIds.Num() * 2 + 16);
+
+			if (bUsePositionalDescriptions)
 			{
-				if (const FString* Description = AggregatedModel.DescriptionLookupById.Find(DescriptionId))
+				TArray<TSharedPtr<FJsonValue>> DescriptionsArray;
+				DescriptionsArray.Reserve(MaxDescriptionId + 1);
+				for (int32 DescriptionId = 0; DescriptionId <= MaxDescriptionId; ++DescriptionId)
 				{
-					DescriptionLookupObject->SetStringField(FString::FromInt(DescriptionId), *Description);
+					TSharedPtr<FJsonValue> DescriptionValue;
+					if (const FString* Description = AggregatedModel.DescriptionLookupById.Find(DescriptionId))
+					{
+						DescriptionValue = MakeShared<FJsonValueString>(*Description);
+					}
+					else
+					{
+						DescriptionValue = MakeShared<FJsonValueNull>();
+					}
+
+					DescriptionsArray.Add(DescriptionValue);
 				}
+				ModelObject->SetArrayField(TEXT("descriptions"), DescriptionsArray);
 			}
-			ModelObject->SetObjectField(TEXT("description_lookup"), DescriptionLookupObject);
+			else
+			{
+				TSharedPtr<FJsonObject> DescriptionsByIdObject = MakeShared<FJsonObject>();
+				for (const int32 DescriptionId : DescriptionIds)
+				{
+					if (const FString* Description = AggregatedModel.DescriptionLookupById.Find(DescriptionId))
+					{
+						DescriptionsByIdObject->SetStringField(FString::FromInt(DescriptionId), *Description);
+					}
+				}
+				ModelObject->SetObjectField(TEXT("descriptions_by_id"), DescriptionsByIdObject);
+			}
 		}
 
 		TArray<FDIMEModelCodeMetadata> SortedCodes;
@@ -2198,26 +2553,51 @@ TArray<TSharedPtr<FJsonValue>> FZeroLightMainButton::AggregatePredictedDimeModel
 			return A.Group.Compare(B.Group, ESearchCase::IgnoreCase) < 0;
 		});
 
-		TArray<TSharedPtr<FJsonValue>> CodesArray;
+		TArray<FString> GroupNames;
+		TMap<FString, int32> GroupIndicesByName;
 		for (const FDIMEModelCodeMetadata& CodeMetadata : SortedCodes)
 		{
-			TSharedPtr<FJsonObject> CodeObject = MakeShared<FJsonObject>();
-			CodeObject->SetStringField(TEXT("code"), CodeMetadata.Code);
-			CodeObject->SetStringField(TEXT("group"), CodeMetadata.Group);
+			if (!GroupIndicesByName.Contains(CodeMetadata.Group))
+			{
+				GroupIndicesByName.Add(CodeMetadata.Group, GroupNames.Add(CodeMetadata.Group));
+			}
+		}
+
+		TArray<TSharedPtr<FJsonValue>> GroupsArray;
+		GroupsArray.Reserve(GroupNames.Num());
+		for (const FString& GroupName : GroupNames)
+		{
+			GroupsArray.Add(MakeShared<FJsonValueString>(GroupName));
+		}
+		ModelObject->SetArrayField(TEXT("groups"), GroupsArray);
+
+		TArray<TSharedPtr<FJsonValue>> CodesArray;
+		CodesArray.Reserve(SortedCodes.Num());
+		for (const FDIMEModelCodeMetadata& CodeMetadata : SortedCodes)
+		{
+			TArray<TSharedPtr<FJsonValue>> CodeTuple;
+			CodeTuple.Add(MakeShared<FJsonValueString>(CodeMetadata.Code));
+			CodeTuple.Add(MakeShared<FJsonValueNumber>(GroupIndicesByName[CodeMetadata.Group]));
 			if (CodeMetadata.DescriptionId != INDEX_NONE)
 			{
-				CodeObject->SetNumberField(TEXT("description_id"), CodeMetadata.DescriptionId);
+				CodeTuple.Add(MakeShared<FJsonValueNumber>(CodeMetadata.DescriptionId));
 			}
 
-			CodesArray.Add(MakeShared<FJsonValueObject>(CodeObject));
+			CodesArray.Add(MakeShared<FJsonValueArray>(CodeTuple));
 		}
 
 		ModelObject->SetArrayField(TEXT("codes"), CodesArray);
-		AggregatedArray.Add(MakeShared<FJsonValueObject>(ModelObject));
+		ModelsArray.Add(MakeShared<FJsonValueObject>(ModelObject));
+	}
+
+	if (ModelsArray.Num() > 0)
+	{
+		AggregatedObject->SetNumberField(TEXT("version"), 2);
+		AggregatedObject->SetArrayField(TEXT("models"), ModelsArray);
 	}
 #endif
 
-	return AggregatedArray;
+	return AggregatedObject;
 }
 
 bool FZeroLightMainButton::AddRunInfoJSONAndMetadataToBuild(FString outputFolderPath, FString overrideProjectName, FString overrideExeName) const
@@ -2238,51 +2618,51 @@ bool FZeroLightMainButton::AddRunInfoJSONAndMetadataToBuild(FString outputFolder
 	TSharedPtr<FJsonObject> executablesJSONObj = MakeShareable(new FJsonObject);
 	TSharedPtr<FJsonObject> runModesJSONObj = MakeShareable(new FJsonObject);
 
-	executablesJSONObj->SetStringField("name", s_cloudstreamSettings->deployName);
-	executablesJSONObj->SetStringField("assetLineDisplayName", s_cloudstreamSettings->displayName);
-	executablesJSONObj->SetStringField("buildId", s_cloudstreamSettings->buildId);
-	executablesJSONObj->SetStringField("project", s_projectName.ToLower());
+	executablesJSONObj->SetStringField(TEXT("name"), s_cloudstreamSettings->deployName);
+	executablesJSONObj->SetStringField(TEXT("assetLineDisplayName"), s_cloudstreamSettings->displayName);
+	executablesJSONObj->SetStringField(TEXT("buildId"), s_cloudstreamSettings->buildId);
+	executablesJSONObj->SetStringField(TEXT("project"), s_projectName.ToLower());
 
 	if (FPaths::DirectoryExists(cppProjectExePath))
 	{
 		if (overrideExeName.IsEmpty())
 		{
 			if (FPaths::FileExists(cppProjectExePath + exeName))
-				executablesJSONObj->SetStringField("filename", exeName);
+				executablesJSONObj->SetStringField(TEXT("filename"), exeName);
 			else if (FPaths::FileExists(cppProjectExePath + defaultExeName))
-				executablesJSONObj->SetStringField("filename", defaultExeName); //Handle debug/development builds
+				executablesJSONObj->SetStringField(TEXT("filename"), defaultExeName); //Handle debug/development builds
 			else
-				executablesJSONObj->SetStringField("filename", projectStr + ".exe"); //Handle debug/development builds
+				executablesJSONObj->SetStringField(TEXT("filename"), projectStr + ".exe"); //Handle debug/development builds
 		}
 		else
 		{
-			executablesJSONObj->SetStringField("filename", overrideExeName + ".exe"); //Handle debug/development builds
+			executablesJSONObj->SetStringField(TEXT("filename"), overrideExeName + ".exe"); //Handle debug/development builds
 		}
 
-		executablesJSONObj->SetStringField("folder", projectStr + "/Binaries/Win64");
+		executablesJSONObj->SetStringField(TEXT("folder"), projectStr + "/Binaries/Win64");
 	}
 	else
 	{
 		if (overrideExeName.IsEmpty())
 		{
 			if (FPaths::FileExists(bpProjectExePath + exeName))
-				executablesJSONObj->SetStringField("filename", exeName);
+				executablesJSONObj->SetStringField(TEXT("filename"), exeName);
 			else if (FPaths::FileExists(bpProjectExePath + defaultExeName))
-				executablesJSONObj->SetStringField("filename", defaultExeName); //Handle debug/development builds
+				executablesJSONObj->SetStringField(TEXT("filename"), defaultExeName); //Handle debug/development builds
 			else
-				executablesJSONObj->SetStringField("filename", projectStr + ".exe"); //Handle debug/development builds
+				executablesJSONObj->SetStringField(TEXT("filename"), projectStr + ".exe"); //Handle debug/development builds
 		}
 		else
 		{
-			executablesJSONObj->SetStringField("filename", overrideExeName + ".exe"); //Handle debug/development builds
+			executablesJSONObj->SetStringField(TEXT("filename"), overrideExeName + ".exe"); //Handle debug/development builds
 		}
 
-		executablesJSONObj->SetStringField("folder", "");
+		executablesJSONObj->SetStringField(TEXT("folder"), TEXT(""));
 	}
 
-	executablesJSONObj->SetBoolField("monitorHeartbeat", true);
+	executablesJSONObj->SetBoolField(TEXT("monitorHeartbeat"), true);
 
-	executablesJSONObj->SetStringField("logPath", projectStr + "/Saved/Logs/unreal_log.txt");
+	executablesJSONObj->SetStringField(TEXT("logPath"), projectStr + "/Saved/Logs/unreal_log.txt");
 
 	FString cloudArgs = (s_cloudstreamSettings->bDisableTextureStreamingOnLaunch) ? "-WINDOWED -ResX=1270 -ResY=720 -NOTEXTURESTREAMING -Unattended -NoVSync -LOG=unreal_log.txt" : "-WINDOWED -ResX=1270 -ResY=720 -Unattended -NoVSync -LOG=unreal_log.txt";
 	FString cloudXRArgs = (s_cloudstreamSettings->bDisableTextureStreamingOnLaunch) ? "-WINDOWED -VR -cloudxr -ResX=1270 -ResY=720 -NOTEXTURESTREAMING -Unattended -NoVSync -LOG=unreal_log.txt" : "-WINDOWED -VR -cloudxr -ResX=1270 -ResY=720 -Unattended -NoVSync -LOG=unreal_log.txt";
@@ -2297,25 +2677,26 @@ bool FZeroLightMainButton::AddRunInfoJSONAndMetadataToBuild(FString outputFolder
 	TArray<TSharedPtr<FJsonValue>> executablesJSONArray;
 	executablesJSONArray.Add(MakeShareable(new FJsonValueObject(executablesJSONObj)));
 
-	runInfoJsonObj->SetStringField("handler", "server");
-	runInfoJsonObj->SetBoolField("autorun", true);
-	runInfoJsonObj->SetStringField("defaultRunMode", (s_cloudstreamSettings->supportsVR) ? "CloudXR" : "Cloud");
-	runInfoJsonObj->SetStringField("streamingType", "unreal");
-	runInfoJsonObj->SetBoolField("rebootOnDisconnect", s_cloudstreamSettings->bRebootAppOnDisconnect);
-	runInfoJsonObj->SetNumberField("stateWarningTime", s_cloudstreamSettings->stateRequestWarningTime);
-	runInfoJsonObj->SetNumberField("stateTimeout", s_cloudstreamSettings->stateRequestTimeout);
+	runInfoJsonObj->SetStringField(TEXT("handler"), TEXT("server"));
+	runInfoJsonObj->SetBoolField(TEXT("autorun"), true);
+	runInfoJsonObj->SetStringField(TEXT("defaultRunMode"), (s_cloudstreamSettings->supportsVR) ? TEXT("CloudXR") : TEXT("Cloud"));
+	runInfoJsonObj->SetStringField(TEXT("streamingType"), TEXT("unreal"));
+	runInfoJsonObj->SetBoolField(TEXT("rebootOnDisconnect"), s_cloudstreamSettings->bRebootAppOnDisconnect);
+	runInfoJsonObj->SetNumberField(TEXT("stateWarningTime"), s_cloudstreamSettings->stateRequestWarningTime);
+	runInfoJsonObj->SetNumberField(TEXT("stateTimeout"), s_cloudstreamSettings->stateRequestTimeout);
+	runInfoJsonObj->SetNumberField(TEXT("timeoutForBlockOnRenderFence"), s_cloudstreamSettings->timeoutForBlockOnRenderFence);
 	if (!FMath::IsNearlyEqual(s_cloudstreamSettings->initialHeartBeatTimeout, 260.0f)) //Only add these if non default vals, otherwise server content may be defining or overriding them
 	{
-		runInfoJsonObj->SetNumberField("initialHeartBeatTimeout", s_cloudstreamSettings->initialHeartBeatTimeout);
+		runInfoJsonObj->SetNumberField(TEXT("initialHeartBeatTimeout"), s_cloudstreamSettings->initialHeartBeatTimeout);
 	}
 	if (!FMath::IsNearlyEqual(s_cloudstreamSettings->heartBeatTimeout, 100.0f))
 	{
-		runInfoJsonObj->SetNumberField("heartBeatTimeout", s_cloudstreamSettings->heartBeatTimeout);
+		runInfoJsonObj->SetNumberField(TEXT("heartBeatTimeout"), s_cloudstreamSettings->heartBeatTimeout);
 	}
-	runInfoJsonObj->SetBoolField("defaultConnectStateSupported", true);
+	runInfoJsonObj->SetBoolField(TEXT("defaultConnectStateSupported"), true);
 
-	runInfoJsonObj->SetArrayField("executables", executablesJSONArray);
-	runInfoJsonObj->SetObjectField("runModes", runModesJSONObj);
+	runInfoJsonObj->SetArrayField(TEXT("executables"), executablesJSONArray);
+	runInfoJsonObj->SetObjectField(TEXT("runModes"), runModesJSONObj);
 
 	//Metadata
 	{
@@ -2325,24 +2706,24 @@ bool FZeroLightMainButton::AddRunInfoJSONAndMetadataToBuild(FString outputFolder
 		TSharedPtr<FJsonObject> appCapabilitiesJSONObj = MakeShareable(new FJsonObject);
 
 		//Gather metadata flags/caps
-		metadataJsonObj->SetStringField("type", "unreal");
+		metadataJsonObj->SetStringField(TEXT("type"), TEXT("unreal"));
 
 		//Misc metadata
 		{
-			metadataJsonObj->SetStringField("portal_display_name", s_cloudstreamSettings->displayName);
-			metadataJsonObj->SetStringField("filtered_keys_list", s_cloudstreamSettings->filteredKeyList);
+			metadataJsonObj->SetStringField(TEXT("portal_display_name"), s_cloudstreamSettings->displayName);
+			metadataJsonObj->SetStringField(TEXT("filtered_keys_list"), s_cloudstreamSettings->filteredKeyList);
 		}
 
 		//Versioning metadata
 		{
-			versioningJSONObj->SetStringField("unreal", ENGINE_VERSION_STRING);
+			versioningJSONObj->SetStringField(TEXT("unreal"), ENGINE_VERSION_STRING);
 
 			IPluginManager& PluginManager = IPluginManager::Get();
 			TSharedPtr<IPlugin> ZlCloudStreamPlugin = PluginManager.FindPlugin("ZLCloudPlugin");
 			if (ZlCloudStreamPlugin)
 			{
 				const FPluginDescriptor& Descriptor = ZlCloudStreamPlugin->GetDescriptor();
-				versioningJSONObj->SetStringField("omnistream", *Descriptor.VersionName);
+				versioningJSONObj->SetStringField(TEXT("omnistream"), *Descriptor.VersionName);
 			}
 
 			int cs2_major = 0;
@@ -2361,33 +2742,33 @@ bool FZeroLightMainButton::AddRunInfoJSONAndMetadataToBuild(FString outputFolder
 			if (ZLCloudPlugin::CloudStream2::IsPluginInitialised())
 			{
 				CloudStream2DLL::GetPluginVersion(cs2_major, cs2_minor, cs2_rev, cs2_build);
-				versioningJSONObj->SetStringField("cloudstream2", FString::Printf(TEXT("%d.%d.%d.%d"), cs2_major, cs2_minor, cs2_rev, cs2_build));
+				versioningJSONObj->SetStringField(TEXT("cloudstream2"), FString::Printf(TEXT("%d.%d.%d.%d"), cs2_major, cs2_minor, cs2_rev, cs2_build));
 			}
 			if (freeCS2AfterPluginVerCheck)
 				ZLCloudPlugin::CloudStream2::FreePlugin();
 
 			FString portalVer = FString(portal::get_library_version().c_str);
-			versioningJSONObj->SetStringField("portalclient", portalVer);
+			versioningJSONObj->SetStringField(TEXT("portalclient"), portalVer);
 
 			TSharedPtr<FJsonObject> zlPluginsJson = GetAllZLPluginVersionsAsJson(true);
 			if (zlPluginsJson.IsValid())
 			{
-				versioningJSONObj->SetObjectField("zl_plugins", zlPluginsJson);
+				versioningJSONObj->SetObjectField(TEXT("zl_plugins"), zlPluginsJson);
 			}
 
-			metadataJsonObj->SetObjectField("version", versioningJSONObj);
+			metadataJsonObj->SetObjectField(TEXT("version"), versioningJSONObj);
 		}
 
 		//App capabilities/capability version metadata
 		{
 			if (s_cloudstreamSettings->supportsVR)
 			{
-				appCapabilitiesJSONObj->SetStringField("VR", XR_CAPS_VERSION_STRING);
+				appCapabilitiesJSONObj->SetStringField(TEXT("VR"), XR_CAPS_VERSION_STRING);
 			}
 
 			//add SpotLite and feature caps here if present
 
-			metadataJsonObj->SetObjectField("app_caps", appCapabilitiesJSONObj);
+			metadataJsonObj->SetObjectField(TEXT("app_caps"), appCapabilitiesJSONObj);
 		}
 
 		//Dependencies metadata
@@ -2398,38 +2779,38 @@ bool FZeroLightMainButton::AddRunInfoJSONAndMetadataToBuild(FString outputFolder
 			{
 				TSharedPtr<FJsonObject> xrDepsJsonObject = MakeShareable(new FJsonObject);
 
-				xrDepsJsonObject->SetStringField("type", "xr");
-				xrDepsJsonObject->SetStringField("version", XR_DEPS_VERSION_STRING);
+				xrDepsJsonObject->SetStringField(TEXT("type"), TEXT("xr"));
+				xrDepsJsonObject->SetStringField(TEXT("version"), XR_DEPS_VERSION_STRING);
 
 				dependenciesJson.Add(MakeShareable(new FJsonValueObject(xrDepsJsonObject)));
 			}
 
-			metadataJsonObj->SetArrayField("dependencies", dependenciesJson);
+			metadataJsonObj->SetArrayField(TEXT("dependencies"), dependenciesJson);
 		}
 
 		//Estimate JSON Schema 
 		{
 			TSharedPtr<FJsonObject> aggregatedJsonSchema = AggregatePredictedJSONSchema();
-			aggregatedJsonSchema->SetStringField("title", (s_cloudstreamSettings->displayName + " Schema"));
+			aggregatedJsonSchema->SetStringField(TEXT("title"), (s_cloudstreamSettings->displayName + " Schema"));
 
-			metadataJsonObj->SetObjectField("state_schema", aggregatedJsonSchema);
+			metadataJsonObj->SetObjectField(TEXT("state_schema"), aggregatedJsonSchema);
 
 #if WITH_DIMECONFIGURATOR
-			TArray<TSharedPtr<FJsonValue>> AggregatedDimeModelConfigData = AggregatePredictedDimeModelConfigData();
-			if (AggregatedDimeModelConfigData.Num() > 0)
+			TSharedPtr<FJsonObject> AggregatedDimeModelConfigData = AggregatePredictedDimeModelConfigData();
+			if (AggregatedDimeModelConfigData.IsValid() && AggregatedDimeModelConfigData->Values.Num() > 0)
 			{
-				metadataJsonObj->SetArrayField("dime_model_config_data", AggregatedDimeModelConfigData);
+				metadataJsonObj->SetObjectField(TEXT("dime_model_config_data"), AggregatedDimeModelConfigData);
 			}
 #endif
 
 			TSharedPtr<FJsonObject> SchemaPresetsAggregated = AggregateZLSchemaPresetsFromDisk();
 			if (SchemaPresetsAggregated.IsValid() && SchemaPresetsAggregated->Values.Num() > 0)
-				metadataJsonObj->SetObjectField("schema_presets", SchemaPresetsAggregated);
+				metadataJsonObj->SetObjectField(TEXT("schema_presets"), SchemaPresetsAggregated);
 		}
 
 		FString metadataJsonStr;
 
-		TSharedRef<TJsonWriter<>> metadataWriter = TJsonWriterFactory<>::Create(&metadataJsonStr);
+		TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> metadataWriter = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&metadataJsonStr);
 
 
 		if (!FJsonSerializer::Serialize(metadataJsonObj.ToSharedRef(), metadataWriter))
@@ -2440,7 +2821,7 @@ bool FZeroLightMainButton::AddRunInfoJSONAndMetadataToBuild(FString outputFolder
 		else
 			s_buildMetadataStr = metadataJsonStr;
 
-		runInfoJsonObj->SetObjectField("metadata", metadataJsonObj);
+		runInfoJsonObj->SetObjectField(TEXT("metadata"), metadataJsonObj);
 	}
 
 	FString jsonStr;
@@ -2507,14 +2888,14 @@ bool FZeroLightMainButton::AddRunMode(FString runMode, FString args, TSharedPtr<
 {
 	TSharedPtr<FJsonObject> cloudModesJSONObj = MakeShareable(new FJsonObject);
 
-	cloudModesJSONObj->SetStringField("exe", s_projectName.ToLower() + "." + s_cloudstreamSettings->deployName + "." + s_cloudstreamSettings->buildId);
+	cloudModesJSONObj->SetStringField(TEXT("exe"), s_projectName.ToLower() + "." + s_cloudstreamSettings->deployName + "." + s_cloudstreamSettings->buildId);
 
 	if (!streamingSwitch.IsEmpty())
-		cloudModesJSONObj->SetStringField("streamingSwitch", streamingSwitch);
+		cloudModesJSONObj->SetStringField(TEXT("streamingSwitch"), streamingSwitch);
 
 	FString commandArgs = args;
 
-	cloudModesJSONObj->SetStringField("args", commandArgs);
+	cloudModesJSONObj->SetStringField(TEXT("args"), commandArgs);
 
 	jsonObj->SetObjectField(runMode, cloudModesJSONObj);
 
@@ -2661,6 +3042,11 @@ void FZeroLightMainButton::ShowSchemasEditorWindow()
 		}));
 
 	FSlateApplication::Get().AddWindow(SchemasEditorWnd.ToSharedRef(), true);
+}
+
+void FZeroLightMainButton::ShowFilteredKeysEditorWindow()
+{
+	SZLFilteredKeysEditor::OpenWindow();
 }
 
 void FZeroLightMainButton::ShowBuildAndDeployDialog()
@@ -3680,7 +4066,7 @@ void portalcli::AsyncPortalTask(AsyncPortalTaskType taskType, bool triggerBuildT
 bool portalcli::ReportBuildFailure()
 {
 	TSharedPtr<FJsonObject> JsonObject = MakeShareable(new FJsonObject);
-	JsonObject->SetBoolField("fail", true);
+	JsonObject->SetBoolField(TEXT("fail"), true);
 
 	FString OutputString;
 
@@ -3825,9 +4211,9 @@ uint32 GetTokenAsyncTask::Run()
 				if (FJsonSerializer::Deserialize(usernameJsonReader, usernameJsonObj) && usernameJsonObj.IsValid())
 				{
 					FString usernameStr;
-					if (usernameJsonObj->TryGetField(FString("user_info")) != nullptr)
+					if (usernameJsonObj->TryGetField(TEXT("user_info")) != nullptr)
 					{
-						if (usernameJsonObj->GetObjectField(FString("user_info"))->TryGetStringField(FString("username"), usernameStr))
+						if (usernameJsonObj->GetObjectField(TEXT("user_info"))->TryGetStringField(TEXT("username"), usernameStr))
 							FZeroLightMainButton::SetPortalUsername(usernameStr);
 					}
 				}
@@ -4069,7 +4455,7 @@ uint32 UploadAsyncTask::Run()
 			TSharedPtr<FJsonObject> createAssetVersionResultJsonObj;
 			if (FJsonSerializer::Deserialize(createAssetVersionResultJsonReader, createAssetVersionResultJsonObj) && createAssetVersionResultJsonObj.IsValid())
 			{
-				FString assetVersionId = createAssetVersionResultJsonObj->GetObjectField(FString("data"))->GetStringField("_id");
+				FString assetVersionId = createAssetVersionResultJsonObj->GetObjectField(TEXT("data"))->GetStringField(TEXT("_id"));
 				currentAssetVersionId = assetVersionId;
 				FZeroLightMainButton::SetCurrentUploadAssetVersionId(currentAssetVersionId);
 			}
@@ -4140,7 +4526,7 @@ uint32 UploadAsyncTask::Run()
 					TSharedPtr<FJsonObject> uploadResultJsonObj;
 					if (FJsonSerializer::Deserialize(uploadResultJsonReader, uploadResultJsonObj) && uploadResultJsonObj.IsValid())
 					{
-						FZeroLightMainButton::SetActivePortalBuildRef(uploadResultJsonObj->GetStringField("asset_version_id"));
+						FZeroLightMainButton::SetActivePortalBuildRef(uploadResultJsonObj->GetStringField(TEXT("asset_version_id")));
 					}
 
 					if (success)
@@ -4389,9 +4775,9 @@ uint32 SelectAssetLineAsyncTask::Run()
 				if (FJsonSerializer::Deserialize(usernameJsonReader, usernameJsonObj) && usernameJsonObj.IsValid())
 				{
 					FString usernameStr;
-					if (usernameJsonObj->TryGetField(FString("user_info")) != nullptr)
+					if (usernameJsonObj->TryGetField(TEXT("user_info")) != nullptr)
 					{
-						if (usernameJsonObj->GetObjectField(FString("user_info"))->TryGetStringField(FString("username"), usernameStr))
+						if (usernameJsonObj->GetObjectField(TEXT("user_info"))->TryGetStringField(TEXT("username"), usernameStr))
 							FZeroLightMainButton::SetPortalUsername(usernameStr);
 					}
 				}
@@ -4404,7 +4790,7 @@ uint32 SelectAssetLineAsyncTask::Run()
 			if (FJsonSerializer::Deserialize(assetSelectJsonReader, assetSelectJsonObj) && assetSelectJsonObj.IsValid())
 			{
 				FString assetLineIdStr, usernameStr;
-				if (assetSelectJsonObj->TryGetStringField(FString("assetLineId"), assetLineIdStr) && assetSelectJsonObj->TryGetStringField(FString("username"), usernameStr))
+				if (assetSelectJsonObj->TryGetStringField(TEXT("assetLineId"), assetLineIdStr) && assetSelectJsonObj->TryGetStringField(TEXT("username"), usernameStr))
 				{
 					FString ts = GetCurrentTimestamp();
 					UE_LOG(LogPortalCLI, Log, TEXT("%s - Portal Username: %s"), *ts, *usernameStr);
@@ -4418,7 +4804,7 @@ uint32 SelectAssetLineAsyncTask::Run()
 			TSharedPtr<FJsonObject> assetLineResultJsonObj;
 			if (FJsonSerializer::Deserialize(assetLineResultJsonReader, assetLineResultJsonObj) && assetLineResultJsonObj.IsValid())
 			{
-				FString assetLineId = assetLineResultJsonObj->GetStringField("assetLineId");
+				FString assetLineId = assetLineResultJsonObj->GetStringField(TEXT("assetLineId"));
 				FZeroLightMainButton::SetPortalAssetLineID_Static(FText::FromString(assetLineId));
 	
 				OutputMessage assetLineNameResponse = threadBardCli.m_client->client_get_asset_line(TCHAR_TO_ANSI(*FZeroLightMainButton::GetPortalAssetLineID()));
@@ -4429,9 +4815,9 @@ uint32 SelectAssetLineAsyncTask::Run()
 				TSharedPtr<FJsonObject> assetLineJsonObj;
 				if (FJsonSerializer::Deserialize(assetLineJsonReader, assetLineJsonObj) && assetLineJsonObj.IsValid())
 				{
-					if (assetLineJsonObj->TryGetField(FString("data")) != nullptr)
+					if (assetLineJsonObj->TryGetField(TEXT("data")) != nullptr)
 					{
-						FString displayName = assetLineJsonObj->GetObjectField(FString("data"))->GetStringField(FString("displayName"));
+						FString displayName = assetLineJsonObj->GetObjectField(TEXT("data"))->GetStringField(TEXT("displayName"));
 						FZeroLightMainButton::SetPortalDisplayName_Static(displayName);
 						FString ts = GetCurrentTimestamp();
 						UE_LOG(LogPortalCLI, Log, TEXT("%s - Asset Line Display Name: %s"), *ts, *displayName);

@@ -3,6 +3,7 @@
 	"Modules": 
 	{
 		"ZLCloudPlugin": "UnrealEditor-ZLCloudPlugin.dll",
-		"ZLCloudPluginEditor": "UnrealEditor-ZLCloudPluginEditor.dll"
+		"ZLCloudPluginEditor": "UnrealEditor-ZLCloudPluginEditor.dll",
+		"ZLCloudPluginShaders": "UnrealEditor-ZLCloudPluginShaders.dll"
 	}
 }

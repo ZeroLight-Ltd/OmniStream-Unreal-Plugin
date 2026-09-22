@@ -30,7 +30,7 @@ try:
         QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox, QCheckBox,
         QPushButton, QScrollArea, QListWidget, QListWidgetItem, QMessageBox,
         QSizePolicy, QProgressBar, QApplication, QDialog, QPlainTextEdit, QSplitter, QTextEdit,
-        QStackedWidget
+        QStackedWidget, QSpinBox
     )
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor, QTextFormat
@@ -128,9 +128,13 @@ def _get_model_entries_from_dimebake_files():
     if not project_root:
         return []
 
+    # Backup/temp dirs can hold a full copy of a model (dimebake + sibling .umap) whose
+    # folder name is timestamped, which would be offered as a model the C++ side cannot
+    # resolve - it only ever looks under /Game for "<Model>/Configuration/...".
     skip_dirs = {
         ".git", ".vs", ".idea", "__pycache__",
-        "Binaries", "Intermediate", "Saved", "DerivedDataCache"
+        "Binaries", "Intermediate", "Saved", "DerivedDataCache",
+        "Backups", "Backup", "Temp"
     }
     entries_by_key = {}
 
@@ -320,6 +324,23 @@ def _persist_selected_auto_populate_options(selected_options):
     if hasattr(unreal.ZLOmniStreamAutoPopulateLibrary, "set_selected_auto_populate_options"):
         return unreal.ZLOmniStreamAutoPopulateLibrary.set_selected_auto_populate_options(selected_options)
 
+    return False
+
+
+def _get_persisted_advanced_settings_json():
+    if hasattr(unreal.ZLOmniStreamAutoPopulateLibrary, "get_advanced_auto_populate_settings_json"):
+        value = unreal.ZLOmniStreamAutoPopulateLibrary.get_advanced_auto_populate_settings_json()
+        if value is None:
+            return ""
+        return str(value)
+    return ""
+
+
+def _persist_advanced_auto_populate_settings(advanced_settings_json):
+    if hasattr(unreal.ZLOmniStreamAutoPopulateLibrary, "set_advanced_auto_populate_settings_json"):
+        return unreal.ZLOmniStreamAutoPopulateLibrary.set_advanced_auto_populate_settings_json(
+            advanced_settings_json or ""
+        )
     return False
 
 
@@ -519,8 +540,18 @@ class AdvancedAutoPopulateWindow(QWidget):
         self.option_advanced_controls = {}
         self.discovered_dime_model_entries = _get_model_entries_from_dimebake_files()
         self._suppress_close_save_prompt = False
+        self._persisted_advanced_settings = {}
+        persisted_advanced_json = _get_persisted_advanced_settings_json()
+        if persisted_advanced_json:
+            try:
+                parsed = json.loads(persisted_advanced_json)
+                if isinstance(parsed, dict):
+                    self._persisted_advanced_settings = parsed
+            except (TypeError, ValueError, json.JSONDecodeError):
+                self._persisted_advanced_settings = {}
 
         self._build_ui()
+        self._apply_persisted_advanced_settings()
         self._snapshot_current_settings()
         self.adjustSize()
         self.resize(500, self.height())
@@ -848,7 +879,7 @@ class AdvancedAutoPopulateWindow(QWidget):
         group_layout.setContentsMargins(12, 16, 12, 8)
         group_layout.setSpacing(6)
 
-        controls = {"checkboxes": {}, "level_selectors": {}}
+        controls = {"checkboxes": {}, "number_inputs": {}, "level_selectors": {}}
 
         for checkbox_desc in list(self._get_desc_field(advanced_desc, "Checkboxes", []) or []):
             checkbox_id = self._to_py_string(self._get_desc_field(checkbox_desc, "Id", ""))
@@ -861,6 +892,41 @@ class AdvancedAutoPopulateWindow(QWidget):
             checkbox_widget.setChecked(default_checked)
             group_layout.addWidget(checkbox_widget)
             controls["checkboxes"][checkbox_id] = checkbox_widget
+
+        for number_desc in list(self._get_desc_field(advanced_desc, "NumberInputs", []) or []):
+            number_id = self._to_py_string(self._get_desc_field(number_desc, "Id", ""))
+            number_label = self._to_py_string(self._get_desc_field(number_desc, "Label", number_id))
+            default_value = int(self._get_desc_field(number_desc, "DefaultValue", 1) or 1)
+            min_value = int(self._get_desc_field(number_desc, "MinValue", 1) or 1)
+            max_value = int(self._get_desc_field(number_desc, "MaxValue", 99) or 99)
+            visible_when_checkbox_id = self._to_py_string(
+                self._get_desc_field(number_desc, "VisibleWhenCheckboxId", "")
+            )
+            if not number_id:
+                continue
+
+            number_row = QWidget()
+            number_row_layout = QHBoxLayout(number_row)
+            number_row_layout.setContentsMargins(0, 0, 0, 0)
+            number_row_layout.setSpacing(8)
+            number_row_layout.addWidget(QLabel(number_label))
+            spinbox = QSpinBox()
+            spinbox.setMinimum(min_value)
+            spinbox.setMaximum(max(min_value, max_value))
+            spinbox.setValue(max(min_value, min(spinbox.maximum(), default_value)))
+            number_row_layout.addWidget(spinbox)
+            number_row_layout.addStretch(1)
+            group_layout.addWidget(number_row)
+            controls["number_inputs"][number_id] = spinbox
+
+            if visible_when_checkbox_id and visible_when_checkbox_id in controls["checkboxes"]:
+                parent_checkbox = controls["checkboxes"][visible_when_checkbox_id]
+                number_row.setVisible(parent_checkbox.isChecked())
+                parent_checkbox.toggled.connect(
+                    lambda checked, row=number_row: row.setVisible(checked)
+                )
+            elif visible_when_checkbox_id:
+                number_row.setVisible(False)
 
         for selector_desc in list(self._get_desc_field(advanced_desc, "LevelSelectors", []) or []):
             selector_id = self._to_py_string(self._get_desc_field(selector_desc, "Id", ""))
@@ -976,12 +1042,62 @@ class AdvancedAutoPopulateWindow(QWidget):
 
     def _persist_selected_options(self):
         _persist_selected_auto_populate_options(self._gather_selected_options())
+        _persist_advanced_auto_populate_settings(
+            json.dumps(self._gather_advanced_settings(), sort_keys=True)
+        )
 
     def _snapshot_current_settings(self):
         self._saved_selected_options = set(self._gather_selected_options())
         self._saved_selected_levels = set(self._gather_selected_levels())
         self._saved_additive_mode = self.additive_checkbox.isChecked()
         self._saved_advanced_settings_json = json.dumps(self._gather_advanced_settings(), sort_keys=True)
+
+    def _apply_persisted_advanced_settings(self):
+        if not isinstance(self._persisted_advanced_settings, dict):
+            return
+
+        for option_name, option_payload in self._persisted_advanced_settings.items():
+            controls = self.option_advanced_controls.get(option_name)
+            if not controls or not isinstance(option_payload, dict):
+                continue
+
+            checkbox_payload = option_payload.get("checkboxes", {})
+            if isinstance(checkbox_payload, dict):
+                for checkbox_id, checked in checkbox_payload.items():
+                    checkbox_widget = controls.get("checkboxes", {}).get(checkbox_id)
+                    if checkbox_widget is not None:
+                        checkbox_widget.setChecked(bool(checked))
+
+            number_payload = option_payload.get("numberInputs", {})
+            if isinstance(number_payload, dict):
+                for number_id, value in number_payload.items():
+                    spinbox = controls.get("number_inputs", {}).get(number_id)
+                    if spinbox is None:
+                        continue
+                    try:
+                        numeric_value = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    spinbox.setValue(max(spinbox.minimum(), min(spinbox.maximum(), numeric_value)))
+
+            level_payload = option_payload.get("levelSelections", {})
+            if isinstance(level_payload, dict):
+                for selector_id, selected_values in level_payload.items():
+                    selector_list = controls.get("level_selectors", {}).get(selector_id)
+                    if selector_list is None or not isinstance(selected_values, list):
+                        continue
+                    selected_set = {
+                        self._to_py_string(value)
+                        for value in selected_values
+                        if self._to_py_string(value)
+                    }
+                    for row in range(selector_list.count()):
+                        item = selector_list.item(row)
+                        level_package = item.data(Qt.UserRole)
+                        level_value = self._to_py_string(level_package if level_package else item.text())
+                        item.setCheckState(
+                            Qt.Checked if level_value in selected_set else Qt.Unchecked
+                        )
 
     def _has_unsaved_settings_changes(self):
         if set(self._gather_selected_options()) != self._saved_selected_options:
@@ -1029,15 +1145,18 @@ class AdvancedAutoPopulateWindow(QWidget):
     def _gather_advanced_settings(self):
         payload = {}
         for option_name, controls in self.option_advanced_controls.items():
-            if option_name not in self.option_checkbox_map or not self.option_checkbox_map[option_name].isChecked():
-                continue
-
             option_payload = {}
             checkbox_payload = {}
             for checkbox_id, checkbox_widget in controls.get("checkboxes", {}).items():
                 checkbox_payload[checkbox_id] = checkbox_widget.isChecked()
             if checkbox_payload:
                 option_payload["checkboxes"] = checkbox_payload
+
+            number_payload = {}
+            for number_id, spinbox in controls.get("number_inputs", {}).items():
+                number_payload[number_id] = int(spinbox.value())
+            if number_payload:
+                option_payload["numberInputs"] = number_payload
 
             level_selection_payload = {}
             actor_selection_payload = {}
@@ -1266,7 +1385,13 @@ def open_window():
         make_taskbar_visible=True,
         parent_to_slate=False
     )
-    AdvancedAutoPopulateWindow.window.resize(550,850)
+    window = AdvancedAutoPopulateWindow.window
+    window.resize(550, 850)
+    screen = QApplication.primaryScreen()
+    if screen is not None:
+        screen_geo = screen.availableGeometry()
+        frame = window.frameGeometry()
+        window.move(frame.x(), screen_geo.y() + 50)
 
 
 if __name__ == "__main__":

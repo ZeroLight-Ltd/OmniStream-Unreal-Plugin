@@ -46,6 +46,13 @@ FZLCloudPluginVideoInputViewport::~FZLCloudPluginVideoInputViewport()
 
 void FZLCloudPluginVideoInputViewport::OnViewportRendered(FViewport* InViewport)
 {
+#if UNREAL_5_8_OR_NEWER
+	// Match PixelStreaming PIE path: filter with IsPlayInEditorViewport instead of TargetViewport widget matching.
+	if (!InViewport || !InViewport->IsPlayInEditorViewport())
+	{
+		return;
+	}
+#else
 	IZLCloudPluginModule& Module = IZLCloudPluginModule::Get();
 	TWeakPtr<SViewport> TargetViewport = Module.GetTargetViewport();
 	if (!TargetViewport.IsValid())
@@ -77,6 +84,7 @@ void FZLCloudPluginVideoInputViewport::OnViewportRendered(FViewport* InViewport)
 	{
 		return;
 	}
+#endif
 
 	const FTextureRHIRef& FrameBuffer = InViewport->GetRenderTargetTexture();
 	if (!FrameBuffer)
@@ -91,4 +99,3 @@ void FZLCloudPluginVideoInputViewport::OnViewportRendered(FViewport* InViewport)
 }
 
 #endif
-

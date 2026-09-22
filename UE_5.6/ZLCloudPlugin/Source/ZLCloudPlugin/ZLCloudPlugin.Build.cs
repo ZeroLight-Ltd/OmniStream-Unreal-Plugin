@@ -17,7 +17,7 @@ public class ZLCloudPlugin : ModuleRules
 		PrivatePCHHeaderFile = "Private/PCH.h";
 		
 		// Read version from .uplugin file and get git hash
-		string PluginDirectory = Path.Combine(ModuleDirectory, "..", "..");
+		string PluginDirectory = Path.GetFullPath(Path.Combine(ModuleDirectory, "..", ".."));
 		string UPluginPath = Path.Combine(PluginDirectory, "ZLCloudPlugin.uplugin");
 		
 		string VersionName = "0.0.0";
@@ -147,6 +147,7 @@ public class ZLCloudPlugin : ModuleRules
 				"RenderCore",
 				"RHI",
 				"RHICore",
+				"Renderer",
 				"Slate",
 				"SlateCore",
 				"AudioMixer",
@@ -165,7 +166,8 @@ public class ZLCloudPlugin : ModuleRules
 				"MovieRenderPipelineSettings",
 				"LevelSequence",
 				"MovieRenderPipelineRenderPasses",
-				"ImageWrapper"
+				"ImageWrapper",
+				"ZLCloudPluginShaders"
 		});
 		
 		if(version_5_1_or_newer)
@@ -187,6 +189,7 @@ public class ZLCloudPlugin : ModuleRules
 					"DesktopPlatform",
 					"AssetTools",
 					"OutputLog",
+					"MessageLog",
 					"LiveCoding",
 					"UnrealEd",
 					"GraphEditor",
@@ -239,21 +242,21 @@ public class ZLCloudPlugin : ModuleRules
 			PrivateIncludePaths.Add(Path.Combine(EngineDir, "Source/Runtime/VulkanRHI/Private/Linux"));
 		}
 
-		string FFmpegDirectory = Path.Combine(PluginDirectory, "Binaries/ThirdParty/ffmpeg");
+		// Stage ffmpeg as a NonUFS runtime dependency from its install location under plugin Binaries.
+		string FFmpegDirectory = Path.Combine(PluginDirectory, "Binaries", "ThirdParty", "ffmpeg");
 		string FFmpegExePath = Path.Combine(FFmpegDirectory, "ffmpeg.exe");
-		if (ShouldStageFFmpegForMediaOnDemandVideos(Target, FFmpegExePath))
+		if (ShouldStageFFmpegForMediaOnDemandVideos(Target, FFmpegExePath) && File.Exists(FFmpegExePath))
 		{
-			// Register when ffmpeg is already present or when enabled in settings, so staging picks up
-			// ffmpeg downloaded after an earlier UBT run (e.g. OmniStream CI download before UAT -build -stage).
-			RuntimeDependencies.Add(FFmpegExePath);
+			RuntimeDependencies.Add(FFmpegExePath, StagedFileType.NonUFS);
 
-			if (Directory.Exists(FFmpegDirectory))
+			foreach (string LicenseFile in Directory.GetFiles(FFmpegDirectory, "LICENSE*", SearchOption.TopDirectoryOnly))
 			{
-				foreach (string LicenseFile in Directory.GetFiles(FFmpegDirectory, "LICENSE*", SearchOption.TopDirectoryOnly))
-				{
-					RuntimeDependencies.Add(LicenseFile);
-				}
+				RuntimeDependencies.Add(LicenseFile, StagedFileType.NonUFS);
 			}
+		}
+		else if (ShouldStageFFmpegForMediaOnDemandVideos(Target, FFmpegExePath))
+		{
+			System.Console.WriteLine("ZLCloudPlugin: ffmpeg staging enabled but ffmpeg.exe was not found at " + FFmpegExePath);
 		}
 	}
 

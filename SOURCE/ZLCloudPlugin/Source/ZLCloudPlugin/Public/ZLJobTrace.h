@@ -46,6 +46,8 @@ public:
 	void StartTimer(const FString& Name);
 	void EndTimer(const FString& Name);
 	bool HasTimer(const FString& Name);
+	/** Insert a completed timer ending now, spanning the last DurationSeconds (for timeouts). */
+	void AddCompletedTimer(const FString& Name, double DurationSeconds);
 
 private:
 	static double UTC_Now();
@@ -57,7 +59,10 @@ private:
 	ZLJobTrace();
 	static ZLJobTrace* __Instance;
 	TMap<int32, FZLJobTraceData> JobTraceDataDict;
-	static int32 S_ActiveTracingId;
+	/** Jobs that have started tracing and not yet ended, in start order. Instrumentation targets the last. */
+	static TArray<int32> S_ActiveTracingIds;
+
+	static int32 ActiveTracingId();
 
 public:
 	static ZLJobTrace* Get();
@@ -66,6 +71,7 @@ public:
 	static void JOBTRACE_TIMER_END(const FString& Name);
 	static void JOBTRACE_ADD_DATA(const FString& Key, TSharedPtr<FJsonValue> Value);
 	static bool JOBTRACE_IS_CURRENTLY_TIMING(const FString& Name);
+	static void JOBTRACE_ADD_COMPLETED_TIMER(const FString& Name, double DurationSeconds);
 
 	static void ON_START_JOBTRACE(const FString& MessageData);
 	static FString ON_END_JOBTRACE(const FString& MessageData);

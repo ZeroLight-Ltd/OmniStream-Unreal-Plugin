@@ -37,6 +37,7 @@ namespace ZLStateEditorV2SchemaPersistence
 	static const TCHAR* LastSchemaPathKey = TEXT("LastOpenSchemaAssetPath");
 	static const TCHAR* bAutoPopulateOptionsSavedKey = TEXT("bAutoPopulateOptionsSaved");
 	static const TCHAR* SelectedAutoPopulateOptionsKey = TEXT("SelectedAutoPopulateOptions");
+	static const TCHAR* AdvancedAutoPopulateSettingsJsonKey = TEXT("AdvancedAutoPopulateSettingsJson");
 
 	FString GetConfigFilePath()
 	{
@@ -67,17 +68,16 @@ namespace ZLStateEditorV2SchemaPersistence
 			return Path;
 		}
 
-		FString Normalized = FPaths::ConvertRelativePathToFull(Path);
-		FPaths::NormalizeFilename(Normalized);
-
-		FString Relative = Normalized;
-		if (FPaths::MakePathRelativeTo(Relative, *FPaths::ProjectDir()))
+		if (UZLCloudPluginSettings::IsStoredPathCorrupt(Path))
 		{
-			FPaths::NormalizeFilename(Relative);
-			return Relative;
+			UE_LOG(LogZLStateEditorV2, Warning, TEXT("Not writing invalid LastOpenSchemaAssetPath \"%s\" to config, clearing it"), *Path);
+			return FString();
 		}
 
-		return Path;
+		// ConvertRelativePathToFull(Path) rebases relative values onto the engine binaries directory.
+		// MakeStoredPath always resolves against the project first, then stores a relative path only
+		// when that form still points at the same location on disk.
+		return UZLCloudPluginSettings::MakeStoredPath(Path);
 	}
 
 	FString ToAbsoluteProjectPath(const FString& Path)
@@ -87,16 +87,15 @@ namespace ZLStateEditorV2SchemaPersistence
 			return Path;
 		}
 
-		if (FPaths::IsRelative(Path))
+		if (UZLCloudPluginSettings::IsStoredPathCorrupt(Path))
 		{
-			FString Absolute = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), Path);
-			FPaths::NormalizeFilename(Absolute);
-			return Absolute;
+			UE_LOG(LogZLStateEditorV2, Warning, TEXT("LastOpenSchemaAssetPath in DefaultZLStateEditorV2.ini is not a usable path, clearing it. Discarded value: %s"), *Path);
+			return FString();
 		}
 
-		FString Normalized = FPaths::ConvertRelativePathToFull(Path);
-		FPaths::NormalizeFilename(Normalized);
-		return Normalized;
+		FString Absolute = UZLCloudPluginSettings::ResolveStoredPath(Path);
+		FPaths::NormalizeFilename(Absolute);
+		return Absolute;
 	}
 
 	void MigrateFromLegacyEditorPerProjectIniIfNeeded()
@@ -232,7 +231,7 @@ namespace ZLStateEditorV2Internal
 			const TSharedPtr<FJsonObject> SourceObject = Value->AsObject();
 			if (SourceObject.IsValid())
 			{
-				for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : SourceObject->Values)
+				for (const auto& Pair : SourceObject->Values)
 				{
 					ClonedObject->SetField(Pair.Key, CloneJsonValue(Pair.Value));
 				}
@@ -434,7 +433,7 @@ namespace ZLStateEditorV2Internal
 			return;
 		}
 
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Source->Values)
+		for (const auto& Pair : Source->Values)
 		{
 			if (!Pair.Value.IsValid())
 			{
@@ -476,10 +475,53 @@ namespace ZLStateEditorV2Internal
 		Clone.minValue = Source.minValue;
 		Clone.maxValue = Source.maxValue;
 		Clone.allowDynamicArraySize = Source.allowDynamicArraySize;
+		Clone.maximumAdditionalModelSlots = Source.maximumAdditionalModelSlots;
 		Clone.allowNullValue = Source.allowNullValue;
 		Clone.defaultValueIsNull = Source.defaultValueIsNull;
 		Clone.displayDescriptionAsOptions = Source.displayDescriptionAsOptions;
 		return Clone;
+	}
+
+	bool GetEquivalentArrayStyleType(const FString& DataType, FString& OutEquivalentType, bool& bOutIsArrayType)
+	{
+		if (DataType == TEXT("String"))
+		{
+			OutEquivalentType = TEXT("StringArray");
+			bOutIsArrayType = false;
+			return true;
+		}
+		if (DataType == TEXT("Number"))
+		{
+			OutEquivalentType = TEXT("NumberArray");
+			bOutIsArrayType = false;
+			return true;
+		}
+		if (DataType == TEXT("Bool"))
+		{
+			OutEquivalentType = TEXT("BoolArray");
+			bOutIsArrayType = false;
+			return true;
+		}
+		if (DataType == TEXT("StringArray"))
+		{
+			OutEquivalentType = TEXT("String");
+			bOutIsArrayType = true;
+			return true;
+		}
+		if (DataType == TEXT("NumberArray"))
+		{
+			OutEquivalentType = TEXT("Number");
+			bOutIsArrayType = true;
+			return true;
+		}
+		if (DataType == TEXT("BoolArray"))
+		{
+			OutEquivalentType = TEXT("Bool");
+			bOutIsArrayType = true;
+			return true;
+		}
+
+		return false;
 	}
 
 	bool SupportsNullDefaults(const StateKeyInfoV2& Info)
@@ -721,6 +763,8 @@ namespace ZLStateEditorV2Internal
 		{
 			Info.allowNullValue = FieldMeta.bAllowNullValue;
 			Info.defaultValueIsNull = FieldMeta.bDefaultValueIsNull;
+			Info.allowDynamicArraySize = FieldMeta.bAllowDynamicArraySize;
+			Info.maximumAdditionalModelSlots = FieldMeta.MaximumAdditionalModelSlots;
 		}
 
 		if (bPreserveExistingDefault && PreservedDefaultValue.IsValid())
@@ -813,6 +857,7 @@ TMap<FString, FStateKeyInfo> FZLStateEditorV2::ConvertToSerializableMap(const TM
 		Serializable.MinValue = Info.minValue;
 		Serializable.MaxValue = Info.maxValue;
 		Serializable.bAllowDynamicArraySize = Info.allowDynamicArraySize;
+		Serializable.MaximumAdditionalModelSlots = Info.maximumAdditionalModelSlots;
 		Serializable.bAllowNullValue = Info.allowNullValue;
 		Serializable.bDefaultValueIsNull = Info.defaultValueIsNull;
 		Serializable.bDisplayDescriptionAsOptions = Info.displayDescriptionAsOptions;
@@ -821,7 +866,7 @@ TMap<FString, FStateKeyInfo> FZLStateEditorV2::ConvertToSerializableMap(const TM
 		{
 			if (Accepted.IsValid())
 			{
-				if (Info.dataType == "String" || Info.dataType == "StringArray" || Info.dataType == "BoolArray")
+				if (Info.dataType == "String" || Info.dataType == "StringArray" || Info.dataType == "Bool" || Info.dataType == "BoolArray")
 					Serializable.AcceptedStringValues.Add(Accepted->AsString());
 				else if (Info.dataType == "Number" || Info.dataType == "NumberArray")
 					Serializable.AcceptedNumberValues.Add(Accepted->AsNumber());
@@ -1034,18 +1079,18 @@ static TSharedPtr<FJsonValue> ParseSchemaAndBuildDataRecursiveV2(
 {
 	if (!SchemaNode.IsValid()) return MakeShared<FJsonValueNull>();
 
-	FString JsonType = SchemaNode->GetStringField("type");
+	FString JsonType = SchemaNode->GetStringField(TEXT("type"));
 
-	if (JsonType == "object" || SchemaNode->HasField("properties"))
+	if (JsonType == "object" || SchemaNode->HasField(TEXT("properties")))
 	{
 		TSharedPtr<FJsonObject> DataObject = MakeShared<FJsonObject>();
 
 		const TSharedPtr<FJsonObject>* PropsObject;
-		if (SchemaNode->TryGetObjectField("properties", PropsObject))
+		if (SchemaNode->TryGetObjectField(TEXT("properties"), PropsObject))
 		{
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*PropsObject)->Values)
+			for (const auto& Pair : (*PropsObject)->Values)
 			{
-				FString KeyName = Pair.Key;
+				FString KeyName = ZL_JSON_KEY_TO_FSTRING(Pair.Key);
 				FString NewPath = CurrentPath.IsEmpty() ? KeyName : CurrentPath + "." + KeyName;
 
 				TSharedPtr<FJsonValue> ChildValue = ParseSchemaAndBuildDataRecursiveV2(Pair.Value->AsObject(), NewPath, OutMap);
@@ -1068,72 +1113,77 @@ static TSharedPtr<FJsonValue> ParseSchemaAndBuildDataRecursiveV2(
 	else if (JsonType == "array")
 	{
 		const TSharedPtr<FJsonObject>* ItemsObj;
-		if (SchemaNode->TryGetObjectField("items", ItemsObj))
+		if (SchemaNode->TryGetObjectField(TEXT("items"), ItemsObj))
 		{
-			FString ItemType = (*ItemsObj)->GetStringField("type");
+			FString ItemType = (*ItemsObj)->GetStringField(TEXT("type"));
 			if (ItemType == "string") NewInfo.dataType = "StringArray";
 			else if (ItemType == "number" || ItemType == "integer") NewInfo.dataType = "NumberArray";
 			else if (ItemType == "boolean") NewInfo.dataType = "BoolArray";
 
 			if ((ItemType == "number" || ItemType == "integer")
-				&& (*ItemsObj)->HasField("minimum")
-				&& (*ItemsObj)->HasField("maximum"))
+				&& (*ItemsObj)->HasField(TEXT("minimum"))
+				&& (*ItemsObj)->HasField(TEXT("maximum")))
 			{
 				NewInfo.useMinMax = true;
-				NewInfo.minValue = (*ItemsObj)->GetNumberField("minimum");
-				NewInfo.maxValue = (*ItemsObj)->GetNumberField("maximum");
+				NewInfo.minValue = (*ItemsObj)->GetNumberField(TEXT("minimum"));
+				NewInfo.maxValue = (*ItemsObj)->GetNumberField(TEXT("maximum"));
 			}
 		}
 
-		if (SchemaNode->HasField("x-zl-allowDynamicArraySize"))
+		if (SchemaNode->HasField(TEXT("x-zl-allowDynamicArraySize")))
 		{
-			NewInfo.allowDynamicArraySize = SchemaNode->GetBoolField("x-zl-allowDynamicArraySize");
+			NewInfo.allowDynamicArraySize = SchemaNode->GetBoolField(TEXT("x-zl-allowDynamicArraySize"));
 		}
-		else if (SchemaNode->HasField("minItems") && SchemaNode->HasField("maxItems"))
+		else if (SchemaNode->HasField(TEXT("minItems")) && SchemaNode->HasField(TEXT("maxItems")))
 		{
-			const int32 MinItems = static_cast<int32>(SchemaNode->GetNumberField("minItems"));
-			const int32 MaxItems = static_cast<int32>(SchemaNode->GetNumberField("maxItems"));
+			const int32 MinItems = static_cast<int32>(SchemaNode->GetNumberField(TEXT("minItems")));
+			const int32 MaxItems = static_cast<int32>(SchemaNode->GetNumberField(TEXT("maxItems")));
 			NewInfo.allowDynamicArraySize = MinItems != MaxItems;
+		}
+
+		if (SchemaNode->HasField(TEXT("x-zl-maximumAdditionalModelSlots")))
+		{
+			NewInfo.maximumAdditionalModelSlots = static_cast<int32>(SchemaNode->GetNumberField(TEXT("x-zl-maximumAdditionalModelSlots")));
 		}
 	}
 
 	if ((JsonType == "number" || JsonType == "integer")
-		&& SchemaNode->HasField("minimum")
-		&& SchemaNode->HasField("maximum"))
+		&& SchemaNode->HasField(TEXT("minimum"))
+		&& SchemaNode->HasField(TEXT("maximum")))
 	{
 		NewInfo.useMinMax = true;
-		NewInfo.minValue = SchemaNode->GetNumberField("minimum");
-		NewInfo.maxValue = SchemaNode->GetNumberField("maximum");
+		NewInfo.minValue = SchemaNode->GetNumberField(TEXT("minimum"));
+		NewInfo.maxValue = SchemaNode->GetNumberField(TEXT("maximum"));
 	}
 
-	if (SchemaNode->HasField("x-zl-allowNullValue"))
+	if (SchemaNode->HasField(TEXT("x-zl-allowNullValue")))
 	{
-		NewInfo.allowNullValue = SchemaNode->GetBoolField("x-zl-allowNullValue");
+		NewInfo.allowNullValue = SchemaNode->GetBoolField(TEXT("x-zl-allowNullValue"));
 	}
-	if (SchemaNode->HasField("x-zl-defaultValueIsNull"))
+	if (SchemaNode->HasField(TEXT("x-zl-defaultValueIsNull")))
 	{
-		NewInfo.defaultValueIsNull = SchemaNode->GetBoolField("x-zl-defaultValueIsNull");
+		NewInfo.defaultValueIsNull = SchemaNode->GetBoolField(TEXT("x-zl-defaultValueIsNull"));
 	}
-	if (SchemaNode->HasField("x-zl-displayDescriptionAsOptions"))
+	if (SchemaNode->HasField(TEXT("x-zl-displayDescriptionAsOptions")))
 	{
-		NewInfo.displayDescriptionAsOptions = SchemaNode->GetBoolField("x-zl-displayDescriptionAsOptions");
+		NewInfo.displayDescriptionAsOptions = SchemaNode->GetBoolField(TEXT("x-zl-displayDescriptionAsOptions"));
 	}
 
 	if (NewInfo.dataType == "Select Type") return MakeShared<FJsonValueNull>();
 
 	const TArray<TSharedPtr<FJsonValue>>* EnumArray = nullptr;
-	if (SchemaNode->TryGetArrayField("enum", EnumArray)) NewInfo.limitValues = true;
-	else if (JsonType == "array" && SchemaNode->HasField("items"))
+	if (SchemaNode->TryGetArrayField(TEXT("enum"), EnumArray)) NewInfo.limitValues = true;
+	else if (JsonType == "array" && SchemaNode->HasField(TEXT("items")))
 	{
-		TSharedPtr<FJsonObject> Items = SchemaNode->GetObjectField("items");
-		if (Items->TryGetArrayField("enum", EnumArray)) NewInfo.limitValues = true;
+		TSharedPtr<FJsonObject> Items = SchemaNode->GetObjectField(TEXT("items"));
+		if (Items->TryGetArrayField(TEXT("enum"), EnumArray)) NewInfo.limitValues = true;
 	}
 
 	if (NewInfo.limitValues && EnumArray) NewInfo.acceptedValues = *EnumArray;
 
-	if (SchemaNode->HasField("default"))
+	if (SchemaNode->HasField(TEXT("default")))
 	{
-		TSharedPtr<FJsonValue> DefVal = SchemaNode->TryGetField("default");
+		TSharedPtr<FJsonValue> DefVal = SchemaNode->TryGetField(TEXT("default"));
 		NewInfo.defaultValue = DefVal;
 		NewInfo.defaultValueIsNull = DefVal.IsValid() && DefVal->Type == EJson::Null;
 
@@ -1213,6 +1263,7 @@ TMap<FString, StateKeyInfoV2> FZLStateEditorV2::ConvertToEditorMap(const TMap<FS
 		RuntimeInfo.minValue = Info.MinValue;
 		RuntimeInfo.maxValue = Info.MaxValue;
 		RuntimeInfo.allowDynamicArraySize = Info.bAllowDynamicArraySize;
+		RuntimeInfo.maximumAdditionalModelSlots = Info.MaximumAdditionalModelSlots;
 		RuntimeInfo.allowNullValue = Info.bAllowNullValue;
 		RuntimeInfo.defaultValueIsNull = Info.bDefaultValueIsNull;
 		RuntimeInfo.displayDescriptionAsOptions = Info.bDisplayDescriptionAsOptions;
@@ -1265,7 +1316,7 @@ TMap<FString, StateKeyInfoV2> FZLStateEditorV2::ConvertToEditorMap(const TMap<FS
 		}
 
 		// Accepted values are independent of whether the default is null.
-		if (Info.DataType == "String" || Info.DataType == "StringArray" || Info.DataType == "BoolArray")
+		if (Info.DataType == "String" || Info.DataType == "StringArray" || Info.DataType == "Bool" || Info.DataType == "BoolArray")
 		{
 			for (const FString& Val : Info.AcceptedStringValues)
 			{
@@ -1378,7 +1429,8 @@ void FZLStateEditorV2::ApplyDefaultAutoPopulateOptionSelections()
 		}
 
 		if (!OptionPtr->Equals(TEXT("Model Configuration"), ESearchCase::CaseSensitive)
-			&& !OptionPtr->Equals(TEXT("Camera State"), ESearchCase::CaseSensitive))
+			&& !OptionPtr->Equals(TEXT("Camera State"), ESearchCase::CaseSensitive)
+			&& !OptionPtr->Equals(TEXT("Fly Camera"), ESearchCase::CaseSensitive))
 		{
 			SelectedAutoPopulateOptions.Add(*OptionPtr);
 		}
@@ -1434,6 +1486,54 @@ void FZLStateEditorV2::SetSelectedAutoPopulateOptions(const TArray<FString>& Opt
 	}
 
 	SaveSelectedAutoPopulateOptionsToConfig();
+}
+
+FString FZLStateEditorV2::GetAdvancedAutoPopulateSettingsJson() const
+{
+	return AdvancedAutoPopulateSettingsJson;
+}
+
+void FZLStateEditorV2::SetAdvancedAutoPopulateSettingsJson(const FString& AdvancedSettingsJson)
+{
+	AdvancedAutoPopulateSettingsJson = AdvancedSettingsJson;
+	SaveAdvancedAutoPopulateSettingsToConfig();
+}
+
+void FZLStateEditorV2::SaveAdvancedAutoPopulateSettingsToConfig() const
+{
+	if (!GConfig)
+	{
+		return;
+	}
+
+	ZLStateEditorV2SchemaPersistence::EnsureConfigFileLoaded();
+	const FString ConfigPath = ZLStateEditorV2SchemaPersistence::GetConfigFilePath();
+
+	GConfig->SetString(
+		ZLStateEditorV2SchemaPersistence::ConfigSection,
+		ZLStateEditorV2SchemaPersistence::AdvancedAutoPopulateSettingsJsonKey,
+		*AdvancedAutoPopulateSettingsJson,
+		ConfigPath);
+	GConfig->Flush(false, ConfigPath);
+}
+
+void FZLStateEditorV2::LoadAdvancedAutoPopulateSettingsFromConfig()
+{
+	AdvancedAutoPopulateSettingsJson.Empty();
+
+	if (!GConfig)
+	{
+		return;
+	}
+
+	ZLStateEditorV2SchemaPersistence::EnsureConfigFileLoaded();
+	const FString ConfigPath = ZLStateEditorV2SchemaPersistence::GetConfigFilePath();
+
+	GConfig->GetString(
+		ZLStateEditorV2SchemaPersistence::ConfigSection,
+		ZLStateEditorV2SchemaPersistence::AdvancedAutoPopulateSettingsJsonKey,
+		AdvancedAutoPopulateSettingsJson,
+		ConfigPath);
 }
 
 void FZLStateEditorV2::LoadSelectedAutoPopulateOptionsFromConfig()
@@ -1644,6 +1744,44 @@ void FZLStateEditorV2::DeleteKey(const FString& Key)
 		pendingRenameText = TEXT("");
 	}
 
+	RefreshEditorFromState();
+}
+
+void FZLStateEditorV2::ConvertKeyArrayStyle(const FString& Key, const bool bConvertToArray)
+{
+	StateKeyInfoV2* Info = keyInfos.Find(Key);
+	if (!Info)
+	{
+		return;
+	}
+
+	FString EquivalentType;
+	bool bCurrentTypeIsArray = false;
+	if (!ZLStateEditorV2Internal::GetEquivalentArrayStyleType(Info->dataType, EquivalentType, bCurrentTypeIsArray)
+		|| bCurrentTypeIsArray == bConvertToArray)
+	{
+		return;
+	}
+
+	Info->dataType = EquivalentType;
+	Info->ResetDefaultValue();
+	Info->allowDynamicArraySize = bConvertToArray;
+	Info->allowNullValue = bConvertToArray;
+	Info->defaultValueIsNull = bConvertToArray;
+
+	if (bConvertToArray)
+	{
+		Info->defaultValue = MakeShared<FJsonValueNull>();
+		Info->defaultValueArray.Empty();
+		ZLStateEditorV2Internal::SetJsonValueAtPath(ActiveJsonObject, Key, Info->defaultValue);
+	}
+	else
+	{
+		ZLStateEditorV2Internal::SyncDefaultValueForKey(Key, *Info, ActiveJsonObject);
+	}
+
+	// acceptedValues and DimeModelData are deliberately left untouched so any
+	// accepted-value description lookup IDs remain associated with the key.
 	RefreshEditorFromState();
 }
 
@@ -2151,6 +2289,7 @@ void FZLStateEditorV2::Construct(const FArguments& InArgs)
 
 	RefreshAutoPopulateOptions();
 	LoadSelectedAutoPopulateOptionsFromConfig();
+	LoadAdvancedAutoPopulateSettingsFromConfig();
 
 	TextEditorViewOptions.Empty();
 	TextEditorViewOptions.Add(MakeShared<FString>(TEXT("Default State")));
@@ -2611,12 +2750,25 @@ void FZLStateEditorV2::GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObj
 		this->ActiveJsonObject = JsonObject;
 
 	TArray<FString> SortedFieldNames;
-	JsonObject->Values.GetKeys(SortedFieldNames);
-	SortedFieldNames.Sort();
+	SortedFieldNames.Reserve(JsonObject->Values.Num());
+	for (const auto& Pair : JsonObject->Values)
+	{
+		SortedFieldNames.Add(ZL_JSON_KEY_TO_FSTRING(Pair.Key));
+	}
+	SortedFieldNames.Sort([](const FString& A, const FString& B)
+	{
+		return ZLNaturalStringLessThan(A, B);
+	});
 
 	for (const FString& FieldName : SortedFieldNames)
 	{
-		const TSharedPtr<FJsonValue>* ValuePtr = JsonObject->Values.Find(FieldName);
+		const TSharedPtr<FJsonValue>* ValuePtr = JsonObject->Values.Find(
+#if UNREAL_5_8_OR_NEWER
+			UE::FSharedString(FieldName)
+#else
+			FieldName
+#endif
+		);
 		if (!ValuePtr || !ValuePtr->IsValid())
 		{
 			continue;
@@ -2732,6 +2884,39 @@ void FZLStateEditorV2::GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObj
 									BeginRenameKey(Key);
 								}))
 								);
+
+								FString EquivalentType;
+								bool bCurrentTypeIsArray = false;
+								if (keyInfos.Contains(Key)
+									&& ZLStateEditorV2Internal::GetEquivalentArrayStyleType(
+										keyInfos[Key].dataType,
+										EquivalentType,
+										bCurrentTypeIsArray))
+								{
+									MenuBuilder.AddSubMenu(
+										FText::FromString("Convert to..."),
+										FText::FromString("Convert this key between single-value and dynamic-array forms"),
+										FNewMenuDelegate::CreateLambda([this, Key, bCurrentTypeIsArray](FMenuBuilder& SubMenuBuilder)
+									{
+										const bool bConvertToArray = !bCurrentTypeIsArray;
+										SubMenuBuilder.AddMenuEntry(
+											FText::FromString(
+												bConvertToArray
+													? "Convert to dynamic size array"
+													: "Convert to single value field"),
+											FText::FromString(
+												bConvertToArray
+													? "Convert this key to its equivalent dynamic array type"
+													: "Convert this key to its equivalent single value type"),
+											FSlateIcon(),
+											FUIAction(FExecuteAction::CreateLambda([this, Key, bConvertToArray]()
+										{
+											ConvertKeyArrayStyle(Key, bConvertToArray);
+										}))
+										);
+									}));
+								}
+
 								MenuBuilder.AddMenuEntry(
 									FText::FromString("Delete"),
 									FText::FromString("Delete this key"),

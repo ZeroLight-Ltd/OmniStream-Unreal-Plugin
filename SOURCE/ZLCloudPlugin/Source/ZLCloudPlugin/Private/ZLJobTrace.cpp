@@ -9,7 +9,7 @@
 DEFINE_LOG_CATEGORY_STATIC(LogZLJobTrace, Log, All);
 
 ZLJobTrace* ZLJobTrace::__Instance = nullptr;
-int32 ZLJobTrace::S_ActiveTracingId = -1;
+TArray<int32> ZLJobTrace::S_ActiveTracingIds;
 
 double FJobTraceTimer::UTC_Now()
 {
@@ -24,7 +24,7 @@ FJobTraceTimer::FJobTraceTimer(const FString& InName)
 }
 
 FJobTraceTimer::FJobTraceTimer(const FString& InName, double InBaseOffsetTimeTS)
-    : Name(InName), OffsetBaseTimeTS(InBaseOffsetTimeTS)
+    : OffsetBaseTimeTS(InBaseOffsetTimeTS), Name(InName)
 {
     StartTimeTS = UTC_Now();
     EndTimeTS = 0;
@@ -49,13 +49,13 @@ TSharedPtr<FJsonObject> FJobTraceTimer::ToChromeTraceEventsJSON() const
     double TotalTime = (EndTimeTS - OffsetBaseTimeTS) - StartTime;
 
     TSharedPtr<FJsonObject> JsonObject = MakeShareable(new FJsonObject());
-    JsonObject->SetStringField("name", Name);
-    JsonObject->SetStringField("cat", "PERF");
-    JsonObject->SetStringField("ph", "X");
-    JsonObject->SetStringField("pid", FPaths::GetCleanFilename(FPlatformProcess::GetApplicationName(FPlatformProcess::GetCurrentProcessId())));
-    JsonObject->SetNumberField("tid", 1);
-    JsonObject->SetNumberField("ts", ToMicroseconds(StartTime));
-    JsonObject->SetNumberField("dur", FMath::Max(ToMicroseconds(TotalTime), 0.0));
+    JsonObject->SetStringField(TEXT("name"), Name);
+    JsonObject->SetStringField(TEXT("cat"), TEXT("PERF"));
+    JsonObject->SetStringField(TEXT("ph"), TEXT("X"));
+    JsonObject->SetStringField(TEXT("pid"), FPaths::GetCleanFilename(FPlatformProcess::GetApplicationName(FPlatformProcess::GetCurrentProcessId())));
+    JsonObject->SetNumberField(TEXT("tid"), 1);
+    JsonObject->SetNumberField(TEXT("ts"), ToMicroseconds(StartTime));
+    JsonObject->SetNumberField(TEXT("dur"), FMath::Max(ToMicroseconds(TotalTime), 0.0));
 
     return JsonObject;
 }
@@ -89,17 +89,17 @@ TSharedPtr<FJsonObject> FZLJobTraceData::ToDict()
     TSharedPtr<FJsonObject> JobTraceData = MakeShareable(new FJsonObject());
     TArray<TSharedPtr<FJsonValue>> TimingData = TimersToChromeTraceJSON();
 
-    JobTraceData->SetNumberField("trace_id", ID);
-    JobTraceData->SetArrayField("ve_timings", TimingData);
+    JobTraceData->SetNumberField(TEXT("trace_id"), ID);
+    JobTraceData->SetArrayField(TEXT("ve_timings"), TimingData);
     
     TSharedPtr<FJsonObject> ConfigureDataObject = MakeShareable(new FJsonObject());
     for(const auto& Pair : ConfigureData)
     {
         ConfigureDataObject->SetField(Pair.Key, Pair.Value);
     }
-    JobTraceData->SetObjectField("ve_configure_data", ConfigureDataObject);
+    JobTraceData->SetObjectField(TEXT("ve_configure_data"), ConfigureDataObject);
 
-    JobTraceData->SetNumberField("ve_trace_start_ts", StartTraceTS);
+    JobTraceData->SetNumberField(TEXT("ve_trace_start_ts"), StartTraceTS);
 
     return JobTraceData;
 }
@@ -131,6 +131,21 @@ bool FZLJobTraceData::HasTimer(const FString& Name)
     return Timers.Contains(Name);
 }
 
+void FZLJobTraceData::AddCompletedTimer(const FString& Name, double DurationSeconds)
+{
+    if (Timers.Contains(Name))
+    {
+        UE_LOG(LogZLJobTrace, Warning, TEXT("[ZLJobTraceData] Duplicate AddCompletedTimer call for %s detected!"), *Name);
+        return;
+    }
+
+    const double ClampedDuration = FMath::Max(0.0, DurationSeconds);
+    FJobTraceTimer Timer(Name, BaseTimeOffsetTS);
+    Timer.EndTimeTS = Timer.StartTimeTS;
+    Timer.StartTimeTS = Timer.EndTimeTS - ClampedDuration;
+    Timers.Add(Name, Timer);
+}
+
 // ZLJobTrace implementation
 ZLJobTrace::ZLJobTrace() {}
 
@@ -143,25 +158,32 @@ ZLJobTrace* ZLJobTrace::Get()
     return __Instance;
 }
 
+int32 ZLJobTrace::ActiveTracingId()
+{
+    return S_ActiveTracingIds.Num() > 0 ? S_ActiveTracingIds.Last() : -1;
+}
+
 void ZLJobTrace::JOBTRACE_TIMER_START(const FString& Name)
 {
-    if (!ZLCloudPlugin::FZLCloudPluginModule::GetModule()->IsContentGenerationMode())
+    const int32 ActiveId = ActiveTracingId();
+    if (ActiveId == -1)
         return;
 
-    if (Get()->JobTraceDataDict.Contains(S_ActiveTracingId))
+    if (Get()->JobTraceDataDict.Contains(ActiveId))
     {
-        Get()->JobTraceDataDict[S_ActiveTracingId].StartTimer(Name);
+        Get()->JobTraceDataDict[ActiveId].StartTimer(Name);
     }
 }
 
 bool ZLJobTrace::JOBTRACE_IS_CURRENTLY_TIMING(const FString& Name)
 {
-    if (!ZLCloudPlugin::FZLCloudPluginModule::GetModule()->IsContentGenerationMode())
+    const int32 ActiveId = ActiveTracingId();
+    if (ActiveId == -1)
         return false;
 
-    if (Get()->JobTraceDataDict.Contains(S_ActiveTracingId))
+    if (Get()->JobTraceDataDict.Contains(ActiveId))
     {
-        return Get()->JobTraceDataDict[S_ActiveTracingId].HasTimer(Name);
+        return Get()->JobTraceDataDict[ActiveId].HasTimer(Name);
     }
 
     return false;
@@ -169,23 +191,37 @@ bool ZLJobTrace::JOBTRACE_IS_CURRENTLY_TIMING(const FString& Name)
 
 void ZLJobTrace::JOBTRACE_TIMER_END(const FString& Name)
 {
-    if (!ZLCloudPlugin::FZLCloudPluginModule::GetModule()->IsContentGenerationMode())
+    const int32 ActiveId = ActiveTracingId();
+    if (ActiveId == -1)
         return;
 
-    if (Get()->JobTraceDataDict.Contains(S_ActiveTracingId))
+    if (Get()->JobTraceDataDict.Contains(ActiveId))
     {
-        Get()->JobTraceDataDict[S_ActiveTracingId].EndTimer(Name);
+        Get()->JobTraceDataDict[ActiveId].EndTimer(Name);
+    }
+}
+
+void ZLJobTrace::JOBTRACE_ADD_COMPLETED_TIMER(const FString& Name, double DurationSeconds)
+{
+    const int32 ActiveId = ActiveTracingId();
+    if (ActiveId == -1)
+        return;
+
+    if (Get()->JobTraceDataDict.Contains(ActiveId))
+    {
+        Get()->JobTraceDataDict[ActiveId].AddCompletedTimer(Name, DurationSeconds);
     }
 }
 
 void ZLJobTrace::JOBTRACE_ADD_DATA(const FString& Key, TSharedPtr<FJsonValue> Value)
 {
-    if (!ZLCloudPlugin::FZLCloudPluginModule::GetModule()->IsContentGenerationMode())
+    const int32 ActiveId = ActiveTracingId();
+    if (ActiveId == -1)
         return;
 
-    if (Get()->JobTraceDataDict.Contains(S_ActiveTracingId))
+    if (Get()->JobTraceDataDict.Contains(ActiveId))
     {
-        Get()->JobTraceDataDict[S_ActiveTracingId].ConfigureData.Add(Key, Value);
+        Get()->JobTraceDataDict[ActiveId].ConfigureData.Add(Key, Value);
     }
 }
 
@@ -197,10 +233,10 @@ void ZLJobTrace::ON_START_JOBTRACE(const FString& MessageData)
     if (FJsonSerializer::Deserialize(Reader, JsonObject) && JsonObject.IsValid())
     {
         int32 JobID = -1;
-        if (JsonObject->TryGetNumberField("jobTraceId", JobID))
+        if (JsonObject->TryGetNumberField(TEXT("jobTraceId"), JobID))
         {
             double BaseTimeOffsetTS = 0;
-            JsonObject->TryGetNumberField("baseTimeOffset", BaseTimeOffsetTS);
+            JsonObject->TryGetNumberField(TEXT("baseTimeOffset"), BaseTimeOffsetTS);
 
             if (Get()->JobTraceDataDict.Contains(JobID))
             {
@@ -208,8 +244,8 @@ void ZLJobTrace::ON_START_JOBTRACE(const FString& MessageData)
             }
 
             Get()->JobTraceDataDict.Add(JobID, FZLJobTraceData(JobID, BaseTimeOffsetTS));
-            S_ActiveTracingId = JobID;
-
+            S_ActiveTracingIds.Remove(JobID);
+            S_ActiveTracingIds.Add(JobID);
         }
     }
 }
@@ -224,7 +260,7 @@ FString ZLJobTrace::ON_END_JOBTRACE(const FString& MessageData)
     if (FJsonSerializer::Deserialize(Reader, JsonObject) && JsonObject.IsValid())
     {
         int32 JobID = -1;
-        if (JsonObject->TryGetNumberField("jobTraceId", JobID))
+        if (JsonObject->TryGetNumberField(TEXT("jobTraceId"), JobID))
         {
             if (FZLJobTraceData* JobData = Get()->JobTraceDataDict.Find(JobID))
             {
@@ -234,7 +270,9 @@ FString ZLJobTrace::ON_END_JOBTRACE(const FString& MessageData)
                 TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&JsonString);
                 FJsonSerializer::Serialize(JobTraceData.ToSharedRef(), Writer);
 
-                S_ActiveTracingId = -1;
+                // Only this job stops tracing. Clearing unconditionally used to silently drop every
+                // subsequent timer belonging to a job that was still in flight behind this one.
+                S_ActiveTracingIds.Remove(JobID);
                 Get()->JobTraceDataDict.Remove(JobID); // Clean up finished job
             }
             else

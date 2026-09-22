@@ -19,148 +19,6 @@ namespace ZLStateKeyInfoDimeMetadataInternal
 	}
 }
 
-TSharedRef<FJsonObject> UStateKeyInfoAsset::SerializeStateKeyAssetToJson()
-{
-	TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-	TSharedRef<FJsonObject> SchemaData = MakeShared<FJsonObject>();
-
-	for (const TPair<FString, FStateKeyInfo>& Pair : KeyInfos)
-	{
-		const FString& DottedKey = Pair.Key;
-		const FStateKeyInfo& Info = Pair.Value;
-
-		TSharedRef<FJsonObject> EntryObject = MakeShared<FJsonObject>();
-		EntryObject->SetStringField(TEXT("DataType"), Info.DataType);
-		EntryObject->SetBoolField(TEXT("bLimitValues"), Info.bLimitValues);
-		EntryObject->SetBoolField(TEXT("bIgnoredInDataHashes"), Info.bIgnoredInDataHashes);
-		EntryObject->SetBoolField(TEXT("bUseMinMax"), Info.bUseMinMax);
-		EntryObject->SetBoolField(TEXT("bAllowNullValue"), Info.bAllowNullValue);
-		EntryObject->SetBoolField(TEXT("bDefaultValueIsNull"), Info.bDefaultValueIsNull);
-		if (Info.bDisplayDescriptionAsOptions)
-		{
-			EntryObject->SetBoolField(TEXT("bDisplayDescriptionAsOptions"), Info.bDisplayDescriptionAsOptions);
-		}
-		if (Info.bUseMinMax)
-		{
-			EntryObject->SetNumberField(TEXT("minValue"), Info.MinValue);
-			EntryObject->SetNumberField(TEXT("maxValue"), Info.MaxValue);
-		}
-		if (Info.GetDataTypeEnum() == EStateKeyDataType::StringArray)
-		{
-			EntryObject->SetBoolField(TEXT("bAllowDynamicArraySize"), Info.bAllowDynamicArraySize);
-		}
-
-		switch (Info.GetDataTypeEnum())
-		{
-		case EStateKeyDataType::String:
-			EntryObject->SetStringField(TEXT("DefaultValue"), Info.DefaultStringValue);
-			if (Info.bLimitValues)
-			{
-				TArray<TSharedPtr<FJsonValue>> JsonArray;
-				for (const FString& Val : Info.AcceptedStringValues)
-					JsonArray.Add(MakeShared<FJsonValueString>(Val));
-				EntryObject->SetArrayField(TEXT("AcceptedValues"), JsonArray);
-			}
-			break;
-
-		case EStateKeyDataType::Number:
-			EntryObject->SetNumberField(TEXT("DefaultValue"), Info.DefaultNumberValue);
-			if (Info.bLimitValues)
-			{
-				TArray<TSharedPtr<FJsonValue>> JsonArray;
-				for (double Val : Info.AcceptedNumberValues)
-					JsonArray.Add(MakeShared<FJsonValueNumber>(Val));
-				EntryObject->SetArrayField(TEXT("AcceptedValues"), JsonArray);
-			}
-			break;
-
-		case EStateKeyDataType::Bool:
-			EntryObject->SetBoolField(TEXT("DefaultValue"), Info.DefaultBoolValue);
-			break;
-
-		case EStateKeyDataType::StringArray:
-		{
-			TArray<TSharedPtr<FJsonValue>> JsonArray;
-			for (const FString& Val : Info.DefaultStringArray)
-				JsonArray.Add(MakeShared<FJsonValueString>(Val));
-			EntryObject->SetArrayField(TEXT("DefaultValue"), JsonArray);
-
-			if (Info.bLimitValues)
-			{
-				TArray<TSharedPtr<FJsonValue>> AcceptedArray;
-				for (const FString& Val : Info.AcceptedStringValues)
-					AcceptedArray.Add(MakeShared<FJsonValueString>(Val));
-				EntryObject->SetArrayField(TEXT("AcceptedValues"), AcceptedArray);
-			}
-			break;
-		}
-
-		case EStateKeyDataType::NumberArray:
-		{
-			TArray<TSharedPtr<FJsonValue>> JsonArray;
-			for (double Val : Info.DefaultNumberArray)
-				JsonArray.Add(MakeShared<FJsonValueNumber>(Val));
-			EntryObject->SetArrayField(TEXT("DefaultValue"), JsonArray);
-
-			if (Info.bLimitValues)
-			{
-				TArray<TSharedPtr<FJsonValue>> AcceptedArray;
-				for (double Val : Info.AcceptedNumberValues)
-					AcceptedArray.Add(MakeShared<FJsonValueNumber>(Val));
-				EntryObject->SetArrayField(TEXT("AcceptedValues"), AcceptedArray);
-			}
-			break;
-		}
-
-		case EStateKeyDataType::BoolArray:
-		{
-			TArray<TSharedPtr<FJsonValue>> JsonArray;
-			for (bool Val : Info.DefaultBoolArray)
-				JsonArray.Add(MakeShared<FJsonValueBoolean>(Val));
-			EntryObject->SetArrayField(TEXT("DefaultValue"), JsonArray);
-
-			if (Info.AcceptedStringValues.Num() > 0)
-			{
-				TArray<TSharedPtr<FJsonValue>> AcceptedArray;
-				for (const FString& Val : Info.AcceptedStringValues)
-					AcceptedArray.Add(MakeShared<FJsonValueString>(Val));
-				EntryObject->SetArrayField(TEXT("AcceptedValues"), AcceptedArray);
-			}
-			break;
-		}
-
-		case EStateKeyDataType::Invalid:
-		default:
-			continue;
-		}
-
-		TArray<FString> KeyParts;
-		DottedKey.ParseIntoArray(KeyParts, TEXT("."), true);
-
-		TSharedRef<FJsonObject> CurrentLevel = SchemaData;
-		for (int32 i = 0; i < KeyParts.Num(); ++i)
-		{
-			const FString& Part = KeyParts[i];
-
-			if (i == KeyParts.Num() - 1)
-			{
-				CurrentLevel->SetObjectField(Part, EntryObject);
-			}
-			else
-			{
-				TSharedPtr<FJsonObject> Child = CurrentLevel->Values.Contains(Part) ? CurrentLevel->GetObjectField(Part) : MakeShared<FJsonObject>();
-
-				CurrentLevel->SetObjectField(Part, Child);
-				CurrentLevel = Child.ToSharedRef();
-			}
-		}
-	}
-
-	Root->SetObjectField("ZEROLIGHT_SCHEMA_DATA", SchemaData);
-
-	return Root;
-}
-
 // Helper to convert a single FStateKeyInfo into a JSON Schema Leaf Node
 TSharedPtr<FJsonObject> ConvertInfoToSchemaNode(const FStateKeyInfo& Info)
 {
@@ -201,24 +59,24 @@ TSharedPtr<FJsonObject> ConvertInfoToSchemaNode(const FStateKeyInfo& Info)
 		break;
 	}
 
-	Node->SetStringField("type", SchemaType);
+	Node->SetStringField(TEXT("type"), SchemaType);
 	if (Info.bAllowNullValue)
 	{
-		Node->SetBoolField("x-zl-allowNullValue", true);
+		Node->SetBoolField(TEXT("x-zl-allowNullValue"), true);
 	}
 	if (Info.bAllowNullValue && Info.bDefaultValueIsNull)
 	{
-		Node->SetBoolField("x-zl-defaultValueIsNull", true);
+		Node->SetBoolField(TEXT("x-zl-defaultValueIsNull"), true);
 	}
 	if (Info.bDisplayDescriptionAsOptions)
 	{
-		Node->SetBoolField("x-zl-displayDescriptionAsOptions", true);
+		Node->SetBoolField(TEXT("x-zl-displayDescriptionAsOptions"), true);
 	}
 
 	if (SchemaType == "number" && Info.bUseMinMax)
 	{
-		Node->SetNumberField("minimum", Info.MinValue);
-		Node->SetNumberField("maximum", Info.MaxValue);
+		Node->SetNumberField(TEXT("minimum"), Info.MinValue);
+		Node->SetNumberField(TEXT("maximum"), Info.MaxValue);
 	}
 
 	if (Info.bLimitValues)
@@ -240,7 +98,7 @@ TSharedPtr<FJsonObject> ConvertInfoToSchemaNode(const FStateKeyInfo& Info)
 
 			if (EnumValues.Num() > 0)
 			{
-				Node->SetArrayField("enum", EnumValues);
+				Node->SetArrayField(TEXT("enum"), EnumValues);
 			}
 		}
 		else
@@ -253,12 +111,12 @@ TSharedPtr<FJsonObject> ConvertInfoToSchemaNode(const FStateKeyInfo& Info)
 	if (bIsArray)
 	{
 		TSharedPtr<FJsonObject> ItemsNode = MakeShared<FJsonObject>();
-		ItemsNode->SetStringField("type", ItemType);
+		ItemsNode->SetStringField(TEXT("type"), ItemType);
 
 		if (ItemType == "number" && Info.bUseMinMax)
 		{
-			ItemsNode->SetNumberField("minimum", Info.MinValue);
-			ItemsNode->SetNumberField("maximum", Info.MaxValue);
+			ItemsNode->SetNumberField(TEXT("minimum"), Info.MinValue);
+			ItemsNode->SetNumberField(TEXT("maximum"), Info.MaxValue);
 		}
 
 		if (Info.bLimitValues)
@@ -277,20 +135,24 @@ TSharedPtr<FJsonObject> ConvertInfoToSchemaNode(const FStateKeyInfo& Info)
 
 			if (ItemEnumValues.Num() > 0)
 			{
-				ItemsNode->SetArrayField("enum", ItemEnumValues);
+				ItemsNode->SetArrayField(TEXT("enum"), ItemEnumValues);
 			}
 		}
 
-		Node->SetObjectField("items", ItemsNode);
+		Node->SetObjectField(TEXT("items"), ItemsNode);
 
 		if (ItemType == "string")
 		{
-			Node->SetBoolField("x-zl-allowDynamicArraySize", Info.bAllowDynamicArraySize);
+			Node->SetBoolField(TEXT("x-zl-allowDynamicArraySize"), Info.bAllowDynamicArraySize);
 			if (!Info.bAllowDynamicArraySize)
 			{
 				const int32 FixedSize = Info.DefaultStringArray.Num() > 0 ? Info.DefaultStringArray.Num() : 1;
-				Node->SetNumberField("minItems", FixedSize);
-				Node->SetNumberField("maxItems", FixedSize);
+				Node->SetNumberField(TEXT("minItems"), FixedSize);
+				Node->SetNumberField(TEXT("maxItems"), FixedSize);
+			}
+			if (Info.MaximumAdditionalModelSlots > 0)
+			{
+				Node->SetNumberField(TEXT("x-zl-maximumAdditionalModelSlots"), Info.MaximumAdditionalModelSlots);
 			}
 		}
 	}
@@ -303,15 +165,15 @@ TSharedPtr<FJsonObject> ConvertInfoToSchemaNode(const FStateKeyInfo& Info)
 	{
 		if (SchemaType == "string" && !Info.DefaultStringValue.IsEmpty())
 		{
-			Node->SetStringField("default", Info.DefaultStringValue);
+			Node->SetStringField(TEXT("default"), Info.DefaultStringValue);
 		}
 		else if (SchemaType == "number")
 		{
-			Node->SetNumberField("default", Info.DefaultNumberValue);
+			Node->SetNumberField(TEXT("default"), Info.DefaultNumberValue);
 		}
 		else if (SchemaType == "boolean")
 		{
-			Node->SetBoolField("default", Info.DefaultBoolValue);
+			Node->SetBoolField(TEXT("default"), Info.DefaultBoolValue);
 		}
 	}
 	else
@@ -332,7 +194,7 @@ TSharedPtr<FJsonObject> ConvertInfoToSchemaNode(const FStateKeyInfo& Info)
 
 		if (DefaultArray.Num() > 0)
 		{
-			Node->SetArrayField("default", DefaultArray);
+			Node->SetArrayField(TEXT("default"), DefaultArray);
 		}
 	}
 
@@ -343,17 +205,28 @@ TSharedRef<FJsonObject> UStateKeyInfoAsset::BuildJsonSchemaCompliantFromKeyInfos
 {
 	TSharedRef<FJsonObject> RootSchema = MakeShared<FJsonObject>();
 
-	RootSchema->SetStringField("$schema", "https://json-schema.org/draft/2020-12/schema");
-	RootSchema->SetStringField("type", "object");
-	RootSchema->SetStringField("title", SchemaTitle.IsEmpty() ? TEXT("Schema") : SchemaTitle);
+	RootSchema->SetStringField(TEXT("$schema"), TEXT("https://json-schema.org/draft/2020-12/schema"));
+	RootSchema->SetStringField(TEXT("type"), TEXT("object"));
+	RootSchema->SetStringField(TEXT("title"), SchemaTitle.IsEmpty() ? TEXT("Schema") : SchemaTitle);
 
 	TSharedPtr<FJsonObject> RootProperties = MakeShared<FJsonObject>();
-	RootSchema->SetObjectField("properties", RootProperties);
+	RootSchema->SetObjectField(TEXT("properties"), RootProperties);
 
-	for (const TPair<FString, FStateKeyInfo>& Entry : InKeyInfos)
+	TArray<FString> SortedKeys;
+	InKeyInfos.GetKeys(SortedKeys);
+	SortedKeys.Sort([](const FString& A, const FString& B)
 	{
-		FString FullKey = Entry.Key;
-		const FStateKeyInfo& Info = Entry.Value;
+		return ZLNaturalStringLessThan(A, B);
+	});
+
+	for (const FString& FullKey : SortedKeys)
+	{
+		const FStateKeyInfo* InfoPtr = InKeyInfos.Find(FullKey);
+		if (!InfoPtr)
+		{
+			continue;
+		}
+		const FStateKeyInfo& Info = *InfoPtr;
 
 		TArray<FString> KeyParts;
 		FullKey.ParseIntoArray(KeyParts, TEXT("."), true);
@@ -377,20 +250,20 @@ TSharedRef<FJsonObject> UStateKeyInfoAsset::BuildJsonSchemaCompliantFromKeyInfos
 				{
 					TSharedPtr<FJsonObject> ExistingObj = CurrentContext->GetObjectField(PartName);
 
-					if (!ExistingObj->HasField("properties"))
+					if (!ExistingObj->HasField(TEXT("properties")))
 					{
-						ExistingObj->SetObjectField("properties", MakeShared<FJsonObject>());
+						ExistingObj->SetObjectField(TEXT("properties"), MakeShared<FJsonObject>());
 					}
 
-					CurrentContext = ExistingObj->GetObjectField("properties");
+					CurrentContext = ExistingObj->GetObjectField(TEXT("properties"));
 				}
 				else
 				{
 					TSharedPtr<FJsonObject> NewContainer = MakeShared<FJsonObject>();
-					NewContainer->SetStringField("type", "object");
+					NewContainer->SetStringField(TEXT("type"), TEXT("object"));
 
 					TSharedPtr<FJsonObject> NewProperties = MakeShared<FJsonObject>();
-					NewContainer->SetObjectField("properties", NewProperties);
+					NewContainer->SetObjectField(TEXT("properties"), NewProperties);
 
 					CurrentContext->SetObjectField(PartName, NewContainer);
 

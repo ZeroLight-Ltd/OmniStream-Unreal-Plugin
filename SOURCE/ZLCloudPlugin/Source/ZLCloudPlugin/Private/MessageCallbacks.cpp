@@ -223,10 +223,10 @@ void MessageCallbacks::SetOmnistreamSettings(MessageWithData* msg)
 #else
 
 			float stateWarningTime, stateTimeout;
-			if (JsonParsed->TryGetNumberField(FString("stateWarningTime"), stateWarningTime))
+			if (JsonParsed->TryGetNumberField(TEXT("stateWarningTime"), stateWarningTime))
 				UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->m_stateRequestWarningTime = stateWarningTime;
 
-			if(JsonParsed->TryGetNumberField(FString("stateTimeout"), stateTimeout))
+			if(JsonParsed->TryGetNumberField(TEXT("stateTimeout"), stateTimeout))
 				UZLCloudPluginStateManager::GetZLCloudPluginStateManager()->m_stateRequestTimeout = stateTimeout;
 #endif
 		}
@@ -315,17 +315,17 @@ void MessageCallbacks::CaptureScreenshot(MessageWithData* msg)
 
 		TSharedPtr<FJsonObject> viewerConfigureResponseData = MakeShareable(new FJsonObject);
 		TSharedPtr<FJsonObject> versionData = MakeShareable(new FJsonObject);
-		versionData->SetStringField("unreal", ENGINE_VERSION_STRING);
+		versionData->SetStringField(TEXT("unreal"), ENGINE_VERSION_STRING);
 
 		IPluginManager& PluginManager = IPluginManager::Get();
 		TSharedPtr<IPlugin> ZlCloudStreamPlugin = PluginManager.FindPlugin("ZLCloudPlugin");
 		if (ZlCloudStreamPlugin)
 		{
 			const FPluginDescriptor& Descriptor = ZlCloudStreamPlugin->GetDescriptor();
-			versionData->SetStringField("omnistream", *Descriptor.VersionName);
+			versionData->SetStringField(TEXT("omnistream"), *Descriptor.VersionName);
 		}
-		viewerConfigureResponseData->SetNumberField("screenshotWaitFrameCountOverride", Settings->screenshotFrameWaitCountOverride);
-		viewerConfigureResponseData->SetObjectField("version", versionData);
+		viewerConfigureResponseData->SetNumberField(TEXT("screenshotWaitFrameCountOverride"), Settings->screenshotFrameWaitCountOverride);
+		viewerConfigureResponseData->SetObjectField(TEXT("version"), versionData);
 
 
 		FString responseDataStr;

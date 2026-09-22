@@ -1,0 +1,59 @@
+{
+	"FileVersion": 3,
+	"Version": 219,
+	"VersionName": "1.1.219",
+	"FriendlyName": "ZeroLight OmniStream Plugin",
+	"Description": "Cloud Streaming plugin used to stream real-time content from the cloud",
+	"Category": "Cloud",
+	"CreatedBy": "ZeroLight",
+	"CreatedByURL": "https://www.zerolight.com",
+	"DocsURL": "https://resources.zerolight.com/",
+	"MarketplaceURL": "com.epicgames.launcher://ue/marketplace/product/23da1e28c168496b8739cd2868f81be2",
+	"SupportURL": "https://zerolight.com/contact",
+	"EngineVersion": "5.8.0",
+	"CanContainContent": true,
+	"Installed": true,
+	"Modules": [
+		{
+			"Name": "ZLCloudPluginShaders",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit",
+			"PlatformAllowList": [
+				"Win64"
+			],
+			"TargetDenyList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ZLCloudPlugin",
+			"Type": "Runtime",
+			"LoadingPhase": "PreDefault",
+			"PlatformAllowList": [
+				"Win64"
+			],
+			"TargetDenyList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ZLCloudPluginEditor",
+			"Type": "UncookedOnly",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "PixelCapture",
+			"Enabled": true
+		},
+		{
+			"Name": "MovieRenderPipeline",
+			"Enabled": true
+		},
+		{
+			"Name": "PythonScriptPlugin",
+			"Enabled": true
+		}
+	]
+}

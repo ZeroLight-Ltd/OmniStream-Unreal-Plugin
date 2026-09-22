@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 199,
-	"VersionName": "1.1.199",
+	"Version": 219,
+	"VersionName": "1.1.219",
 	"FriendlyName": "ZeroLight OmniStream Plugin",
 	"Description": "Cloud Streaming plugin used to stream real-time content from the cloud",
 	"Category": "Cloud",
@@ -14,6 +14,17 @@
 	"CanContainContent": true,
 	"Installed": true,
 	"Modules": [
+		{
+			"Name": "ZLCloudPluginShaders",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit",
+			"PlatformAllowList": [
+				"Win64"
+			],
+			"TargetDenyList": [
+				"Server"
+			]
+		},
 		{
 			"Name": "ZLCloudPlugin",
 			"Type": "Runtime",

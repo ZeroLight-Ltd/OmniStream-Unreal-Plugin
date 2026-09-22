@@ -4,6 +4,8 @@
 
 #if UNREAL_5_1_OR_NEWER
 
+#include "PixelCaptureBufferFormat.h"
+
 
 FZLCloudPluginVideoInput::FZLCloudPluginVideoInput()
 {
@@ -30,6 +32,18 @@ void FZLCloudPluginVideoInput::OnFrame(const IPixelCaptureInputFrame& InputFrame
 	
 	LastFrameWidth = InputFrame.GetWidth();
 	LastFrameHeight = InputFrame.GetHeight();
+
+#if UNREAL_5_7_OR_NEWER
+	// Match Pixel Streaming: WaitForFormat/RequestFormat registers FORMAT_RHI + layer size
+	// before a real capture runs. With empty FormatCapturers, MultiFormat::Capture() only
+	// broadcasts OnComplete and never copies — PushFrame then RequestFormat returns null.
+	if (FrameCapturer)
+	{
+		const FIntPoint LayerSize(LastFrameWidth, LastFrameHeight);
+		FrameCapturer->RequestFormat(PixelCaptureBufferFormat::FORMAT_RHI, LayerSize);
+		PreInitFormats.Add(PixelCaptureBufferFormat::FORMAT_RHI);
+	}
+#endif
 
 	FrameCapturer->Capture(InputFrame);
 }
@@ -80,7 +94,12 @@ void FZLCloudPluginVideoInput::CreateFrameCapturer()
 	*/
 	
 
+#if UNREAL_5_7_OR_NEWER
+	// Layer-scale Create() is deprecated; resolutions come from captured frames.
+	FrameCapturer = FPixelCaptureCapturerMultiFormat::Create(this);
+#else
 	FrameCapturer = FPixelCaptureCapturerMultiFormat::Create(this, LayerScaling);
+#endif
 	CaptureCompleteHandle = FrameCapturer->OnComplete.AddRaw(this, &FZLCloudPluginVideoInput::OnCaptureComplete);
 
 	for (auto& Format : PreInitFormats)

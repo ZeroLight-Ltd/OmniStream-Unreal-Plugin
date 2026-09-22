@@ -149,12 +149,21 @@ namespace ZLCloudPlugin
 		bool FocusIsInputField(TSharedPtr<SWidget> &outFocusWidget);
 		bool FilterKey(const FKey& Key);
 
+		/**
+		 * Hand the real platform application back to Slate while the OS cursor sits over a window
+		 * registered through ZLRegisterLocalInputWindow, and restore the streamed cursor once it leaves.
+		 */
+		void UpdateLocalInputPassthrough();
+		void SetLocalInputPassthrough(bool bEnable);
+		bool IsCursorOverLocalInputWindow() const;
+
 
 		TWeakPtr<SWindow> 			TargetWindow;
 		TWeakPtr<SViewport> 		TargetViewport;
 		TWeakPtr<FIntPoint> 		TargetScreenSize; // Manual size override used when we don't have a single window/viewport target
 		uint8 						NumActiveTouches;
 		bool 						bIsMouseActive;
+		bool 						bLocalInputPassthrough = false;
 		TQueue<FMessage> 			Messages;
 		EZLCloudPluginInputType	InputType = EZLCloudPluginInputType::RouteToWindow;
 		FVector2D					LastTouchLocation = FVector2D(EForceInit::ForceInitToZero);

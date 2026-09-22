@@ -17,6 +17,8 @@ struct FZLAutoPopulateFieldMeta
 	TSharedPtr<FJsonValue> DefaultValue;
 	bool bAllowNullValue = false;
 	bool bDefaultValueIsNull = false;
+	bool bAllowDynamicArraySize = false;
+	int32 MaximumAdditionalModelSlots = 0;
 	bool bLimitValues = false;
 	TArray<TSharedPtr<FJsonValue>> AcceptedValues;
 	bool bIgnoredInDataHashes = false;
@@ -44,17 +46,29 @@ struct FZLAutoPopulateAdvancedLevelSelectorDef
 	FString RequiredActorComponentClassPath;
 };
 
+struct FZLAutoPopulateAdvancedNumberDef
+{
+	FString Id;
+	FString Label;
+	int32 DefaultValue = 1;
+	int32 MinValue = 1;
+	int32 MaxValue = 99;
+	FString VisibleWhenCheckboxId;
+};
+
 struct FZLAutoPopulateAdvancedOptionDef
 {
 	FString OptionName;
 	FString FoldoutTitle;
 	TArray<FZLAutoPopulateAdvancedCheckboxDef> Checkboxes;
+	TArray<FZLAutoPopulateAdvancedNumberDef> NumberInputs;
 	TArray<FZLAutoPopulateAdvancedLevelSelectorDef> LevelSelectors;
 };
 
 struct FZLAutoPopulateAdvancedOptionSettings
 {
 	TMap<FString, bool> CheckboxValues;
+	TMap<FString, int32> NumberValues;
 	TMap<FString, TArray<FString>> LevelSelectionsBySelectorId;
 	TMap<FString, TArray<FString>> ActorSelectionsBySelectorId;
 };

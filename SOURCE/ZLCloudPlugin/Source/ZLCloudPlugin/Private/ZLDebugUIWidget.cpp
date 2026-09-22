@@ -204,7 +204,7 @@ static bool AreJsonValuesEqual(const TSharedPtr<FJsonValue>& Left, const TShared
 			return false;
 		}
 
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : LeftObj->Values)
+		for (const auto& Pair : LeftObj->Values)
 		{
 			const TSharedPtr<FJsonValue>* FoundRight = RightObj->Values.Find(Pair.Key);
 			if (!FoundRight || !AreJsonValuesEqual(Pair.Value, *FoundRight))
@@ -231,11 +231,11 @@ static TSharedPtr<FJsonObject> BuildStateDiffObject(
 	}
 
 	TSharedPtr<FJsonObject> DiffObject = MakeShared<FJsonObject>();
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : CandidateState->Values)
+	for (const auto& Pair : CandidateState->Values)
 	{
-		const FString& Key = Pair.Key;
+		const FString Key = ZL_JSON_KEY_TO_FSTRING(Pair.Key);
 		const TSharedPtr<FJsonValue>& CandidateValue = Pair.Value;
-		const TSharedPtr<FJsonValue>* CurrentValue = CurrentState->Values.Find(Key);
+		const TSharedPtr<FJsonValue>* CurrentValue = CurrentState->Values.Find(Pair.Key);
 
 		if (!CurrentValue)
 		{
@@ -323,7 +323,7 @@ static UWidget* CreateStyledTooltipWidget(UObject* Outer, const FString& Descrip
 		return nullptr;
 	}
 
-	UBorder* TooltipBorder = NewObject<UBorder>(Outer ? Outer : GetTransientPackage());
+	UBorder* TooltipBorder = NewObject<UBorder>(Outer ? Outer : ZL_TRANSIENT_PACKAGE_OUTER);
 	if (!TooltipBorder)
 	{
 		return nullptr;
@@ -486,16 +486,11 @@ void UFoldoutHelper::ToggleVisibility()
 	}
 }
 
-void UStringArrayResizeHelper::ApplyResize()
+namespace ZLDebugUIPendingStateInternal
 {
-	if (!IsValid(ParentWidget) || KeyName.IsEmpty())
+	static bool TryGetStringArrayFromJsonObject(const TSharedPtr<FJsonObject>& RootObject, const FString& InKey, TArray<FString>& OutArray)
 	{
-		return;
-	}
-
-	auto TryGetPendingStringArray = [this](const FString& InKey, TArray<FString>& OutArray) -> bool
-	{
-		if (!ParentWidget->ModifiedStateObject.IsValid())
+		if (!RootObject.IsValid() || InKey.IsEmpty())
 		{
 			return false;
 		}
@@ -507,7 +502,7 @@ void UStringArrayResizeHelper::ApplyResize()
 			return false;
 		}
 
-		TSharedPtr<FJsonObject> CurrentObject = ParentWidget->ModifiedStateObject;
+		TSharedPtr<FJsonObject> CurrentObject = RootObject;
 		for (int32 PartIdx = 0; PartIdx < KeyParts.Num() - 1; ++PartIdx)
 		{
 			if (!CurrentObject.IsValid() || !CurrentObject->HasTypedField<EJson::Object>(KeyParts[PartIdx]))
@@ -534,20 +529,26 @@ void UStringArrayResizeHelper::ApplyResize()
 		}
 
 		return true;
-	};
+	}
+}
 
-	TArray<FString> WorkingArray;
-	bool bFound = false;
-
-	UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager();
-	if (StateManager)
+void UStringArrayResizeHelper::ApplyResize()
+{
+	if (!IsValid(ParentWidget) || KeyName.IsEmpty())
 	{
-		StateManager->GetCurrentStateValue<TArray<FString>>(KeyName, WorkingArray, bFound);
+		return;
 	}
 
-	if (!bFound)
+	TArray<FString> WorkingArray;
+	bool bFound = ZLDebugUIPendingStateInternal::TryGetStringArrayFromJsonObject(
+		ParentWidget->ModifiedStateObject,
+		KeyName,
+		WorkingArray);
+
+	UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager();
+	if (!bFound && StateManager)
 	{
-		bFound = TryGetPendingStringArray(KeyName, WorkingArray);
+		StateManager->GetCurrentStateValue<TArray<FString>>(KeyName, WorkingArray, bFound);
 	}
 
 	if (Delta > 0)
@@ -573,6 +574,25 @@ void UStringArrayResizeHelper::ApplyResize()
 		&& WorkingArray.Num() == 0
 		&& (SchemaKeyInfo->bDefaultValueIsNull || SchemaKeyInfo->DefaultStringArray.Num() == 0);
 
+	// Stage the resized array before any process/refresh so rebuild reads the new length.
+	if (!ParentWidget->ModifiedStateObject.IsValid())
+	{
+		ParentWidget->ModifiedStateObject = MakeShared<FJsonObject>();
+	}
+
+	if (bOmitNullableEmptyFromPending)
+	{
+		// Keep pending empty of this key and mark null so rebuild does not fall back to
+		// the still-populated current state when removing the last element.
+		RemoveJsonObjectKey(KeyName, ParentWidget->ModifiedStateObject);
+		ParentWidget->StagePendingNullStateKey(KeyName);
+	}
+	else
+	{
+		UpdateJsonObjectKey<TArray<FString>>(KeyName, WorkingArray, ParentWidget->ModifiedStateObject);
+		ParentWidget->ClearPendingNullStateKey(KeyName);
+	}
+
 	if (bInstantBroadcast)
 	{
 		if (UZLCloudPluginDelegates* Delegates = UZLCloudPluginDelegates::GetZLCloudPluginDelegates())
@@ -581,19 +601,9 @@ void UStringArrayResizeHelper::ApplyResize()
 		}
 	}
 
-	if (bOmitNullableEmptyFromPending)
-	{
-		RemoveJsonObjectKey(KeyName, ParentWidget->ModifiedStateObject);
-	}
-	else
-	{
-		UpdateJsonObjectKey<TArray<FString>>(KeyName, WorkingArray, ParentWidget->ModifiedStateObject);
-	}
-
-	if (!bInstantBroadcast)
-	{
-		ParentWidget->TriggerRefreshUI();
-	}
+	// Always rebuild after +/-. Instant process may refresh mid-broadcast, but a final
+	// refresh guarantees the array rows and additional_configurations slot filter match.
+	ParentWidget->TriggerRefreshUI();
 }
 
 void UZLDebugUIWidget::NativeConstruct()
@@ -769,6 +779,11 @@ void UZLDebugUIWidget::OnSubmitState()
 		ClearPendingNullStateKeys();
 		TriggerRefreshUI();
 	}
+
+	// Drop staged edits after submit. ProcessState refresh already ran during the broadcast
+	// above; clearing here prevents the next rebuild from re-hydrating stale pending values.
+	ModifiedStateObject = MakeShared<FJsonObject>();
+	ClearPendingNullStateKeys();
 }
 
 void UZLDebugUIWidget::OnToggleAllowResendCurrent()
@@ -1037,13 +1052,14 @@ void UZLDebugUIWidget::PopulatePresetOptionsDropdown(const FString& SelectName)
 	PresetOptionsDropdown->AddOption(DefaultTitle);
 
 	TArray<FString> Names;
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : CachedPresetsRoot->Values)
+	for (const auto& Pair : CachedPresetsRoot->Values)
 	{
 		if (!Pair.Value.IsValid() || Pair.Value->Type != EJson::Object)
 			continue;
-		if (Pair.Key.Equals(DefaultTitle, ESearchCase::IgnoreCase))
+		const FString PresetName = ZL_JSON_KEY_TO_FSTRING(Pair.Key);
+		if (PresetName.Equals(DefaultTitle, ESearchCase::IgnoreCase))
 			continue;
-		Names.Add(Pair.Key);
+		Names.Add(PresetName);
 	}
 	Names.Sort();
 	for (const FString& Name : Names)
@@ -1059,7 +1075,6 @@ void UZLDebugUIWidget::PopulatePresetOptionsDropdown(const FString& SelectName)
 	if (bNeedsInitialDefaultPresetApply && SelectName.IsEmpty())
 	{
 		bNeedsInitialDefaultPresetApply = false;
-		BroadcastPresetJsonForName(DefaultTitle);
 		// Rebuild so rows reflect state after OnRecieveData applies defaults (first Populate built with prior state).
 		RebuildDebugUIWithNesting();
 	}
@@ -1081,7 +1096,10 @@ void UZLDebugUIWidget::BuildPresetPayloadFromCheckedKeys(TSharedPtr<FJsonObject>
 
 	TArray<FString> SortedKeysBuild;
 	TargetSchema->KeyInfos.GenerateKeyArray(SortedKeysBuild);
-	SortedKeysBuild.Sort();
+	SortedKeysBuild.Sort([](const FString& A, const FString& B)
+	{
+		return ZLNaturalStringLessThan(A, B);
+	});
 
 	for (const FString& KeyName : SortedKeysBuild)
 	{
@@ -1229,7 +1247,10 @@ void UZLDebugUIWidget::BuildDefaultSchemaValuesPayload(TSharedPtr<FJsonObject>& 
 
 	TArray<FString> SortedKeys;
 	TargetSchema->KeyInfos.GenerateKeyArray(SortedKeys);
-	SortedKeys.Sort();
+	SortedKeys.Sort([](const FString& A, const FString& B)
+	{
+		return ZLNaturalStringLessThan(A, B);
+	});
 
 	for (const FString& KeyName : SortedKeys)
 	{
@@ -1283,8 +1304,6 @@ void UZLDebugUIWidget::BroadcastPresetJsonForName(const FString& PresetName)
 	if (!IsDebugUIPresented())
 		return;
 
-	if (UZLCloudPluginStateManagerBlueprints::IsInitialStateRequest())
-		return;
 
 	UZLCloudPluginDelegates* Delegates = UZLCloudPluginDelegates::GetZLCloudPluginDelegates();
 	if (!Delegates)
@@ -1977,8 +1996,12 @@ void UStateKeyInputComboBox::OnComboBoxChanged(FString SelectedItem, ESelectInfo
         if (ArrayIndex >= 0 && DataType == EStateKeyDataType::StringArray)
         {
             TArray<FString> WorkingArray;
-            bool Found = false;
-            if (StateManager)
+            bool Found = ParentDebugUI
+                && ZLDebugUIPendingStateInternal::TryGetStringArrayFromJsonObject(
+                    ParentDebugUI->ModifiedStateObject,
+                    CleanKey,
+                    WorkingArray);
+            if (!Found && StateManager)
             {
                 StateManager->GetCurrentStateValue<TArray<FString>>(CleanKey, WorkingArray, Found);
             }
@@ -1996,26 +2019,7 @@ void UStateKeyInputComboBox::OnComboBoxChanged(FString SelectedItem, ESelectInfo
                 && WorkingArray.Num() == 0
                 && (StateKeyInfo.bDefaultValueIsNull || StateKeyInfo.DefaultStringArray.Num() == 0);
 
-            if (InstantBroadcastChange)
-            {
-                if (UZLCloudPluginDelegates* Delegates = UZLCloudPluginDelegates::GetZLCloudPluginDelegates())
-                {
-                    Delegates->OnRecieveData.Broadcast(CreateStateChangeJsonStr<TArray<FString>>(CleanKey, WorkingArray));
-                }
-                if (ParentDebugUI)
-                {
-                    if (bOmitNullableEmptyFromPending)
-                    {
-                        RemoveJsonObjectKey(CleanKey, ParentDebugUI->ModifiedStateObject);
-                    }
-                    else
-                    {
-                        UpdateJsonObjectKey<TArray<FString>>(CleanKey, WorkingArray, ParentDebugUI->ModifiedStateObject);
-                    }
-                    ParentDebugUI->ClearPendingNullStateKey(CleanKey);
-                }
-            }
-            else if (ParentDebugUI)
+            if (ParentDebugUI)
             {
                 if (bOmitNullableEmptyFromPending)
                 {
@@ -2026,6 +2030,14 @@ void UStateKeyInputComboBox::OnComboBoxChanged(FString SelectedItem, ESelectInfo
                 {
                     UpdateJsonObjectKey<TArray<FString>>(CleanKey, WorkingArray, ParentDebugUI->ModifiedStateObject);
                     ParentDebugUI->ClearPendingNullStateKey(CleanKey);
+                }
+            }
+
+            if (InstantBroadcastChange)
+            {
+                if (UZLCloudPluginDelegates* Delegates = UZLCloudPluginDelegates::GetZLCloudPluginDelegates())
+                {
+                    Delegates->OnRecieveData.Broadcast(CreateStateChangeJsonStr<TArray<FString>>(CleanKey, WorkingArray));
                 }
             }
             return;
@@ -2061,42 +2073,70 @@ void UStateKeyInputComboBox::OnComboBoxChanged(FString SelectedItem, ESelectInfo
         if (DataType == EStateKeyDataType::StringArray)
         {
             TArray<FString> WorkingArray;
-            bool Found = false;
-            if (StateManager)
+            bool Found = ParentDebugUI
+                && ZLDebugUIPendingStateInternal::TryGetStringArrayFromJsonObject(
+                    ParentDebugUI->ModifiedStateObject,
+                    CleanKey,
+                    WorkingArray);
+            if (!Found && StateManager)
+            {
                 StateManager->GetCurrentStateValue<TArray<FString>>(CleanKey, WorkingArray, Found);
+            }
 
             if (!Found)
+            {
                 WorkingArray = StateKeyInfo.DefaultStringArray;
+            }
 
             if (WorkingArray.Num() <= ArrayIndex)
+            {
                 WorkingArray.SetNum(ArrayIndex + 1);
+            }
 
             WorkingArray[ArrayIndex] = SelectedItem;
 
-            if (InstantBroadcastChange)
-                Json = CreateStateChangeJsonStr<TArray<FString>>(CleanKey, WorkingArray);
-            else
+            // Always stage the full array before any instant process/refresh so later
+            // element edits and rebuilds do not rehydrate stale sibling values.
+            if (ParentDebugUI)
+            {
                 UpdateJsonObjectKey<TArray<FString>>(CleanKey, WorkingArray, ParentDebugUI->ModifiedStateObject);
+            }
+
+            if (InstantBroadcastChange)
+            {
+                Json = CreateStateChangeJsonStr<TArray<FString>>(CleanKey, WorkingArray);
+            }
         }
         else if (DataType == EStateKeyDataType::NumberArray)
         {
             TArray<double> WorkingArray;
             bool Found = false;
             if (StateManager)
+            {
                 StateManager->GetCurrentStateValue<TArray<double>>(CleanKey, WorkingArray, Found);
+            }
 
             if (!Found)
+            {
                 WorkingArray = StateKeyInfo.DefaultNumberArray;
+            }
 
             if (WorkingArray.Num() <= ArrayIndex)
+            {
                 WorkingArray.SetNum(ArrayIndex + 1);
+            }
 
             WorkingArray[ArrayIndex] = ClampNumberValueForSchema(StateKeyInfo, FCString::Atod(*SelectedItem));
 
-            if (InstantBroadcastChange)
-                Json = CreateStateChangeJsonStr<TArray<double>>(CleanKey, WorkingArray);
-            else
+            if (ParentDebugUI)
+            {
                 UpdateJsonObjectKey<TArray<double>>(CleanKey, WorkingArray, ParentDebugUI->ModifiedStateObject);
+            }
+
+            if (InstantBroadcastChange)
+            {
+                Json = CreateStateChangeJsonStr<TArray<double>>(CleanKey, WorkingArray);
+            }
         }
 
         if (InstantBroadcastChange)
@@ -2429,6 +2469,11 @@ void UStateKeyInputConfigArrayCheckBox::OnConfigArrayCheckBoxChanged(bool bIsChe
 	}
 	WorkingArray[Index] = bIsChecked;
 
+	if (ParentDebugUI)
+	{
+		UpdateJsonObjectKey<TArray<bool>>(ParentKey, WorkingArray, ParentDebugUI->ModifiedStateObject);
+	}
+
 	if (InstantBroadcastChange)
 	{
 		const FString Json = CreateStateChangeJsonStr<TArray<bool>>(ParentKey, WorkingArray);
@@ -2436,10 +2481,6 @@ void UStateKeyInputConfigArrayCheckBox::OnConfigArrayCheckBoxChanged(bool bIsChe
 		{
 			Delegates->OnRecieveData.Broadcast(Json);
 		}
-	}
-	else if (ParentDebugUI)
-	{
-		UpdateJsonObjectKey<TArray<bool>>(ParentKey, WorkingArray, ParentDebugUI->ModifiedStateObject);
 	}
 }
 
@@ -3189,19 +3230,32 @@ void UStateKeyInputTextBox::OnTextValueCommitted(const FText& ComittedText, ETex
         if (DataType == EStateKeyDataType::StringArray)
         {
             TArray<FString> WorkingArray;
-            bool Found = false;
-            if (StateManager)
+            bool Found = ParentDebugUI
+                && ZLDebugUIPendingStateInternal::TryGetStringArrayFromJsonObject(
+                    ParentDebugUI->ModifiedStateObject,
+                    CleanKey,
+                    WorkingArray);
+            if (!Found && StateManager)
+            {
                 StateManager->GetCurrentStateValue<TArray<FString>>(CleanKey, WorkingArray, Found);
+            }
 
             if (WorkingArray.Num() <= ArrayIndex)
+            {
                 WorkingArray.SetNum(ArrayIndex + 1);
+            }
 
             WorkingArray[ArrayIndex] = CommittedString;
 
-            if (InstantBroadcastChange)
-                Json = CreateStateChangeJsonStr<TArray<FString>>(CleanKey, WorkingArray);
-            else
+            if (ParentDebugUI)
+            {
                 UpdateJsonObjectKey<TArray<FString>>(CleanKey, WorkingArray, ParentDebugUI->ModifiedStateObject);
+            }
+
+            if (InstantBroadcastChange)
+            {
+                Json = CreateStateChangeJsonStr<TArray<FString>>(CleanKey, WorkingArray);
+            }
         }
         else if (DataType == EStateKeyDataType::NumberArray)
         {
@@ -3215,10 +3269,15 @@ void UStateKeyInputTextBox::OnTextValueCommitted(const FText& ComittedText, ETex
 
             WorkingArray[ArrayIndex] = ClampNumberValueForSchema(StateKeyInfo, FCString::Atod(*CommittedString));
 
-            if (InstantBroadcastChange)
-                Json = CreateStateChangeJsonStr<TArray<double>>(CleanKey, WorkingArray);
-            else
+            if (ParentDebugUI)
+            {
                 UpdateJsonObjectKey<TArray<double>>(CleanKey, WorkingArray, ParentDebugUI->ModifiedStateObject);
+            }
+
+            if (InstantBroadcastChange)
+            {
+                Json = CreateStateChangeJsonStr<TArray<double>>(CleanKey, WorkingArray);
+            }
         }
         else if (DataType == EStateKeyDataType::BoolArray)
         {
@@ -3233,10 +3292,15 @@ void UStateKeyInputTextBox::OnTextValueCommitted(const FText& ComittedText, ETex
             const FString Lower = CommittedString.ToLower();
             WorkingArray[ArrayIndex] = (Lower == "true" || Lower == "1");
 
-            if (InstantBroadcastChange)
-                Json = CreateStateChangeJsonStr<TArray<bool>>(CleanKey, WorkingArray);
-            else
+            if (ParentDebugUI)
+            {
                 UpdateJsonObjectKey<TArray<bool>>(CleanKey, WorkingArray, ParentDebugUI->ModifiedStateObject);
+            }
+
+            if (InstantBroadcastChange)
+            {
+                Json = CreateStateChangeJsonStr<TArray<bool>>(CleanKey, WorkingArray);
+            }
         }
     }
     else
@@ -3290,16 +3354,21 @@ void UZLDebugUIWidget::RebuildDebugUI()
 
 bool UZLDebugUIWidget::IsDebugUIPresented() const
 {
+	if (!IsValid(this))
+	{
+		return false;
+	}
+
 	const ESlateVisibility RootVis = GetVisibility();
 	return RootVis != ESlateVisibility::Collapsed && RootVis != ESlateVisibility::Hidden;
 }
 
 void UZLDebugUIWidget::RebuildDebugUIWithNesting()
 {
-	if (!IsDebugUIPresented())
+	if (!IsValid(this) || !IsDebugUIPresented())
 	{
 		// Match prior behaviour when hidden: clear deferred preset apply without broadcasting state.
-		if (bNeedsInitialDefaultPresetApply)
+		if (IsValid(this) && bNeedsInitialDefaultPresetApply)
 		{
 			bNeedsInitialDefaultPresetApply = false;
 		}
@@ -3317,6 +3386,40 @@ void UZLDebugUIWidget::RebuildDebugUIWithNesting()
 	if (SchemaTitle)
 	{
 		SchemaTitle->SetText(FText::FromString("Schema: " + TargetSchema->GetName()));
+	}
+
+	TSharedPtr<FJsonObject> PreservedPendingState = ModifiedStateObject;
+	TSet<FString> PreservedPendingNullKeys = PendingNullStateKeys;
+
+	int32 VisibleAdditionalConfigSlotCount = 0;
+	if (PreservedPendingNullKeys.Contains(TEXT("additional_models")))
+	{
+		VisibleAdditionalConfigSlotCount = 0;
+	}
+	else
+	{
+		TArray<FString> PendingAdditionalModels;
+		if (ZLDebugUIPendingStateInternal::TryGetStringArrayFromJsonObject(
+			PreservedPendingState,
+			TEXT("additional_models"),
+			PendingAdditionalModels))
+		{
+			VisibleAdditionalConfigSlotCount = PendingAdditionalModels.Num();
+		}
+		else
+		{
+			UZLCloudPluginStateManager* PreClearStateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager();
+			if (PreClearStateManager)
+			{
+				TArray<FString> AdditionalModels;
+				bool bAdditionalModelsFound = false;
+				PreClearStateManager->GetCurrentStateValue<TArray<FString>>(TEXT("additional_models"), AdditionalModels, bAdditionalModelsFound);
+				if (bAdditionalModelsFound)
+				{
+					VisibleAdditionalConfigSlotCount = AdditionalModels.Num();
+				}
+			}
+		}
 	}
 
 	ModifiedStateObject = MakeShared<FJsonObject>();
@@ -3340,7 +3443,29 @@ void UZLDebugUIWidget::RebuildDebugUIWithNesting()
 	TArray<FString> SortedKeys;
 	TargetSchema->KeyInfos.GenerateKeyArray(SortedKeys);
 
-	SortedKeys.Sort();
+	SortedKeys.Sort([](const FString& A, const FString& B)
+	{
+		return ZLNaturalStringLessThan(A, B);
+	});
+
+	auto ShouldShowAdditionalConfigurationsKey = [VisibleAdditionalConfigSlotCount](const FString& KeyName) -> bool
+	{
+		static const FString Prefix = TEXT("additional_configurations.slot_");
+		if (!KeyName.StartsWith(Prefix, ESearchCase::CaseSensitive))
+		{
+			return true;
+		}
+
+		const FString Remainder = KeyName.Mid(Prefix.Len());
+		int32 DotIndex = INDEX_NONE;
+		if (!Remainder.FindChar(TEXT('.'), DotIndex) || DotIndex <= 0)
+		{
+			return VisibleAdditionalConfigSlotCount > 0;
+		}
+
+		const int32 SlotIndex = FCString::Atoi(*Remainder.Left(DotIndex));
+		return SlotIndex > 0 && SlotIndex <= VisibleAdditionalConfigSlotCount;
+	};
 
 	TMap<FString, UVerticalBox*> FoldoutSections;
 
@@ -3349,6 +3474,11 @@ void UZLDebugUIWidget::RebuildDebugUIWithNesting()
 		if (const FStateKeyInfo* SchemaKey = TargetSchema->KeyInfos.Find(Key))
 		{
 			const FString& KeyName = Key;
+			if (!ShouldShowAdditionalConfigurationsKey(KeyName))
+			{
+				continue;
+			}
+
 			const FStateKeyInfo& StateKeyInfo = *SchemaKey;
 			bool CurrValFound = false;
 
@@ -3678,8 +3808,21 @@ void UZLDebugUIWidget::RebuildDebugUIWithNesting()
 			case EStateKeyDataType::StringArray:
 			{
 				TArray<FString> CurrentVals;
-				if (StateManager)
+				if (PreservedPendingNullKeys.Contains(KeyName))
+				{
+					// Explicit pending null (e.g. "-" removed the last element) must win
+					// over current state, which may still hold the previous array.
+					CurrentVals.Reset();
+					CurrValFound = true;
+				}
+				else if (ZLDebugUIPendingStateInternal::TryGetStringArrayFromJsonObject(PreservedPendingState, KeyName, CurrentVals))
+				{
+					CurrValFound = true;
+				}
+				else if (StateManager)
+				{
 					StateManager->GetCurrentStateValue<TArray<FString>>(KeyName, CurrentVals, CurrValFound);
+				}
 
 				TArray<FString> WorkingArray = CurrValFound ? CurrentVals : StateKeyInfo.DefaultStringArray;
 
@@ -4401,6 +4544,15 @@ void UZLDebugUIWidget::RebuildDebugUIWithNesting()
 	}
 
 	}
+
+	if (PreservedPendingState.IsValid() && PreservedPendingState->Values.Num() > 0)
+	{
+		for (const auto& Pair : PreservedPendingState->Values)
+		{
+			ModifiedStateObject->SetField(Pair.Key, Pair.Value);
+		}
+	}
+	PendingNullStateKeys = MoveTemp(PreservedPendingNullKeys);
 
 	if (PresetOptionsDropdown && !addNewPresetUIVisible)
 		PopulatePresetOptionsDropdown();

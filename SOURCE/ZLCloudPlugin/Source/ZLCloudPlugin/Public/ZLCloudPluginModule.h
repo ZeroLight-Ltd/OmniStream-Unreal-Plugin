@@ -24,6 +24,9 @@ class FSceneViewport;
 class UZLCloudPluginInput;
 class SWindow;
 class MessageCallbacks;
+#if UNREAL_5_8_OR_NEWER
+class ISlateViewportProvider;
+#endif
 
 namespace ZLCloudPlugin
 {
@@ -107,7 +110,9 @@ namespace ZLCloudPlugin
 
 		bool IsPlatformCompatible() const;
 		void UpdateViewport(FSceneViewport* Viewport);
-#if UNREAL_5_5_OR_NEWER
+#if UNREAL_5_8_OR_NEWER
+		void OnBackBufferReady_RenderThread(SWindow& SlateWindow, ISlateViewportProvider& ViewportProvider);
+#elif UNREAL_5_5_OR_NEWER
 		void OnBackBufferReady_RenderThread(SWindow& SlateWindow, const FTextureRHIRef& BackBuffer);
 #else
 		void OnBackBufferReady_RenderThread(SWindow& SlateWindow, const FTexture2DRHIRef& BackBuffer);

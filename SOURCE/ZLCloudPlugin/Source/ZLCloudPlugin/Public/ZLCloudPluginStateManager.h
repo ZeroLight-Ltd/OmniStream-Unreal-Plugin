@@ -16,7 +16,9 @@
 #include "LauncherComms.h"
 #include "ZLDebugUIWidget.h"
 #include "ZLJobTrace.h"
+#include "ZLStateEventTrace.h"
 #include "MoviePipeline.h"
+#include "ZLCloudPluginVersion.h"
 
 #if WITH_EDITOR
 #include "Framework/Docking/TabManager.h"
@@ -24,6 +26,8 @@
 #endif
 
 #include "ZLCloudPluginStateManager.generated.h"
+
+class SWindow;
 
 ZLCLOUDPLUGIN_API TSharedPtr<FJsonObject> MergeJsonObjectsRecursive(const TSharedPtr<FJsonObject>& JsonObject1, const TSharedPtr<FJsonObject>& JsonObject2);
 
@@ -71,6 +75,7 @@ public:
 	void GetCurrentStateValue_String(FString FieldName, FString& StringValue, bool& Success);
 	void GetCurrentState(FString& jsonString);
 	inline TSharedPtr<FJsonObject> GetRequestedState_JsonObject() { return JsonObject_out_requestedState; };
+	inline TSharedPtr<FJsonObject> GetIncomingRequestedState_JsonObject() { return JsonObject_in_requestedState; };
 
 	void MergeTrackedStateIntoCurrentState(const FString& FieldName, TSharedPtr<FJsonObject> JsonObject);
 
@@ -173,7 +178,12 @@ public:
 	// Editor tab toggle
 	bool GetShowDebugUIInEditorTab() const { return m_showDebugUIInEditorTab; }
 	void SetShowDebugUIInEditorTab(bool showInEditorTab);
+	void StartStateTimelineRecording() { StateEventRecorder.StartRecording(); }
+	void StopStateTimelineRecording() { StateEventRecorder.StopRecording(); }
+	bool IsStateTimelineRecording() const { return StateEventRecorder.IsRecording(); }
+	bool SaveStateTimeline(FString& OutFilePath);
 #if WITH_EDITOR
+	void OpenStateTimeline();
 	void SavePreviousPIESessionPreset() const;
 #endif
 
@@ -262,6 +272,7 @@ private:
 	bool m_debugUIVisible = false;
 	bool m_showDebugUIInEditorTab = false;
 	UStateKeyInfoAsset* m_lastSetSchema = nullptr; // Track last schema to avoid unnecessary SetTargetSchema calls
+	FZLStateEventRecorder StateEventRecorder;
 
 	// Helper function to setup viewport mode (used in both editor and non-editor builds)
 	void SetupViewportMode();
@@ -277,6 +288,7 @@ private:
 #if WITH_EDITOR
 	static const FName DebugUITabId;
 	TSharedPtr<SDockTab> DebugUITab;
+	TSharedPtr<SWindow> StateTimelineWindow;
 #endif
 
 	void CopyRequestId();
@@ -1171,12 +1183,21 @@ public:
 			}
 		}
 
-		TArray<FString> ChildKeys;
-		CurrentJsonObject->Values.GenerateKeyArray(ChildKeys);
-
-		for (const FString& SubKey : ChildKeys)
+		TArray<TPair<FString, TSharedPtr<FJsonValue>>> SubKeyEntries;
+		SubKeyEntries.Reserve(CurrentJsonObject->Values.Num());
+		for (const auto& Pair : CurrentJsonObject->Values)
 		{
-			const TSharedPtr<FJsonValue>& JsonValue = CurrentJsonObject->Values.FindChecked(SubKey);
+			SubKeyEntries.Emplace(ZL_JSON_KEY_TO_FSTRING(Pair.Key), Pair.Value);
+		}
+
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : SubKeyEntries)
+		{
+			const FString& SubKey = Pair.Key;
+			const TSharedPtr<FJsonValue>& JsonValue = Pair.Value;
+			if (!JsonValue.IsValid())
+			{
+				continue;
+			}
 
 			const FString FullKey = ParentKey + TEXT(".") + SubKey;
 
@@ -1295,12 +1316,10 @@ public:
 			}
 		}
 
-		TArray<FString> ChildKeys;
-		CurrentJsonObject->Values.GenerateKeyArray(ChildKeys);
-
-		for (const FString& SubKey : ChildKeys)
+		for (const auto& Pair : CurrentJsonObject->Values)
 		{
-			const TSharedPtr<FJsonValue>& JsonValue = CurrentJsonObject->Values.FindChecked(SubKey);
+			const FString SubKey = ZL_JSON_KEY_TO_FSTRING(Pair.Key);
+			const TSharedPtr<FJsonValue>& JsonValue = Pair.Value;
 
 			const FString FullKey = ParentKey + TEXT(".") + SubKey;
 

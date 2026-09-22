@@ -41,6 +41,30 @@ struct FZLAutoPopulateAdvancedLevelSelectorDesc
 };
 
 USTRUCT(BlueprintType)
+struct FZLAutoPopulateAdvancedNumberDesc
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly, Category = "ZL OmniStream Auto-Populate")
+    FString Id;
+
+    UPROPERTY(BlueprintReadOnly, Category = "ZL OmniStream Auto-Populate")
+    FString Label;
+
+    UPROPERTY(BlueprintReadOnly, Category = "ZL OmniStream Auto-Populate")
+    int32 DefaultValue = 1;
+
+    UPROPERTY(BlueprintReadOnly, Category = "ZL OmniStream Auto-Populate")
+    int32 MinValue = 1;
+
+    UPROPERTY(BlueprintReadOnly, Category = "ZL OmniStream Auto-Populate")
+    int32 MaxValue = 99;
+
+    UPROPERTY(BlueprintReadOnly, Category = "ZL OmniStream Auto-Populate")
+    FString VisibleWhenCheckboxId;
+};
+
+USTRUCT(BlueprintType)
 struct FZLAutoPopulateAdvancedOptionDesc
 {
     GENERATED_BODY()
@@ -53,6 +77,9 @@ struct FZLAutoPopulateAdvancedOptionDesc
 
     UPROPERTY(BlueprintReadOnly, Category = "ZL OmniStream Auto-Populate")
     TArray<FZLAutoPopulateAdvancedCheckboxDesc> Checkboxes;
+
+    UPROPERTY(BlueprintReadOnly, Category = "ZL OmniStream Auto-Populate")
+    TArray<FZLAutoPopulateAdvancedNumberDesc> NumberInputs;
 
     UPROPERTY(BlueprintReadOnly, Category = "ZL OmniStream Auto-Populate")
     TArray<FZLAutoPopulateAdvancedLevelSelectorDesc> LevelSelectors;
@@ -111,6 +138,12 @@ public:
     UFUNCTION(BlueprintCallable, Category = "ZL OmniStream Auto-Populate")
     static bool SetSelectedAutoPopulateOptions(const TArray<FString>& SelectedOptions);
 
+    UFUNCTION(BlueprintCallable, Category = "ZL OmniStream Auto-Populate")
+    static FString GetAdvancedAutoPopulateSettingsJson();
+
+    UFUNCTION(BlueprintCallable, Category = "ZL OmniStream Auto-Populate")
+    static bool SetAdvancedAutoPopulateSettingsJson(const FString& AdvancedSettingsJson);
+
     /** True when a FZLStateEditorV2 instance is currently constructed. */
     UFUNCTION(BlueprintCallable, Category = "ZL OmniStream Auto-Populate")
     static bool IsSchemaEditorOpen();
@@ -121,7 +154,7 @@ public:
     static bool RunAutoPopulate(const TArray<FString>& SelectedOptions, const TArray<FString>& LevelPackageNames, bool bAdditive);
 
     /** Advanced-settings aware variant. AdvancedSettingsJson format:
-     *  {"OptionName":{"checkboxes":{"id":true},"levelSelections":{"selectorId":["/Game/MyLevel"]},"actorSelections":{"selectorId":["ModelA"]}}} */
+     *  {"OptionName":{"checkboxes":{"id":true},"numberInputs":{"id":1},"levelSelections":{"selectorId":["/Game/MyLevel"]},"actorSelections":{"selectorId":["ModelA"]}}} */
     UFUNCTION(BlueprintCallable, Category = "ZL OmniStream Auto-Populate")
     static bool RunAutoPopulateWithSettings(const TArray<FString>& SelectedOptions, const TArray<FString>& LevelPackageNames, bool bAdditive, const FString& AdvancedSettingsJson);
 

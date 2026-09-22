@@ -7,6 +7,8 @@ public class Portal : ModuleRules
 {
 	public Portal(ReadOnlyTargetRules Target) : base(Target)
 	{
+          bUsePrecompiled=true;
+
 		Type = ModuleType.External;
 
 		if (Target.Platform == UnrealTargetPlatform.Win64)

@@ -28,6 +28,8 @@ namespace ZLCloudPlugin
 
 	void FVideoSource::PushFrame()
 	{
+		// Pixel Streaming pulls FORMAT_RHI via WaitForFormat on the encoder thread.
+		// We push immediately on OnFrameCaptured (coupled framerate) like PS VideoSourceGroup::Tick.
 		TSharedPtr<IPixelCaptureOutputFrame> OutputFrame = VideoInput->RequestFormat(PixelCaptureBufferFormat::FORMAT_RHI);
 		if (OutputFrame)
 		{

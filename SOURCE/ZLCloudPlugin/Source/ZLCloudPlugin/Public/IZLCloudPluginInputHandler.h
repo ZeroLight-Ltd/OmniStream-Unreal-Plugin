@@ -95,3 +95,12 @@ public:
 	 */
 	virtual void SetInputType(EZLCloudPluginInputType InputType) = 0;
 };
+
+/**
+ * While a client is streaming, mouse input from the browser replaces the platform cursor for the whole
+ * application, so local clicks are routed to wherever the streamed cursor is rather than to the real
+ * cursor. Windows registered here get the real platform cursor back whenever it is over them, which keeps
+ * editor tool windows usable during a stream.
+ */
+ZLCLOUDPLUGIN_API void ZLRegisterLocalInputWindow(TWeakPtr<SWindow> InWindow);
+ZLCLOUDPLUGIN_API void ZLUnregisterLocalInputWindow(TWeakPtr<SWindow> InWindow);

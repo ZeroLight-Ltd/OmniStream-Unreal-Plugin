@@ -4,6 +4,8 @@ public class ZLCloudPluginEditor : ModuleRules
 {
     public ZLCloudPluginEditor(ReadOnlyTargetRules Target) : base(Target)
     {
+          bUsePrecompiled=true;
+
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
 		PublicDependencyModuleNames.AddRange(new string[] {

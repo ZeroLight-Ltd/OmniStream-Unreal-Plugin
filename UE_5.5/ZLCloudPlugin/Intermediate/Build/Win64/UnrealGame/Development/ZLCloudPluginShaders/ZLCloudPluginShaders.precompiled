@@ -1,0 +1,6 @@
+{
+	"OutputFiles": [
+		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPluginShaders\\ZLCloudPluginShaders.cpp.obj",
+		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPluginShaders\\ZLCubeToEquirect.cpp.obj"
+	]
+}

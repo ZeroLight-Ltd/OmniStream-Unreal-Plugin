@@ -9,6 +9,7 @@
 #include "IDetailCustomization.h"
 #include "DetailLayoutBuilder.h"
 #include "DetailCategoryBuilder.h"
+#include "IDetailPropertyRow.h"
 #include "IPropertyTypeCustomization.h"
 #include "Widgets/Images/SImage.h"
 #include "DetailWidgetRow.h"
@@ -21,6 +22,8 @@
 #include "Slate/SlateTextureAtlasInterface.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/SBoxPanel.h"
 #endif
 
 #include "EditorZLCloudPluginSettings.generated.h"
@@ -48,11 +51,12 @@ public:
 	bool bMouseAlwaysAttached = true;
 
 	/**
-	* Keys you want to allow the browser to pass to your application (seperated by a comma)
-	* Use https://keycode.info/ to get your key codes
+	* Keys you want to allow the browser to pass to your application (separated by a comma).
+	* Use ZeroLight > Tools > Input Key Filter to edit or record keys, or https://keycode.info/ for codes.
+	* Default: Q, W, E, A, S, D, I, U, O, J, K, L, arrows, Space
 	*/
 	UPROPERTY(config, EditAnywhere, Category = Input)
-	FString filteredKeyList = TEXT("81,87,69,65,83,68,38,37,40,39,32");
+	FString filteredKeyList = TEXT("81,87,69,65,83,68,73,85,79,74,75,76,38,37,40,39,32");
 
 	TSet<FKey> FilteredKeys;
 	void UpdateFilteredKeys();
@@ -93,6 +97,11 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = Cloud, meta = (ClampMin = "10.0", UIMin = "10.0"))
 	float stateRequestTimeout = 20.0;
 
+	/**
+	 * Timeout (in ms) for blocking on the render fence before continuing.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = Cloud, meta = (ClampMin = "25000", ClampMax = "360000", UIMin = "25000", UIMax = "360000"))
+	int timeoutForBlockOnRenderFence = 25000;
 
 	/**
 	 * Initial heartbeat timeout (in seconds) used for session startup. If left at default, this is omitted from runInfo.
@@ -111,6 +120,12 @@ public:
 	 */
 	UPROPERTY(config, EditAnywhere, Category = Cloud)
 	int screenshotFrameWaitCountOverride = 0;
+
+	/**
+	 * Extra ticked frames to wait after an environment switch in HighResScreenshot jobs, after flushing streaming. If set to 0, the settle wait is skipped.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = Cloud, meta = (ClampMin = "0", UIMin = "0"))
+	int environmentSettleFrames = 0;
 
 	/**
 	 * Allows support for running the app in CloudXR mode. Requires OpenXR plugin to be enabled.
@@ -174,10 +189,16 @@ public:
 	FString buildConfiguration = "Development";
 
 	/**
-	* Downloads FFmpeg when building, used for media on demand video generation.
+	* Downloads FFmpeg when enabled, used for media on demand video generation.
 	*/
 	UPROPERTY(config, EditAnywhere, Category = BuildAndDeploy, meta = (DisplayName = "Download ffmpeg for media on demand videos"))
 	bool bDownloadFFmpegForMediaOnDemandVideos = false;
+
+	/**
+	* When disabled, Movie Render Queue jobs never apply the cinematic quality game overrides.
+	*/
+	UPROPERTY(config, EditAnywhere, Category = BuildAndDeploy, meta = (DisplayName = "Allow cinematic quality overrides in media on demand videos", EditCondition = "bDownloadFFmpegForMediaOnDemandVideos", EditConditionHides))
+	bool bAllowCinematicQualityOverridesInMediaOnDemandVideos = true;
 
 	/**
 	* Specifies a filepath on-disk to a jpeg/png image that will be used as the thumbnail for the project in Portal
@@ -210,6 +231,30 @@ public:
 	{
 		return thumbnailImagePath.FilePath;
 	}
+
+	/**
+	* Resolves a path stored in DefaultZLCloudPluginSettings.ini to an absolute path.
+	* Relative values are always resolved against the project directory - FPaths resolves them against the
+	* engine binaries directory, which corrupts the stored value a little more on every save.
+	*/
+	static FString ResolveStoredPath(const FString& storedPath);
+
+	/**
+	* Converts a path to the form written to DefaultZLCloudPluginSettings.ini. Project relative when that
+	* resolves back to the same location on disk, absolute otherwise.
+	*/
+	static FString MakeStoredPath(const FString& path);
+
+	/**
+	* True when a stored path can no longer describe a real location, e.g. the repeated directory names left
+	* behind when a relative path has been resolved against the wrong base directory repeatedly.
+	*/
+	static bool IsStoredPathCorrupt(const FString& storedPath);
+
+	/**
+	* Validates buildFolder and thumbnailImagePath after load, resetting them to defaults when corrupt.
+	*/
+	void SanitizePathSettings();
 
 	// Begin UDeveloperSettings Interface
 	virtual FName GetCategoryName() const override;
@@ -245,8 +290,46 @@ public:
 		return MakeShareable(new FZLCloudPluginSettingsCustomization);
 	}
 
+	static void OpenFilteredKeysEditor();
+
 	inline void CustomizeDetails(IDetailLayoutBuilder& DetailBuilder) override
 	{
+		TSharedRef<IPropertyHandle> FilteredKeysHandle = DetailBuilder.GetProperty(GET_MEMBER_NAME_CHECKED(UZLCloudPluginSettings, filteredKeyList));
+		if (IDetailPropertyRow* FilteredKeysRow = DetailBuilder.EditDefaultProperty(FilteredKeysHandle))
+		{
+			FilteredKeysRow->CustomWidget()
+				.NameContent()
+				[
+					FilteredKeysHandle->CreatePropertyNameWidget()
+				]
+				.ValueContent()
+				.MinDesiredWidth(320.0f)
+				.MaxDesiredWidth(600.0f)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.0f)
+					.VAlign(VAlign_Center)
+					[
+						FilteredKeysHandle->CreatePropertyValueWidget()
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(6.0f, 0.0f, 0.0f, 0.0f)
+					.VAlign(VAlign_Center)
+					[
+						SNew(SButton)
+						.Text(FText::FromString("Open Editor"))
+						.ToolTipText(FText::FromString("Open the Input Key Filter to record, toggle, or edit allowed keys"))
+						.OnClicked_Lambda([]()
+						{
+							FZLCloudPluginSettingsCustomization::OpenFilteredKeysEditor();
+							return FReply::Handled();
+						})
+					]
+				];
+		}
+
 		IDetailCategoryBuilder& ThumbnailCategory = DetailBuilder.EditCategory("Thumbnail");
 
 		ThumbnailPathProperty = DetailBuilder.GetProperty(GET_MEMBER_NAME_CHECKED(UZLCloudPluginSettings, thumbnailImagePath));
@@ -290,7 +373,7 @@ public:
 			{
 				FFilePath* imageFilePath = static_cast<FFilePath*>(RawDataPtrs[0]);
 
-				FString thumbnailImagePath = FPaths::Combine(FPaths::ProjectDir(), imageFilePath->FilePath);
+				FString thumbnailImagePath = UZLCloudPluginSettings::ResolveStoredPath(imageFilePath->FilePath);
 
 				if (thumbnailImagePath == lastLoadedThumbnailPath)
 				{

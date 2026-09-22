@@ -86,6 +86,23 @@ bool CloudStream2::IsDLLValid()
 	return m_pluginInitialised && m_CloudStream2DLLHandle != nullptr;
 }
 
+#if UNREAL_5_8_OR_NEWER
+// Do not Poll-sleep a fence that was already consumed. Clear() makes Poll() stay
+// false on 5.8, and a 1s render-thread wait during encoder teardown whites the stream.
+static void ConsumeTextureReleaseFence(FGPUFenceRHIRef& Fence, FRHICommandListImmediate& RHICmdList)
+{
+	if (!Fence)
+	{
+		return;
+	}
+	if (!Fence->Poll())
+	{
+		RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
+	}
+	Fence = nullptr;
+}
+#endif
+
 void CloudStream2::InitPlugin()
 {
 	if (m_pluginInitialised)
@@ -242,7 +259,15 @@ void CloudStream2::ConnectInputHandler()
 			}
 
 			FLevelEditorViewportClient& LevelViewportClient = ActiveLevelViewport->GetLevelViewportClient();
+#if UNREAL_5_8_OR_NEWER
+			FSceneViewport* SceneViewport = LevelViewportClient.Viewport ? LevelViewportClient.Viewport->AsSceneViewport() : nullptr;
+#else
 			FSceneViewport* SceneViewport = static_cast<FSceneViewport*>(LevelViewportClient.Viewport);
+#endif
+			if (!SceneViewport)
+			{
+				return;
+			}
 			m_InputHandler->SetTargetViewport(SceneViewport->GetViewportWidget());
 			m_InputHandler->SetTargetWindow(SceneViewport->FindWindow());
 		}
@@ -623,7 +648,10 @@ void CloudStream2::CheckInterruptions()
 			if (m_IntermediateTexture)
 			{
 				FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
-				
+
+#if UNREAL_5_8_OR_NEWER
+				ConsumeTextureReleaseFence(m_TextureReleaseFence, RHICmdList);
+#else
 				if (m_TextureReleaseFence)
 				{
 					const int32 MaxWaitIterations = 1000;
@@ -638,6 +666,7 @@ void CloudStream2::CheckInterruptions()
 						UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : GPU fence wait timeout"));
 					}
 				}
+#endif
 				
 				RHICmdList.ImmediateFlush(EImmediateFlushType::WaitForOutstandingTasksOnly);
 				
@@ -672,6 +701,13 @@ void CloudStream2::CheckInterruptions()
 
 			m_IsChangingTexture = true;
 			
+#if UNREAL_5_8_OR_NEWER
+			{
+				FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
+				ConsumeTextureReleaseFence(m_TextureReleaseFence, RHICmdList);
+				RHICmdList.ImmediateFlush(EImmediateFlushType::WaitForOutstandingTasksOnly);
+			}
+#else
 			if (m_TextureReleaseFence)
 			{
 				FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
@@ -691,6 +727,7 @@ void CloudStream2::CheckInterruptions()
 				RHICmdList.ImmediateFlush(EImmediateFlushType::WaitForOutstandingTasksOnly);
 				m_TextureReleaseFence = nullptr;
 			}
+#endif
 
 			m_NeedsResolutionChange = true;
 			m_BackToInitialCameraConfig = true;
@@ -730,57 +767,78 @@ void CloudStream2::OnFrame(const FTextureRHIRef& BackBuffer)
 void CloudStream2::OnFrame(const FTexture2DRHIRef& BackBuffer)
 #endif
 {
-	//check(IsInRenderingThread());
-	if (IsReady())
+	if (!IsReady())
 	{
-		CheckInterruptions();
+		return;
+	}
 
-		// Skip frames during resolution transition to prevent GPU resource conflicts
-		if (m_FramesToSkipAfterResolutionChange > 0)
-		{
-			--m_FramesToSkipAfterResolutionChange;
-		}
-		// Additional validation: ensure texture is valid, not being changed, and resolution change is not in progress
-		else if (m_IntermediateTexture && m_IntermediateTexture->GetNativeResource() && !m_NeedsResolutionChange && !m_IsChangingTexture && IsDLLValid())
-		{
-			// Validate back buffer is valid
-			if (!BackBuffer || !BackBuffer->GetNativeResource())
-			{
-				UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : Invalid back buffer, skipping frame"));
-				return;
-			}
-			
-			FGPUFenceRHIRef CopyFence = GDynamicRHI->RHICreateGPUFence(*FString::Printf(TEXT("CloudStream2CopyTexture")));
-			
-			if (CopyFence)
-			{
-#if UNREAL_5_1_OR_NEWER
-				FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
-				ZLCloudPluginUtils::CopyTexture(RHICmdList, BackBuffer, m_IntermediateTexture, CopyFence);
+	// PixelCapture completion can broadcast OnFrameCaptured from a background thread.
+	// All RHI/CUDA interop must run on the rendering thread.
+	if (!IsInRenderingThread())
+	{
+#if UNREAL_5_5_OR_NEWER
+		FTextureRHIRef SourceTexture = BackBuffer;
 #else
-				ZLCloudPluginUtils::CopyTexture(BackBuffer, m_IntermediateTexture, CopyFence);
+		FTexture2DRHIRef SourceTexture = BackBuffer;
+#endif
+		ENQUEUE_RENDER_COMMAND(CloudStream2OnFrameCmd)(
+			[SourceTexture](FRHICommandListImmediate& RHICmdList)
+			{
+				CloudStream2::OnFrame(SourceTexture);
+			});
+		return;
+	}
+
+	CheckInterruptions();
+
+	// Skip frames during resolution transition to prevent GPU resource conflicts
+	if (m_FramesToSkipAfterResolutionChange > 0)
+	{
+		--m_FramesToSkipAfterResolutionChange;
+	}
+	// Additional validation: ensure texture is valid, not being changed, and resolution change is not in progress
+	else if (m_IntermediateTexture && m_IntermediateTexture->GetNativeResource() && !m_NeedsResolutionChange && !m_IsChangingTexture && IsDLLValid())
+	{
+		// Validate back buffer is valid
+		if (!BackBuffer || !BackBuffer->GetNativeResource())
+		{
+			UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : Invalid back buffer, skipping frame"));
+			return;
+		}
+
+		FGPUFenceRHIRef CopyFence = GDynamicRHI->RHICreateGPUFence(*FString::Printf(TEXT("CloudStream2CopyTexture")));
+		
+		if (CopyFence)
+		{
+#if UNREAL_5_1_OR_NEWER
+			FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
+			ZLCloudPluginUtils::CopyTexture(RHICmdList, BackBuffer, m_IntermediateTexture, CopyFence);
+#if UNREAL_5_8_OR_NEWER
+			// Copy must be on the D3D queue before CUDA waits on it (5.7 did this implicitly).
+			RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
+#endif
+#else
+			ZLCloudPluginUtils::CopyTexture(BackBuffer, m_IntermediateTexture, CopyFence);
 #endif
 
-				// Store the fence so we can wait on it before releasing the texture
-				m_TextureReleaseFence = CopyFence;
+			m_TextureReleaseFence = CopyFence;
 
-				// Validate graphics queue before using it
-				void* GraphicsQueue = GDynamicRHI->RHIGetNativeGraphicsQueue();
-				if (GraphicsQueue)
-				{
-					CloudStream2DLL::OnFrameUE(0, GraphicsQueue, (uint32_t)FeatureNodesSyncGPUFence::GetLatestFrameID());
-					++m_SentFramesCount;
-				}
-				else
-				{
-					UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : Invalid graphics queue, skipping frame"));
-				}
+			void* GraphicsQueue = GDynamicRHI->RHIGetNativeGraphicsQueue();
+			if (GraphicsQueue)
+			{
+				CloudStream2DLL::OnFrameUE(0, GraphicsQueue, (uint32_t)FeatureNodesSyncGPUFence::GetLatestFrameID());
+				++m_SentFramesCount;
 			}
 			else
 			{
-				UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : Failed to create GPU fence, skipping frame"));
+				UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : Invalid graphics queue, skipping frame"));
 			}
 		}
+		else
+		{
+			UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : Failed to create GPU fence, skipping frame"));
+		}
+	}
 
 		/*
 		if (m_IntermediateTexture && !m_NeedsResolutionChange)
@@ -848,8 +906,6 @@ void CloudStream2::OnFrame(const FTexture2DRHIRef& BackBuffer)
 			BlitHelper.Blit(currentFrame, null);
 		}
 		*/
-
-	}
 }
 
 void CloudStream2::OnFrameRequirementsChanged(CloudStream2DLL::EncoderRequirements requirements)

@@ -5,6 +5,7 @@
 #if UNREAL_5_1_OR_NEWER
 
 #include "ZLCloudPluginPrivate.h"
+#include "ZLCloudPluginVersion.h"
 #include "PixelCaptureBufferFormat.h"
 #include "PixelCaptureCapturerRHI.h"
 #include "PixelCaptureCapturerRHIRDG.h"
@@ -18,17 +19,14 @@ TSharedPtr<FPixelCaptureCapturer> FZLCloudPluginVideoInputRHI::CreateCapturer(in
 	{
 	case PixelCaptureBufferFormat::FORMAT_RHI:
 	{
-		// "Safe Texture Copy" polls a fence to ensure a GPU copy is complete
-		// the RDG pathway does not poll a fence so is more unsafe but offers
-		// a significant performance increase
-		if (false)//UE::PixelStreaming::Settings::CVarPixelStreamingCaptureUseFence.GetValueOnAnyThread()) //ZL
-		{
-			return FPixelCaptureCapturerRHI::Create({ .OutputResolution = Resolution });
-		}
-		else
-		{
-			return FPixelCaptureCapturerRHIRDG::Create({ .OutputResolution = Resolution });
-		}
+#if ZL_SAFE_CUDA_FRAME_SUBMIT
+		// Fenced CapturerRHI — GPU-complete before OnFrameCaptured (CUDA must not
+		// copy from a PixelCapture output that is still being written).
+		return FPixelCaptureCapturerRHI::Create({ .OutputResolution = Resolution });
+#else
+		// RHIRDG is faster but does not wait for the GPU copy to finish.
+		return FPixelCaptureCapturerRHIRDG::Create({ .OutputResolution = Resolution });
+#endif
 	}
 	case PixelCaptureBufferFormat::FORMAT_I420:
 	{
@@ -54,17 +52,11 @@ TSharedPtr<FPixelCaptureCapturer> FZLCloudPluginVideoInputRHI::CreateCapturer(in
 	{
 		case PixelCaptureBufferFormat::FORMAT_RHI:
 		{
-			// "Safe Texture Copy" polls a fence to ensure a GPU copy is complete
-			// the RDG pathway does not poll a fence so is more unsafe but offers 
-			// a significant performance increase
-			if (false)//UE::ZLCloudPlugin::Settings::IsUsingSafeTextureCopy()) //ZL
-			{
-				return FPixelCaptureCapturerRHI::Create(FinalScale);
-			}
-			else
-			{
-				return FPixelCaptureCapturerRHIRDG::Create(FinalScale);
-			}
+#if ZL_SAFE_CUDA_FRAME_SUBMIT
+			return FPixelCaptureCapturerRHI::Create(FinalScale);
+#else
+			return FPixelCaptureCapturerRHIRDG::Create(FinalScale);
+#endif
 		}
 		case PixelCaptureBufferFormat::FORMAT_I420:
 		{
@@ -86,5 +78,3 @@ TSharedPtr<FPixelCaptureCapturer> FZLCloudPluginVideoInputRHI::CreateCapturer(in
 #endif
 
 #endif
-
-

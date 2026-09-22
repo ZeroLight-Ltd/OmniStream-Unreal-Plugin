@@ -404,6 +404,9 @@ public:
 	/** Removes the highest-index slot (also: right-click node → State Request). */
 	void RemoveLastKeyFromRequest();
 
+	/** Removes a specific Key_N / Value_N slot; later slots shift down (also: right-click that pin). */
+	void RemoveKeySlotFromRequest(int32 SlotIndex);
+
 	inline void OnAssetLoaded(FSoftObjectPath Path)
 	{
 		UStateKeyInfoAsset* LoadedAsset = Cast<UStateKeyInfoAsset>(Path.ResolveObject());
@@ -423,6 +426,7 @@ public:
 
 private:
 	bool CanRemoveLastKeySlot() const { return NumKeySlots > 1; }
+	bool CanRemoveKeySlot(int32 SlotIndex) const;
 
 	void ScheduleVisualRefreshAfterSlotChange();
 

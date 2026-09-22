@@ -276,4 +276,49 @@ namespace ZLCloudPlugin {
 		/* 254 */ &EKeys::RightControl,
 		/* 255 */ &EKeys::RightAlt
 	};
+
+	inline bool IsValidJavaScriptKeyCode(int32 KeyCode)
+	{
+		return KeyCode >= 0 && KeyCode < 256
+			&& JavaScriptKeyCodeToFKey[KeyCode] != nullptr
+			&& JavaScriptKeyCodeToFKey[KeyCode]->IsValid();
+	}
+
+	inline int32 FindJavaScriptKeyCodeFromFKey(const FKey& Key)
+	{
+		if (!Key.IsValid())
+		{
+			return INDEX_NONE;
+		}
+
+		for (int32 Index = 0; Index < 256; ++Index)
+		{
+			if (JavaScriptKeyCodeToFKey[Index] != nullptr && *JavaScriptKeyCodeToFKey[Index] == Key)
+			{
+				return Index;
+			}
+		}
+
+		return INDEX_NONE;
+	}
+
+	inline FString GetJavaScriptKeyDisplayName(int32 KeyCode)
+	{
+		if (IsValidJavaScriptKeyCode(KeyCode))
+		{
+			return JavaScriptKeyCodeToFKey[KeyCode]->GetDisplayName().ToString();
+		}
+
+		return FString::Printf(TEXT("Unknown (%d)"), KeyCode);
+	}
+
+	inline const FKey* GetFKeyFromJavaScriptKeyCode(int32 KeyCode)
+	{
+		if (KeyCode >= 0 && KeyCode < 256)
+		{
+			return JavaScriptKeyCodeToFKey[KeyCode];
+		}
+
+		return nullptr;
+	}
 }

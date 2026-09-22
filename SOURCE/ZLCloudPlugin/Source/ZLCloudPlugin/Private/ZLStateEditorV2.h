@@ -45,6 +45,7 @@ public:
     double minValue = 0.0;
     double maxValue = 0.0;
     bool allowDynamicArraySize = false;
+    int32 maximumAdditionalModelSlots = 0;
     bool allowNullValue = false;
     bool defaultValueIsNull = false;
     bool displayDescriptionAsOptions = false;
@@ -121,6 +122,9 @@ public:
     /** Updates and persists the auto-populate option selection for the advanced window. */
     void SetSelectedAutoPopulateOptions(const TArray<FString>& Options);
 
+    FString GetAdvancedAutoPopulateSettingsJson() const;
+    void SetAdvancedAutoPopulateSettingsJson(const FString& AdvancedSettingsJson);
+
     /** Weak pointer to the currently constructed editor instance (if any). */
     static TWeakPtr<FZLStateEditorV2> GetLiveInstance() { return s_LiveInstance; }
 
@@ -182,11 +186,14 @@ protected:
     void LoadLastOpenedSchemaPathFromConfig();
     void SaveSelectedAutoPopulateOptionsToConfig() const;
     void LoadSelectedAutoPopulateOptionsFromConfig();
+    void SaveAdvancedAutoPopulateSettingsToConfig() const;
+    void LoadAdvancedAutoPopulateSettingsFromConfig();
     void ApplyDefaultAutoPopulateOptionSelections();
     void BeginRenameKey(const FString& Key);
     void CommitRenameKey(const FString& OriginalKey, const FString& ProposedKey);
     void DuplicateKey(const FString& SourceKey);
     void DeleteKey(const FString& Key);
+    void ConvertKeyArrayStyle(const FString& Key, bool bConvertToArray);
     FString MakeUniqueDuplicateKey(const FString& SourceKey) const;
 
     void RefreshAutoPopulateOptions();
@@ -213,6 +220,7 @@ protected:
 
     TArray<TSharedPtr<FString>> AutoPopulateOptionLabels;
     TSet<FString> SelectedAutoPopulateOptions;
+    FString AdvancedAutoPopulateSettingsJson;
     bool bIsOpeningAdvancedAutoPopulateWindow = false;
 
     bool bHasPendingAutoPopulatePreview = false;

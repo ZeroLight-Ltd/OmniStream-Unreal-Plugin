@@ -40,7 +40,14 @@ namespace ZLCloudPluginUtils
 			TextureDesc.AddFlags(ETextureCreateFlags::Shared);
 		}
 
-#if UNREAL_5_7_OR_NEWER
+#if UNREAL_5_8_OR_NEWER
+		// Match PixelCapture 5.8: create via immediate command list (RHICreateTexture is deprecated).
+		// Flush so GetNativeResource() is a real D3D allocation before SetTexture/CUDA.
+		FRHICommandListImmediate& RHICmdList = FRHICommandListImmediate::Get();
+		FTextureRHIRef Texture = RHICmdList.CreateTexture(TextureDesc);
+		RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
+		return Texture;
+#elif UNREAL_5_7_OR_NEWER
 		return RHICreateTexture(TextureDesc);
 #elif UNREAL_5_4_OR_NEWER
 		return GDynamicRHI->RHICreateTexture(FRHICommandListExecutor::GetImmediateCommandList(), TextureDesc);
@@ -67,6 +74,9 @@ namespace ZLCloudPluginUtils
 
 			// source and dest are the same. simple copy
 			RHICmdList.CopyTexture(SourceTexture, DestTexture, {});
+
+			// Restore source so subsequent scene/PixelCapture use is not left in CopySrc.
+			RHICmdList.Transition(FRHITransitionInfo(SourceTexture, ERHIAccess::CopySrc, ERHIAccess::Present));
 		}
 		else
 		{
@@ -116,9 +126,12 @@ namespace ZLCloudPluginUtils
 
 			RHICmdList.EndRenderPass();
 
-			RHICmdList.Transition(FRHITransitionInfo(SourceTexture, ERHIAccess::SRVMask, ERHIAccess::CopySrc));
+			RHICmdList.Transition(FRHITransitionInfo(SourceTexture, ERHIAccess::SRVMask, ERHIAccess::Present));
 			RHICmdList.Transition(FRHITransitionInfo(DestTexture, ERHIAccess::RTV, ERHIAccess::CopyDest));
 		}
+
+		// Leave dest in a state safe for CUDA/D3D interop consumers after the copy completes.
+		RHICmdList.Transition(FRHITransitionInfo(DestTexture, ERHIAccess::CopyDest, ERHIAccess::Present));
 
 		if (Fence != nullptr)
 		{
