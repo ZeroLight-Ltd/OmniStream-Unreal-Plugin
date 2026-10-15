@@ -83,6 +83,13 @@ struct FStateKeyInfo
     UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
     bool bDisplayDescriptionAsOptions = false;
 
+    // Relative cost of applying this field when batching cloud jobs. INDEX_NONE means
+    // unset: environment defaults to 10, model defaults to 8, all other keys default to 0.
+    UPROPERTY(EditAnywhere, Category = "StateKeyData", BlueprintReadWrite)
+    int32 Complexity = INDEX_NONE;
+
+    int32 GetEffectiveComplexity(const FString& Key) const;
+
     inline bool IsArray()
     {
         return DataType == "StringArray" || DataType == "NumberArray" || DataType == "BoolArray";
@@ -203,3 +210,50 @@ public:
 		const TArray<FDIMEModelMetadata>& InDimeModelData);
 	TSharedRef<FJsonObject> SerializeStateKeyAsset_ZLSchemaFile();
 };
+
+namespace ZLStateKeyComplexity
+{
+	static constexpr int32 Unset = INDEX_NONE;
+	static constexpr int32 DefaultNegligible = 0;
+	static constexpr int32 Environment = 10;
+	static constexpr int32 Model = 8;
+
+	inline FString GetLeafKeyName(const FString& FullKey)
+	{
+		int32 DotIndex = INDEX_NONE;
+		if (FullKey.FindLastChar(TEXT('.'), DotIndex))
+		{
+			return FullKey.Mid(DotIndex + 1);
+		}
+		return FullKey;
+	}
+
+	inline int32 GetDefaultForKey(const FString& FullKey)
+	{
+		const FString Leaf = GetLeafKeyName(FullKey);
+		if (Leaf.Equals(TEXT("environment"), ESearchCase::IgnoreCase))
+		{
+			return Environment;
+		}
+		if (Leaf.Equals(TEXT("model"), ESearchCase::IgnoreCase))
+		{
+			return Model;
+		}
+		return DefaultNegligible;
+	}
+
+	inline int32 GetEffective(int32 StoredComplexity, const FString& FullKey)
+	{
+		return StoredComplexity == Unset ? GetDefaultForKey(FullKey) : StoredComplexity;
+	}
+
+	inline bool ShouldSerialize(int32 EffectiveComplexity, const FString& FullKey)
+	{
+		return EffectiveComplexity != DefaultNegligible || GetDefaultForKey(FullKey) != DefaultNegligible;
+	}
+}
+
+inline int32 FStateKeyInfo::GetEffectiveComplexity(const FString& Key) const
+{
+	return ZLStateKeyComplexity::GetEffective(Complexity, Key);
+}

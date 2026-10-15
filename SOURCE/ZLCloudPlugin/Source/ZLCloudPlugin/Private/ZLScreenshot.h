@@ -64,6 +64,8 @@ namespace ZLCloudPlugin
 		bool debug = false;
 		TArray<FString> cVarOverrides;
 		TSharedPtr<FJsonObject> stateData = nullptr;
+		/** Local image tool: do not fill schema-default `configuration` when the job did not set it. */
+		bool bOmitImplicitConfiguration = false;
 		bool stateRequestSent = false;
 		bool transparent = false;
 		double jobStartTime = 0.0f;
@@ -181,6 +183,7 @@ namespace ZLCloudPlugin
 		void UpdateCurrentRenderStateRequestProgress(bool completed, bool matchSuccess);
 		void SetCurrentRenderStateData(TSharedPtr<FJsonObject> currentState, TSharedPtr<FJsonObject> timeoutState = nullptr, TSharedPtr<FJsonObject> unmatchedState = nullptr);
 		inline bool HasCurrentRender() { return m_CurrentRender.IsValid(); }
+		inline bool HasNextRender() { return m_NextRender.IsValid(); }
 		void Set2DODMode(bool is2DOD);
 		bool LoadImageAsFColorArray(const FString& ImagePath, TArray<FColor>& OutColorData, int32& OutWidth, int32& OutHeight);
 		void ApplyCVarOverridesDirect();

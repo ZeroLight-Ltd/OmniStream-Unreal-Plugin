@@ -34,6 +34,9 @@ private:
 #endif
 
 	FDelegateHandle DelegateHandle;
+#if UNREAL_5_8_OR_NEWER
+	TSharedPtr<class FSceneViewExtensionBase> RdpCaptureExtension;
+#endif
 };
 
 #endif

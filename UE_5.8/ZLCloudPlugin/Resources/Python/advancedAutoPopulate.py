@@ -1,6 +1,6 @@
 """
 @name: Advanced Auto-Populate
-@description: Drive the OmniStream V2 schema editor's auto-populate from a checklist of levels and module options.
+@description: Drive the OmniStream V2 schema editor's auto-populate from packaged levels, or a level checklist when ZLEditorTools is not included.
 @tags: omnistream,schema,auto-populate
 """
 
@@ -44,10 +44,41 @@ importlib.reload(qt_window_styling)
 
 
 # ---------------------------------------------------------------------------
-# Level discovery helpers (mirrors the logic in
-# ZLEditorTools/Resources/Python/packagedLevelsList.py, kept local here so
-# this window is self-contained).
+# ZLEditorTools is optional. When it is compiled into this project, levels
+# come from Content Tools. Otherwise the window keeps its own level checklist.
 # ---------------------------------------------------------------------------
+
+def _is_content_tools_available():
+    auto_populate = getattr(unreal, "ZLOmniStreamAutoPopulateLibrary", None)
+    is_available = getattr(auto_populate, "is_zleditor_tools_available", None) if auto_populate else None
+    if not callable(is_available) or not bool(is_available()):
+        return False
+
+    content_tools = getattr(unreal, "ZLContentToolsLibrary", None)
+    return (
+        callable(getattr(content_tools, "get_packaged_level_paths", None))
+        and callable(getattr(content_tools, "open_content_tools_packaged_levels", None))
+    )
+
+
+def _get_packaged_levels():
+    return sorted(
+        str(level)
+        for level in unreal.ZLContentToolsLibrary.get_packaged_level_paths()
+        if str(level)
+    )
+
+
+def _open_content_tools(parent_widget):
+    try:
+        unreal.ZLContentToolsLibrary.open_content_tools_packaged_levels()
+    except Exception as exc:
+        QMessageBox.warning(
+            parent_widget,
+            "Failed to open Content Tools",
+            str(exc)
+        )
+
 
 def _get_level_assets():
     asset_registry = unreal.AssetRegistryHelpers.get_asset_registry()
@@ -131,15 +162,35 @@ def _get_model_entries_from_dimebake_files():
     # Backup/temp dirs can hold a full copy of a model (dimebake + sibling .umap) whose
     # folder name is timestamped, which would be offered as a model the C++ side cannot
     # resolve - it only ever looks under /Game for "<Model>/Configuration/...".
+    # followlinks is required so models symlinked in from other packages are found.
+    # Those skipped folder names are still pruned, including inside the linked package.
     skip_dirs = {
         ".git", ".vs", ".idea", "__pycache__",
         "Binaries", "Intermediate", "Saved", "DerivedDataCache",
         "Backups", "Backup", "Temp"
     }
     entries_by_key = {}
+    seen_dirs = set()
 
-    for root, dirs, files in os.walk(project_root):
-        dirs[:] = [d for d in dirs if d not in skip_dirs]
+    def _mark_unvisited(directory):
+        real_dir = os.path.normcase(os.path.realpath(directory))
+        if real_dir in seen_dirs:
+            return False
+        seen_dirs.add(real_dir)
+        return True
+
+    _mark_unvisited(project_root)
+
+    # os.walk does not remember directories it has already entered, so a symlink
+    # that points back at a parent would recurse forever once followlinks is set.
+    for root, dirs, files in os.walk(project_root, followlinks=True):
+        kept_dirs = []
+        for directory_name in dirs:
+            if directory_name in skip_dirs:
+                continue
+            if _mark_unvisited(os.path.join(root, directory_name)):
+                kept_dirs.append(directory_name)
+        dirs[:] = kept_dirs
 
         for filename in files:
             lower_name = filename.lower()
@@ -182,52 +233,6 @@ def _get_model_entries_from_dimebake_files():
             }
 
     return sorted(entries_by_key.values(), key=lambda value: value["display_name"].lower())
-
-
-def _is_packaged_levels_list_available():
-    # Backward compatible: this helper may not exist until C++ plugin binaries are rebuilt.
-    has_editor_tools_api = getattr(
-        unreal.ZLOmniStreamAutoPopulateLibrary,
-        "is_zleditor_tools_available",
-        None
-    )
-    if callable(has_editor_tools_api):
-        if not has_editor_tools_api():
-            return False
-
-    packaged_levels_script = os.path.join(
-        unreal.Paths.project_plugins_dir(),
-        "ZLEditorTools", "Resources", "Python", "packagedLevelsList.py"
-    )
-    return os.path.exists(packaged_levels_script)
-
-
-def _open_packaged_levels_list(parent_widget):
-    if not _is_packaged_levels_list_available():
-        QMessageBox.information(
-            parent_widget,
-            "ZLEditorTools unavailable",
-            "Packaged Levels List is unavailable because ZLEditorTools is not present in this project/build."
-        )
-        return
-
-    try:
-        zleditor_tools_py = os.path.join(
-            unreal.Paths.project_plugins_dir(),
-            "ZLEditorTools", "Resources", "Python"
-        )
-        if zleditor_tools_py not in sys.path:
-            sys.path.append(zleditor_tools_py)
-
-        import packagedLevelsList
-        importlib.reload(packagedLevelsList)
-        packagedLevelsList.open_window()
-    except Exception as exc:
-        QMessageBox.warning(
-            parent_widget,
-            "Failed to open Packaged Levels List",
-            str(exc)
-        )
 
 
 def _resolve_baseline_path(loaded_path):
@@ -528,8 +533,13 @@ class AdvancedAutoPopulateWindow(QWidget):
     def __init__(self, parent=None):
         super(AdvancedAutoPopulateWindow, self).__init__(parent)
 
-        self.level_assets = _get_level_assets()
-        self.default_ticked_levels = _get_default_ticked_levels()
+        self._use_content_tools = _is_content_tools_available()
+        if self._use_content_tools:
+            self.level_assets = _get_packaged_levels()
+            self.default_ticked_levels = set()
+        else:
+            self.level_assets = _get_level_assets()
+            self.default_ticked_levels = _get_default_ticked_levels()
         self.module_descs = list(unreal.ZLOmniStreamAutoPopulateLibrary.get_auto_populate_modules())
         currently_selected = unreal.ZLOmniStreamAutoPopulateLibrary.get_currently_selected_options()
         self.currently_selected_options = set(str(opt) for opt in currently_selected)
@@ -767,22 +777,45 @@ class AdvancedAutoPopulateWindow(QWidget):
 
     # ------------------------------------------------------------------
     def _build_levels_section(self):
-        group = QGroupBox("Levels to auto-populate from")
+        if self._use_content_tools:
+            return self._build_content_tools_levels_section()
+        return self._build_manual_levels_section()
+
+    def _build_content_tools_levels_section(self):
+        group = QGroupBox("Packaged levels")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(8, 16, 8, 8)
         layout.setSpacing(6)
 
-        top_bar = QHBoxLayout()
-        top_bar.setContentsMargins(0, 0, 0, 0)
-        top_bar.addStretch(1)
+        count = len(self.level_assets)
+        if count == 0:
+            message = "No levels are currently included in a packaged build."
+        elif count == 1:
+            message = "Auto-populate will read the 1 level included in a packaged build."
+        else:
+            message = "Auto-populate will read the {} levels included in a packaged build.".format(count)
 
-        self.open_packaged_levels_button = QPushButton("Open Packaged Levels List")
-        self.open_packaged_levels_button.setEnabled(_is_packaged_levels_list_available())
-        self.open_packaged_levels_button.clicked.connect(
-            lambda: _open_packaged_levels_list(self)
+        summary = QLabel(message)
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        hint = QLabel(
+            "Which levels are included is decided in Content Tools: pack folders, "
+            "startup-map references and the AlwaysCookMaps list."
         )
-        top_bar.addWidget(self.open_packaged_levels_button)
-        layout.addLayout(top_bar)
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        open_content_tools_button = QPushButton("Open Content Tools")
+        open_content_tools_button.clicked.connect(lambda: _open_content_tools(self))
+        layout.addWidget(open_content_tools_button)
+        return group
+
+    def _build_manual_levels_section(self):
+        group = QGroupBox("Levels to auto-populate from")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(8, 16, 8, 8)
+        layout.setSpacing(6)
 
         self.levels_list = QListWidget()
         self.levels_list.setSelectionMode(QListWidget.NoSelection)
@@ -1102,7 +1135,7 @@ class AdvancedAutoPopulateWindow(QWidget):
     def _has_unsaved_settings_changes(self):
         if set(self._gather_selected_options()) != self._saved_selected_options:
             return True
-        if set(self._gather_selected_levels()) != self._saved_selected_levels:
+        if not self._use_content_tools and set(self._gather_selected_levels()) != self._saved_selected_levels:
             return True
         if self.additive_checkbox.isChecked() != self._saved_additive_mode:
             return True
@@ -1135,9 +1168,14 @@ class AdvancedAutoPopulateWindow(QWidget):
         super(AdvancedAutoPopulateWindow, self).closeEvent(event)
 
     def _gather_selected_levels(self):
+        if self._use_content_tools:
+            return list(self.level_assets)
         selected = []
-        for row in range(self.levels_list.count()):
-            item = self.levels_list.item(row)
+        levels_list = getattr(self, "levels_list", None)
+        if levels_list is None:
+            return selected
+        for row in range(levels_list.count()):
+            item = levels_list.item(row)
             if item.checkState() == Qt.Checked:
                 selected.append(item.text())
         return selected
@@ -1247,8 +1285,21 @@ class AdvancedAutoPopulateWindow(QWidget):
 
         selected_levels = self._gather_selected_levels()
         advanced_settings_payload = self._gather_advanced_settings()
-        advanced_settings_json = json.dumps(advanced_settings_payload)
         option_specific_levels = self._gather_option_specific_levels(advanced_settings_payload)
+        if self._use_content_tools and not selected_levels:
+            options_needing_levels = [
+                option for option in selected_options
+                if not option_specific_levels.get(option)
+            ]
+            if options_needing_levels:
+                QMessageBox.information(
+                    self,
+                    "No packaged levels",
+                    "No levels will be included in a packaged build, so auto-populate has nothing to read.\n\n"
+                    "Open Content Tools and include the levels that should cook."
+                )
+                return
+        advanced_settings_json = json.dumps(advanced_settings_payload)
         additive = self.additive_checkbox.isChecked()
         loaded_schema_path = unreal.ZLOmniStreamAutoPopulateLibrary.get_loaded_schema_path()
         baseline_path = _resolve_baseline_path(str(loaded_schema_path) if loaded_schema_path else "")

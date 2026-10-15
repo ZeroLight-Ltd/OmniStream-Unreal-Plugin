@@ -131,7 +131,9 @@ public class ZLCloudPlugin : ModuleRules
 		PrivateIncludePaths.AddRange(new string[]
 		{
 				Path.Combine(EngineDir, "Source/Runtime/AudioMixer/Private"),
-				Path.Combine(EngineDir, "Source/Runtime/VulkanRHI/Private")
+				Path.Combine(EngineDir, "Source/Runtime/VulkanRHI/Private"),
+				Path.Combine(EngineDir, "Source/Runtime/Renderer/Private"),
+				Path.Combine(EngineDir, "Source/Runtime/Renderer/Internal")
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
@@ -231,6 +233,7 @@ public class ZLCloudPlugin : ModuleRules
 			PublicSystemLibraries.AddRange(new string[] {
 					"DXGI.lib",
 					"d3d11.lib",
+					"Wtsapi32.lib",
 				});
 
 			PrivateIncludePaths.Add(Path.Combine(EngineDir, "Source/Runtime/VulkanRHI/Private/Windows"));

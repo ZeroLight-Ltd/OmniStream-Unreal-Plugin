@@ -479,6 +479,7 @@ namespace ZLStateEditorV2Internal
 		Clone.allowNullValue = Source.allowNullValue;
 		Clone.defaultValueIsNull = Source.defaultValueIsNull;
 		Clone.displayDescriptionAsOptions = Source.displayDescriptionAsOptions;
+		Clone.complexity = Source.complexity;
 		return Clone;
 	}
 
@@ -861,6 +862,7 @@ TMap<FString, FStateKeyInfo> FZLStateEditorV2::ConvertToSerializableMap(const TM
 		Serializable.bAllowNullValue = Info.allowNullValue;
 		Serializable.bDefaultValueIsNull = Info.defaultValueIsNull;
 		Serializable.bDisplayDescriptionAsOptions = Info.displayDescriptionAsOptions;
+		Serializable.Complexity = Info.GetEffectiveComplexity(Key);
 
 		for (const TSharedPtr<FJsonValue>& Accepted : Info.acceptedValues)
 		{
@@ -1169,6 +1171,12 @@ static TSharedPtr<FJsonValue> ParseSchemaAndBuildDataRecursiveV2(
 		NewInfo.displayDescriptionAsOptions = SchemaNode->GetBoolField(TEXT("x-zl-displayDescriptionAsOptions"));
 	}
 
+	double ComplexityNumber = 0.0;
+	if (SchemaNode->TryGetNumberField(TEXT("x-zl-complexity"), ComplexityNumber))
+	{
+		NewInfo.complexity = static_cast<int32>(ComplexityNumber);
+	}
+
 	if (NewInfo.dataType == "Select Type") return MakeShared<FJsonValueNull>();
 
 	const TArray<TSharedPtr<FJsonValue>>* EnumArray = nullptr;
@@ -1267,6 +1275,7 @@ TMap<FString, StateKeyInfoV2> FZLStateEditorV2::ConvertToEditorMap(const TMap<FS
 		RuntimeInfo.allowNullValue = Info.bAllowNullValue;
 		RuntimeInfo.defaultValueIsNull = Info.bDefaultValueIsNull;
 		RuntimeInfo.displayDescriptionAsOptions = Info.bDisplayDescriptionAsOptions;
+		RuntimeInfo.complexity = Info.Complexity;
 
 		TSharedPtr<FJsonValue> JsonValue;
 
@@ -1721,7 +1730,7 @@ void FZLStateEditorV2::DuplicateKey(const FString& SourceKey)
 	}
 	else
 	{
-		AreaExpansionStates.Add(DuplicateKeyName, TPair<bool, bool>(true, true));
+		AreaExpansionStates.Add(DuplicateKeyName, FZLStateEditorAreaExpansionState{true, true, false});
 	}
 
 	RefreshEditorFromState();
@@ -2131,7 +2140,7 @@ bool FZLStateEditorV2::BuildAutoPopulatePreview(
 	const TSharedPtr<FJsonObject> SavedActiveJsonObject = ZLStateEditorV2Internal::CloneJsonObject(ActiveJsonObject);
 	const TMap<FString, StateKeyInfoV2> SavedKeyInfos = ZLStateEditorV2Internal::CloneStateKeyInfoMap(keyInfos);
 	const TArray<FDIMEModelMetadata> SavedDimeModelData = ZLStateEditorV2Internal::CloneDimeModelData(DimeModelData);
-	const TMap<FString, TPair<bool, bool>> SavedAreaExpansionStates = AreaExpansionStates;
+		const TMap<FString, FZLStateEditorAreaExpansionState> SavedAreaExpansionStates = AreaExpansionStates;
 	const FString SavedCurrentJsonStr = s_currentJsonStr;
 	const FString SavedKeyBeingRenamed = keyBeingRenamed;
 	const FString SavedPendingRenameText = pendingRenameText;
@@ -2487,9 +2496,11 @@ void FZLStateEditorV2::Construct(const FArguments& InArgs)
 																this->keyInfos[newKeyStr].defaultValue = MakeShared<FJsonValueString>("");
 
 																if (!AreaExpansionStates.Contains(newKeyStr))
-																	AreaExpansionStates.Add(newKeyStr, TPair<bool, bool>(true, true));
+																{
+																	AreaExpansionStates.Add(newKeyStr, FZLStateEditorAreaExpansionState{true, true, false});
+																}
 																else
-																	AreaExpansionStates[newKeyStr].Key = true;
+																	AreaExpansionStates[newKeyStr].bExpanded = true;
 
 																TArray<FString> Parts;
 																newKeyStr.ParseIntoArray(Parts, TEXT("."));
@@ -2834,8 +2845,9 @@ void FZLStateEditorV2::GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObj
 			TSharedPtr<SVerticalBox> ArrayBox = SNew(SVerticalBox);
 			TSharedPtr<SVerticalBox> AcceptedValuesArrayBox = SNew(SVerticalBox);
 
-			bool bIsExpanded = AreaExpansionStates.Contains(Key) ? AreaExpansionStates[Key].Key : false;
-			bool bIsAdvancedExpanded = AreaExpansionStates.Contains(Key) ? AreaExpansionStates[Key].Value : false;
+			bool bIsExpanded = AreaExpansionStates.Contains(Key) ? AreaExpansionStates[Key].bExpanded : false;
+			bool bIsAdvancedExpanded = AreaExpansionStates.Contains(Key) ? AreaExpansionStates[Key].bAdvancedExpanded : false;
+			bool bIsContentGenMetadataHintsExpanded = AreaExpansionStates.Contains(Key) ? AreaExpansionStates[Key].bContentGenMetadataHintsExpanded : false;
 
 			ButtonsContainer->AddSlot()
 				.AutoHeight()
@@ -2846,9 +2858,9 @@ void FZLStateEditorV2::GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObj
 						.OnAreaExpansionChanged_Lambda([this, Key](bool bExpanded)
 					{
 						if (AreaExpansionStates.Contains(Key))
-							AreaExpansionStates[Key].Key = bExpanded;
+							AreaExpansionStates[Key].bExpanded = bExpanded;
 						else
-							AreaExpansionStates.Add(Key, TPair<bool, bool>(bExpanded, false));
+							AreaExpansionStates.Add(Key, FZLStateEditorAreaExpansionState{bExpanded, false, false});
 					})
 						.BorderBackgroundColor(FLinearColor(0.4f, 0.4f, 0.4f, 1.0f))
 						.BodyBorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
@@ -3044,9 +3056,9 @@ void FZLStateEditorV2::GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObj
 										.OnAreaExpansionChanged_Lambda([this, Key](bool bExpanded)
 									{
 										if (AreaExpansionStates.Contains(Key))
-											AreaExpansionStates[Key].Value = bExpanded;
+											AreaExpansionStates[Key].bAdvancedExpanded = bExpanded;
 										else
-											AreaExpansionStates.Add(Key, TPair<bool, bool>(true, bExpanded));
+											AreaExpansionStates.Add(Key, FZLStateEditorAreaExpansionState{true, bExpanded, false});
 									})
 										.BorderBackgroundColor(FLinearColor(0.55f, 0.55f, 0.55f, 1.0f))
 										.BodyBorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
@@ -3354,6 +3366,62 @@ void FZLStateEditorV2::GenerateUIFromJson(const TSharedPtr<FJsonObject>& JsonObj
 														.Content()
 														[
 															SNew(STextBlock).Text(FText::FromString("Transient"))
+														]
+												]
+												+ SVerticalBox::Slot().AutoHeight()
+												.Padding(0, 4, 0, 0)
+												[
+													SNew(SExpandableArea)
+														.InitiallyCollapsed(!bIsContentGenMetadataHintsExpanded)
+														.OnAreaExpansionChanged_Lambda([this, Key](bool bExpanded)
+													{
+														if (AreaExpansionStates.Contains(Key))
+															AreaExpansionStates[Key].bContentGenMetadataHintsExpanded = bExpanded;
+														else
+															AreaExpansionStates.Add(Key, FZLStateEditorAreaExpansionState{true, true, bExpanded});
+													})
+														.BorderBackgroundColor(FLinearColor(0.45f, 0.45f, 0.45f, 1.0f))
+														.BodyBorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+														.BodyBorderBackgroundColor(FLinearColor(0.35f, 0.35f, 0.35f, 1.0f))
+														.HeaderContent()
+														[
+															SNew(STextBlock).Text(FText::FromString("Content Generation Metadata Hints"))
+														]
+														.BodyContent()
+														[
+															SNew(SVerticalBox)
+																+ SVerticalBox::Slot().AutoHeight()
+																.Padding(0, 2, 0, 0)
+																[
+																	SNew(SHorizontalBox)
+																		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+																		[
+																			SNew(STextBlock).Text(FText::FromString("Complexity"))
+																		]
+																		+ SHorizontalBox::Slot().FillWidth(1.0f)
+																		[
+																			SNew(SNumericEntryBox<int32>)
+																				.ToolTipText(FText::FromString("Relative cost of applying this field when batching cloud jobs. 0 is negligible. environment defaults to 10 and model defaults to 8; this value can be overridden."))
+																				.MinValue(0)
+																				.Value_Lambda([this, Key]() -> TOptional<int32>
+																			{
+																				if (!keyInfos.Contains(Key))
+																				{
+																					return 0;
+																				}
+																				return keyInfos[Key].GetEffectiveComplexity(Key);
+																			})
+																				.OnValueCommitted_Lambda([this, Key](int32 NewValue, ETextCommit::Type)
+																			{
+																				if (!keyInfos.Contains(Key))
+																				{
+																					return;
+																				}
+																				keyInfos[Key].complexity = FMath::Max(0, NewValue);
+																				this->UpdateJsonData(s_currentJsonStr);
+																			})
+																		]
+																]
 														]
 												]
 										]

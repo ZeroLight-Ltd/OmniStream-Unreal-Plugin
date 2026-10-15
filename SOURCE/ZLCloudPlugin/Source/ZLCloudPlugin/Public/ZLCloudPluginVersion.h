@@ -30,9 +30,12 @@
 #define ZL_JSON_KEY_TO_FSTRING(Key) (Key)
 #endif
 
-// 5.8: fenced CapturerRHI + CreateTexture flush + FlushRHIThread, then OnFrameUE immediately 
-// (CUDA waits on the D3D queue, like 5.7). On by default for UE 5.8; widen the RHS (e.g. 
-// UNREAL_5_7_OR_NEWER) or force 1 to enable earlier.
+// 5.8: fenced CapturerRHI. One intermediate texture, registered once via SetTexture.
+// DispatchToRHIThread, then OnFrameUE only after that copy's fence has signaled.
+// The capture that sees the fence submits it and starts the next copy immediately.
+// A newer frame that arrives while the copy is in flight is kept and sent next.
+// The render thread does not wait, and there is no per-frame FlushRHIThread.
+// On by default for UE 5.8.
 #ifndef ZL_SAFE_CUDA_FRAME_SUBMIT
 #define ZL_SAFE_CUDA_FRAME_SUBMIT UNREAL_5_8_OR_NEWER
 #endif

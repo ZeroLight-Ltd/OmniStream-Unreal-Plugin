@@ -27,6 +27,7 @@
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLCloudPluginInputComponent.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLCloudPluginInputHandler.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLCloudPluginModule.cpp.obj",
+		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLCloudPluginRdpCaptureViewExtension.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLCloudPluginStateManager.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLCloudPluginVideoInput.cpp.obj",
 		"..\\..\\..\\x64\\UnrealGame\\Development\\ZLCloudPlugin\\ZLCloudPluginVideoInputBackBuffer.cpp.obj",

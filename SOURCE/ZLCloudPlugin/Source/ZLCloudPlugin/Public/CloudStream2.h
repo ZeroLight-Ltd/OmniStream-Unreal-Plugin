@@ -71,6 +71,14 @@ namespace ZLCloudPlugin
 		
 	private:
 		static void CheckInterruptions();
+#if UNREAL_5_8_OR_NEWER
+		static void TryFinishCudaRecreate();
+		static bool TrySubmitCompletedCopy(const FGPUFenceRHIRef& Fence, bool bFromCapture);
+		static bool StartCudaCopy(const FTextureRHIRef& Source, uint32 FrameId);
+		static void PumpCudaFrames();
+		static void WaitCudaCopyFence(uint32 Epoch, FGPUFenceRHIRef Fence);
+		static void AcquireCudaFrame(const FTextureRHIRef& Source, uint32 FrameId);
+#endif
 		static void ConnectInputHandler();
 		static void DisconnectInputHandler();
 		

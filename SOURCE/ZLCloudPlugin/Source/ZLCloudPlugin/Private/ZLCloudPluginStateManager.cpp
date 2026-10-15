@@ -771,6 +771,11 @@ bool GetJsonValueFromNestedKey(FString NestedKey, TSharedPtr<FJsonObject> JsonOb
 	TArray<FString> Keys;
 	NestedKey.ParseIntoArray(Keys, TEXT("."), true);
 
+	if (Keys.Num() == 0)
+	{
+		return false;
+	}
+
 	const FString FinalKey = Keys[Keys.Num() - 1];
 
 	TSharedPtr<FJsonObject> CurrentObject = JsonObject;
@@ -782,16 +787,30 @@ bool GetJsonValueFromNestedKey(FString NestedKey, TSharedPtr<FJsonObject> JsonOb
 			return false;
 		}
 
-		TSharedPtr<FJsonValue> JsonValue = CurrentObject->TryGetField(Key);
-		if (JsonValue->Type == EJson::Object)
+		const TSharedPtr<FJsonValue>* FoundValue = nullptr;
+		for (const auto& Pair : CurrentObject->Values)
 		{
-			CurrentObject = JsonValue->AsObject();
+			if (ZL_JSON_KEY_TO_FSTRING(Pair.Key).Equals(Key, ESearchCase::CaseSensitive))
+			{
+				FoundValue = &Pair.Value;
+				break;
+			}
+		}
+
+		if (FoundValue == nullptr || !FoundValue->IsValid())
+		{
+			return false;
+		}
+
+		if ((*FoundValue)->Type == EJson::Object)
+		{
+			CurrentObject = (*FoundValue)->AsObject();
 		}
 		else if(Key.Equals(FinalKey, ESearchCase::CaseSensitive))
 		{
 			// The last key should have a value type different from an object
 			// Handle error or return the value as needed
-			Value = &JsonValue;
+			Value = FoundValue;
 			return true;
 		}
 	}
@@ -1713,6 +1732,200 @@ void UZLCloudPluginStateManager::CopyRequestId()
 	}
 }
 
+static const TCHAR* JsonTypeName(EJson Type)
+{
+	switch (Type)
+	{
+	case EJson::None: return TEXT("None");
+	case EJson::Null: return TEXT("Null");
+	case EJson::String: return TEXT("String");
+	case EJson::Number: return TEXT("Number");
+	case EJson::Boolean: return TEXT("Boolean");
+	case EJson::Array: return TEXT("Array");
+	case EJson::Object: return TEXT("Object");
+	default: return TEXT("Unknown");
+	}
+}
+
+static FString DescribeJsonValueType(const TSharedPtr<FJsonValue>& Value)
+{
+	if (!Value.IsValid())
+	{
+		return TEXT("Invalid");
+	}
+
+	if (Value->Type != EJson::Array)
+	{
+		return JsonTypeName(Value->Type);
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>& Elements = Value->AsArray();
+	if (Elements.Num() == 0 || !Elements[0].IsValid())
+	{
+		return TEXT("Array");
+	}
+
+	const EJson ElementType = Elements[0]->Type;
+	for (const TSharedPtr<FJsonValue>& Element : Elements)
+	{
+		if (!Element.IsValid() || Element->Type != ElementType)
+		{
+			return TEXT("Array");
+		}
+	}
+
+	return FString::Printf(TEXT("Array of %s"), JsonTypeName(ElementType));
+}
+
+static TSharedPtr<FJsonValue> FindNestedJsonValue(const TSharedPtr<FJsonObject>& JsonObject, const FString& NestedKey)
+{
+	if (!JsonObject.IsValid())
+	{
+		return nullptr;
+	}
+
+	TArray<FString> Keys;
+	NestedKey.ParseIntoArray(Keys, TEXT("."), true);
+	if (Keys.Num() == 0)
+	{
+		return nullptr;
+	}
+
+	TSharedPtr<FJsonObject> CurrentObject = JsonObject;
+	for (int32 Index = 0; Index < Keys.Num(); ++Index)
+	{
+		if (!CurrentObject.IsValid())
+		{
+			return nullptr;
+		}
+
+		const TSharedPtr<FJsonValue> JsonValue = CurrentObject->TryGetField(Keys[Index]);
+		if (!JsonValue.IsValid())
+		{
+			return nullptr;
+		}
+
+		if (Index == Keys.Num() - 1)
+		{
+			return JsonValue;
+		}
+
+		if (JsonValue->Type != EJson::Object)
+		{
+			return nullptr;
+		}
+
+		CurrentObject = JsonValue->AsObject();
+	}
+
+	return nullptr;
+}
+
+template <typename T>
+static const TCHAR* RequestedStateTypeName()
+{
+	if constexpr (std::is_same<T, FString>::value)
+	{
+		return TEXT("String");
+	}
+	else if constexpr (std::is_same<T, float>::value || std::is_same<T, double>::value)
+	{
+		return TEXT("Number");
+	}
+	else if constexpr (std::is_same<T, bool>::value)
+	{
+		return TEXT("Boolean");
+	}
+	else if constexpr (std::is_same<T, TArray<FString>>::value)
+	{
+		return TEXT("String Array");
+	}
+	else if constexpr (std::is_same<T, TArray<float>>::value || std::is_same<T, TArray<double>>::value)
+	{
+		return TEXT("Number Array");
+	}
+	else if constexpr (std::is_same<T, TArray<bool>>::value)
+	{
+		return TEXT("Boolean Array");
+	}
+	else if constexpr (std::is_same<T, TSharedPtr<FJsonValue>>::value)
+	{
+		return TEXT("Object");
+	}
+	else
+	{
+		return TEXT("Unknown");
+	}
+}
+
+template <typename T>
+static bool RequestedStateValueTypeMatches(const TSharedPtr<FJsonValue>& Value)
+{
+	if (!Value.IsValid())
+	{
+		return false;
+	}
+
+	if constexpr (std::is_same<T, FString>::value)
+	{
+		return Value->Type == EJson::String;
+	}
+	else if constexpr (std::is_same<T, float>::value || std::is_same<T, double>::value)
+	{
+		return Value->Type == EJson::Number;
+	}
+	else if constexpr (std::is_same<T, bool>::value)
+	{
+		return Value->Type == EJson::Boolean;
+	}
+	else if constexpr (std::is_same<T, TSharedPtr<FJsonValue>>::value)
+	{
+		return Value->Type == EJson::Object;
+	}
+	else if constexpr (std::is_same<T, TArray<FString>>::value || std::is_same<T, TArray<float>>::value || std::is_same<T, TArray<double>>::value || std::is_same<T, TArray<bool>>::value)
+	{
+		if (Value->Type != EJson::Array)
+		{
+			return false;
+		}
+
+		EJson ExpectedElementType = EJson::None;
+		if constexpr (std::is_same<T, TArray<FString>>::value)
+		{
+			ExpectedElementType = EJson::String;
+		}
+		else if constexpr (std::is_same<T, TArray<bool>>::value)
+		{
+			ExpectedElementType = EJson::Boolean;
+		}
+		else
+		{
+			ExpectedElementType = EJson::Number;
+		}
+
+		for (const TSharedPtr<FJsonValue>& Element : Value->AsArray())
+		{
+			if (!Element.IsValid() || Element->Type != ExpectedElementType)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+static void LogRequestedStateTypeMismatch(const FString& FieldName, const TSharedPtr<FJsonValue>& Value, const TCHAR* ExpectedTypeName)
+{
+	UE_LOG(LogZLCloudPlugin, Warning, TEXT("Requested state key '%s' type mismatch: expected %s but the requested value is %s. Leaving the key in the requested state."),
+		*FieldName,
+		ExpectedTypeName,
+		*DescribeJsonValueType(Value));
+}
+
 template <typename T> void UZLCloudPluginStateManager::GetRequestedStateValue(FString FieldName, bool instantConfirm, T& data, bool& Success)
 {
 	Success = false;
@@ -1747,13 +1960,37 @@ template <typename T> void UZLCloudPluginStateManager::GetRequestedStateValue(FS
 			const TSharedPtr<FJsonValue>* nestedValue = nullptr;
 			Success = GetJsonValueFromNestedKey(FieldName, JsonObject_out_requestedState, nestedValue);
 
+			TSharedPtr<FJsonValue> ResolvedValue;
+			if (Success && nestedValue != nullptr)
+			{
+				ResolvedValue = *nestedValue;
+			}
+			if (!ResolvedValue.IsValid())
+			{
+				ResolvedValue = FindNestedJsonValue(JsonObject_out_requestedState, FieldName);
+			}
+
+			// Present, but not the type this request asked for. Leave it so a later reader can claim the real type.
+			if (ResolvedValue.IsValid() && !RequestedStateValueTypeMatches<T>(ResolvedValue))
+			{
+				LogRequestedStateTypeMismatch(FieldName, ResolvedValue, RequestedStateTypeName<T>());
+				Success = false;
+				return;
+			}
+
+			if (!Success || !ResolvedValue.IsValid())
+			{
+				Success = false;
+				return;
+			}
+
 			TSharedPtr<FJsonValue> val;
 			if (Success)
 			{
 				if constexpr (isArray)
 				{
 					TArray<TSharedPtr<FJsonValue>> StructJsonArray;
-					for (TSharedPtr<FJsonValue> var : nestedValue->Get()->AsArray())
+					for (TSharedPtr<FJsonValue> var : ResolvedValue->AsArray())
 					{
 						if constexpr (isNumber)
 						{
@@ -1783,19 +2020,19 @@ template <typename T> void UZLCloudPluginStateManager::GetRequestedStateValue(FS
 				{
 					if constexpr (isNumber)
 					{
-						data = nestedValue->Get()->AsNumber();
+						data = ResolvedValue->AsNumber();
 						val = MakeShared<FJsonValueNumber>(data);
 						numLeavesInc = 1;
 					}
 					else if constexpr (isBool)
 					{
-						data = nestedValue->Get()->AsBool();
+						data = ResolvedValue->AsBool();
 						val = MakeShared<FJsonValueBoolean>(data);
 						numLeavesInc = 1;
 					}
 					else if constexpr (isString)
 					{
-						data = nestedValue->Get()->AsString();
+						data = ResolvedValue->AsString();
 						val = MakeShared<FJsonValueString>(data);
 						numLeavesInc = 1;
 					}
@@ -1826,6 +2063,14 @@ template <typename T> void UZLCloudPluginStateManager::GetRequestedStateValue(FS
 		}
 		else if (JsonObject_out_requestedState->HasField(FieldName))
 		{
+			const TSharedPtr<FJsonValue> FieldValue = JsonObject_out_requestedState->TryGetField(FieldName);
+			if (!RequestedStateValueTypeMatches<T>(FieldValue))
+			{
+				LogRequestedStateTypeMismatch(FieldName, FieldValue, RequestedStateTypeName<T>());
+				Success = false;
+				return;
+			}
+
 			const TArray<TSharedPtr<FJsonValue>>* ArrayValue;
 			if constexpr (isArray)
 			{

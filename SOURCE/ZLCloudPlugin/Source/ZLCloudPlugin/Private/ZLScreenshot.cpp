@@ -31,6 +31,13 @@
 #include "Sections/MovieSceneCameraCutSection.h"
 #include "Tracks/MovieSceneCinematicShotTrack.h"
 #include "Sections/MovieSceneCinematicShotSection.h"
+#if UNREAL_5_4_OR_NEWER
+#include "Sections/MovieSceneFloatSection.h"
+#include "Sections/MovieSceneBoolSection.h"
+#include "Tracks/MovieScenePropertyTrack.h"
+#include "Interfaces/Interface_PostProcessVolume.h"
+#include "UniversalObjectLocatorResolveParams.h"
+#endif
 #include "LevelSequence.h"
 #include "LevelSequenceActor.h"
 #if UNREAL_5_3_OR_NEWER
@@ -365,6 +372,467 @@ namespace
 
 		return !OutPreviousEnvironment.Equals(OutRequestedEnvironment, ESearchCase::IgnoreCase);
 	}
+
+#if UNREAL_5_4_OR_NEWER
+	// MRQ treats a shutter below 1/360 as zero and substitutes a fraction of a tick. With temporal
+	// samples above 1 that fraction drifts past the end of a shot and the ordered output merger stalls.
+	// The binding and master-track APIs this walk uses are not stable before 5.4, so earlier engines keep the requested count.
+	static constexpr double ZLZeroMotionBlurShutter = 1.0 / 360.0;
+
+	struct FMotionBlurTrackRange
+	{
+		bool bHasAmount = false;
+		bool bAmountCoversPlayback = false;
+		float MinAmount = 0.f;
+		bool bHasOverride = false;
+		bool bOverrideEverTrue = false;
+		bool bOverrideEverFalse = false;
+		bool bOverrideCoversPlayback = false;
+		bool bHasWeight = false;
+		bool bWeightCoversPlayback = false;
+		float MinWeight = 1.f;
+		float MaxWeight = 0.f;
+	};
+
+	static bool IsZeroMotionBlurShutter(double Shutter)
+	{
+		return Shutter < ZLZeroMotionBlurShutter;
+	}
+
+	static void ResolveBindingObjects(UMovieSceneSequence* Sequence, UMovieScene* MovieScene, UWorld* World, const FGuid& ObjectId, TArray<UObject*>& OutObjects)
+	{
+		if (!Sequence || !ObjectId.IsValid())
+		{
+			return;
+		}
+
+		TArray<UObject*, TInlineAllocator<1>> BoundObjects;
+#if UNREAL_5_5_OR_NEWER
+		Sequence->LocateBoundObjects(ObjectId, UE::UniversalObjectLocator::FResolveParams(World), nullptr, BoundObjects);
+#elif UNREAL_5_4_OR_NEWER
+		Sequence->LocateBoundObjects(ObjectId, UE::UniversalObjectLocator::FResolveParams(World), BoundObjects);
+#else
+		Sequence->LocateBoundObjects(ObjectId, World, BoundObjects);
+#endif
+		for (UObject* Object : BoundObjects)
+		{
+			if (Object)
+			{
+				OutObjects.AddUnique(Object);
+			}
+		}
+
+		if (OutObjects.Num() == 0 && MovieScene)
+		{
+			if (FMovieSceneSpawnable* Spawnable = MovieScene->FindSpawnable(ObjectId))
+			{
+				if (UObject* Template = Spawnable->GetObjectTemplate())
+				{
+					OutObjects.Add(Template);
+				}
+			}
+		}
+	}
+
+	static void AddCameraFromObject(UObject* Object, TArray<UCameraComponent*>& OutCameras)
+	{
+		if (UCameraComponent* CameraComponent = Cast<UCameraComponent>(Object))
+		{
+			OutCameras.AddUnique(CameraComponent);
+		}
+		else if (const AActor* Actor = Cast<AActor>(Object))
+		{
+			if (UCameraComponent* ActorCamera = Actor->FindComponentByClass<UCameraComponent>())
+			{
+				OutCameras.AddUnique(ActorCamera);
+			}
+		}
+	}
+
+	static void AccumulateMotionBlurTrack(UMovieScene* MovieScene, UMovieScenePropertyTrack* Track, FMotionBlurTrackRange& Range)
+	{
+		if (!MovieScene || !Track || Track->IsEvalDisabled())
+		{
+			return;
+		}
+
+		const FString PropertyPath = Track->GetPropertyPath().ToString();
+		const bool bAmount = PropertyPath.EndsWith(TEXT("MotionBlurAmount"));
+		const bool bOverride = PropertyPath.EndsWith(TEXT("bOverride_MotionBlurAmount"));
+		const bool bWeight = PropertyPath.EndsWith(TEXT("PostProcessBlendWeight")) || PropertyPath.EndsWith(TEXT("BlendWeight"));
+		if (!bAmount && !bOverride && !bWeight)
+		{
+			return;
+		}
+
+		const TRange<FFrameNumber> PlaybackRange = MovieScene->GetPlaybackRange();
+		for (UMovieSceneSection* Section : Track->GetAllSections())
+		{
+			if (!Section || !Section->IsActive())
+			{
+				continue;
+			}
+
+			const bool bCoversPlayback = Section->GetRange().Contains(PlaybackRange);
+			if (const UMovieSceneFloatSection* FloatSection = Cast<UMovieSceneFloatSection>(Section))
+			{
+				const FMovieSceneFloatChannel& Channel = FloatSection->GetChannel();
+				float MinValue = TNumericLimits<float>::Max();
+				float MaxValue = -TNumericLimits<float>::Max();
+				bool bHaveValue = false;
+				if (const TOptional<float> DefaultValue = Channel.GetDefault())
+				{
+					MinValue = MaxValue = DefaultValue.GetValue();
+					bHaveValue = true;
+				}
+				for (const FMovieSceneFloatValue& Key : Channel.GetValues())
+				{
+					MinValue = bHaveValue ? FMath::Min(MinValue, Key.Value) : Key.Value;
+					MaxValue = bHaveValue ? FMath::Max(MaxValue, Key.Value) : Key.Value;
+					bHaveValue = true;
+				}
+				if (!bHaveValue)
+				{
+					continue;
+				}
+
+				if (bAmount)
+				{
+					Range.MinAmount = Range.bHasAmount ? FMath::Min(Range.MinAmount, MinValue) : MinValue;
+					Range.bHasAmount = true;
+					Range.bAmountCoversPlayback = Range.bAmountCoversPlayback || bCoversPlayback;
+				}
+				if (bWeight)
+				{
+					if (!Range.bHasWeight)
+					{
+						Range.MinWeight = MinValue;
+						Range.MaxWeight = MaxValue;
+						Range.bHasWeight = true;
+					}
+					else
+					{
+						Range.MinWeight = FMath::Min(Range.MinWeight, MinValue);
+						Range.MaxWeight = FMath::Max(Range.MaxWeight, MaxValue);
+					}
+					Range.bWeightCoversPlayback = Range.bWeightCoversPlayback || bCoversPlayback;
+				}
+			}
+			else if (const UMovieSceneBoolSection* BoolSection = Cast<UMovieSceneBoolSection>(Section))
+			{
+				if (!bOverride)
+				{
+					continue;
+				}
+				const FMovieSceneBoolChannel& Channel = BoolSection->GetChannel();
+				if (const TOptional<bool> DefaultValue = Channel.GetDefault())
+				{
+					Range.bOverrideEverTrue = Range.bOverrideEverTrue || DefaultValue.GetValue();
+					Range.bOverrideEverFalse = Range.bOverrideEverFalse || !DefaultValue.GetValue();
+					Range.bHasOverride = true;
+				}
+				for (const bool Value : Channel.GetValues())
+				{
+					Range.bOverrideEverTrue = Range.bOverrideEverTrue || Value;
+					Range.bOverrideEverFalse = Range.bOverrideEverFalse || !Value;
+					Range.bHasOverride = true;
+				}
+				if (Range.bHasOverride)
+				{
+					Range.bOverrideCoversPlayback = Range.bOverrideCoversPlayback || bCoversPlayback;
+				}
+			}
+		}
+	}
+
+	static void MergeMotionBlurTrack(FMotionBlurTrackRange& Dest, const FMotionBlurTrackRange* Src)
+	{
+		if (!Src)
+		{
+			return;
+		}
+		if (Src->bHasAmount)
+		{
+			Dest.MinAmount = Dest.bHasAmount ? FMath::Min(Dest.MinAmount, Src->MinAmount) : Src->MinAmount;
+			Dest.bHasAmount = true;
+			Dest.bAmountCoversPlayback = Dest.bAmountCoversPlayback || Src->bAmountCoversPlayback;
+		}
+		if (Src->bHasOverride)
+		{
+			Dest.bOverrideEverTrue = Dest.bOverrideEverTrue || Src->bOverrideEverTrue;
+			Dest.bOverrideEverFalse = Dest.bOverrideEverFalse || Src->bOverrideEverFalse;
+			Dest.bHasOverride = true;
+			Dest.bOverrideCoversPlayback = Dest.bOverrideCoversPlayback || Src->bOverrideCoversPlayback;
+		}
+		if (Src->bHasWeight)
+		{
+			if (!Dest.bHasWeight)
+			{
+				Dest.MinWeight = Src->MinWeight;
+				Dest.MaxWeight = Src->MaxWeight;
+				Dest.bHasWeight = true;
+			}
+			else
+			{
+				Dest.MinWeight = FMath::Min(Dest.MinWeight, Src->MinWeight);
+				Dest.MaxWeight = FMath::Max(Dest.MaxWeight, Src->MaxWeight);
+			}
+			Dest.bWeightCoversPlayback = Dest.bWeightCoversPlayback || Src->bWeightCoversPlayback;
+		}
+	}
+
+	static void GatherMotionBlurSources(UMovieSceneSequence* Sequence, UWorld* World, TSet<UMovieSceneSequence*>& Visited, TArray<UCameraComponent*>& OutCameras, TMap<UObject*, FMotionBlurTrackRange>& OutTracks)
+	{
+		if (!Sequence || Visited.Contains(Sequence))
+		{
+			return;
+		}
+		Visited.Add(Sequence);
+
+		UMovieScene* MovieScene = Sequence->GetMovieScene();
+		if (!MovieScene)
+		{
+			return;
+		}
+
+		const TRange<FFrameNumber> PlaybackRange = MovieScene->GetPlaybackRange();
+		for (const FMovieSceneBinding& Binding : MovieScene->GetBindings())
+		{
+			bool bRelevant = false;
+			for (UMovieSceneTrack* Track : Binding.GetTracks())
+			{
+				if (const UMovieScenePropertyTrack* PropertyTrack = Cast<UMovieScenePropertyTrack>(Track))
+				{
+					const FString PropertyPath = PropertyTrack->GetPropertyPath().ToString();
+					if (PropertyPath.EndsWith(TEXT("MotionBlurAmount")) || PropertyPath.EndsWith(TEXT("bOverride_MotionBlurAmount")) || PropertyPath.EndsWith(TEXT("PostProcessBlendWeight")) || PropertyPath.EndsWith(TEXT("BlendWeight")))
+					{
+						bRelevant = true;
+						break;
+					}
+				}
+			}
+			if (!bRelevant)
+			{
+				continue;
+			}
+
+			TArray<UObject*> BoundObjects;
+			ResolveBindingObjects(Sequence, MovieScene, World, Binding.GetObjectGuid(), BoundObjects);
+			for (UObject* Object : BoundObjects)
+			{
+				FMotionBlurTrackRange& Range = OutTracks.FindOrAdd(Object);
+				for (UMovieSceneTrack* Track : Binding.GetTracks())
+				{
+					if (UMovieScenePropertyTrack* PropertyTrack = Cast<UMovieScenePropertyTrack>(Track))
+					{
+						AccumulateMotionBlurTrack(MovieScene, PropertyTrack, Range);
+					}
+				}
+			}
+		}
+
+		if (UMovieSceneCameraCutTrack* CameraCutTrack = MovieScene->FindTrack<UMovieSceneCameraCutTrack>())
+		{
+			for (UMovieSceneSection* Section : CameraCutTrack->GetAllSections())
+			{
+				UMovieSceneCameraCutSection* CameraCut = Cast<UMovieSceneCameraCutSection>(Section);
+				if (!CameraCut || !CameraCut->IsActive() || !CameraCut->GetRange().Overlaps(PlaybackRange))
+				{
+					continue;
+				}
+
+				TArray<UObject*> BoundObjects;
+				ResolveBindingObjects(Sequence, MovieScene, World, CameraCut->GetCameraBindingID().GetGuid(), BoundObjects);
+				for (UObject* Object : BoundObjects)
+				{
+					AddCameraFromObject(Object, OutCameras);
+				}
+			}
+		}
+
+		if (UMovieSceneCinematicShotTrack* ShotTrack = MovieScene->FindTrack<UMovieSceneCinematicShotTrack>())
+		{
+			for (UMovieSceneSection* Section : ShotTrack->GetAllSections())
+			{
+				UMovieSceneCinematicShotSection* Shot = Cast<UMovieSceneCinematicShotSection>(Section);
+				if (!Shot || !Shot->IsActive() || !Shot->GetRange().Overlaps(PlaybackRange))
+				{
+					continue;
+				}
+				GatherMotionBlurSources(Shot->GetSequence(), World, Visited, OutCameras, OutTracks);
+			}
+		}
+	}
+
+	// Same blend MoviePipeline::CalculateShotFrameMetrics uses: default 0.5, then enabled volumes, then the shot camera.
+	static double BlendVolumeMotionBlur(UWorld* World, const FVector& ViewLocation, const TMap<UObject*, FMotionBlurTrackRange>& Tracks)
+	{
+		double Shutter = 0.5;
+		if (!World)
+		{
+			return Shutter;
+		}
+
+		for (IInterface_PostProcessVolume* PPVolume : World->PostProcessVolumes)
+		{
+			const FPostProcessVolumeProperties Props = PPVolume->GetProperties();
+			if (!Props.bIsEnabled || !Props.Settings)
+			{
+				continue;
+			}
+
+			UObject* VolumeObject = PPVolume->_getUObject();
+			const FMotionBlurTrackRange* Track = VolumeObject ? Tracks.Find(VolumeObject) : nullptr;
+			const bool bOverride = Props.Settings->bOverride_MotionBlurAmount || (Track && Track->bHasOverride && Track->bOverrideEverTrue);
+			if (!bOverride)
+			{
+				continue;
+			}
+
+			float Amount = Props.Settings->MotionBlurAmount;
+			if (Track && Track->bHasAmount)
+			{
+				Amount = Track->bAmountCoversPlayback ? Track->MinAmount : FMath::Min(Amount, Track->MinAmount);
+			}
+
+			float LocalWeight = FMath::Clamp(Props.BlendWeight, 0.f, 1.f);
+			if (Track && Track->bHasWeight)
+			{
+				const float TrackWeight = Track->bWeightCoversPlayback ? Track->MaxWeight : FMath::Max(LocalWeight, Track->MaxWeight);
+				LocalWeight = FMath::Clamp(TrackWeight, 0.f, 1.f);
+			}
+
+			if (!Props.bIsUnbound)
+			{
+				float DistanceToPoint = 0.f;
+				PPVolume->EncompassesPoint(ViewLocation, 0.f, &DistanceToPoint);
+				if (DistanceToPoint >= 0 && DistanceToPoint < Props.BlendRadius)
+				{
+					LocalWeight *= FMath::Clamp(1.f - DistanceToPoint / Props.BlendRadius, 0.f, 1.f);
+				}
+				else
+				{
+					LocalWeight = 0.f;
+				}
+			}
+
+			if (LocalWeight > 0.f)
+			{
+				Shutter = FMath::Lerp(Shutter, static_cast<double>(Amount), LocalWeight);
+			}
+		}
+
+		return Shutter;
+	}
+
+	static bool ShotCameraUsesZeroMotionBlur(UWorld* World, UCameraComponent* Camera, const TMap<UObject*, FMotionBlurTrackRange>& Tracks)
+	{
+		const FVector ViewLocation = Camera ? Camera->GetComponentLocation() : FVector::ZeroVector;
+		const double VolumeShutter = BlendVolumeMotionBlur(World, ViewLocation, Tracks);
+
+		FMotionBlurTrackRange Track;
+		if (Camera)
+		{
+			MergeMotionBlurTrack(Track, Tracks.Find(Camera));
+			if (const AActor* Owner = Camera->GetOwner())
+			{
+				MergeMotionBlurTrack(Track, Tracks.Find(Owner));
+			}
+		}
+
+		const bool bPropertyOverride = Camera && Camera->PostProcessSettings.bOverride_MotionBlurAmount;
+		const bool bTrackForcesOverrideOn = Track.bHasOverride && Track.bOverrideEverTrue && !Track.bOverrideEverFalse && Track.bOverrideCoversPlayback;
+		const bool bCanDisableOverride = Track.bHasOverride && Track.bOverrideEverFalse;
+		const bool bCanBeOff = bCanDisableOverride || !(bPropertyOverride || bTrackForcesOverrideOn);
+		const bool bCanBeOn = bPropertyOverride || (Track.bHasOverride && Track.bOverrideEverTrue);
+
+		if (bCanBeOff && IsZeroMotionBlurShutter(VolumeShutter))
+		{
+			return true;
+		}
+
+		if (!Camera || !bCanBeOn)
+		{
+			return false;
+		}
+
+		float Amount = Camera->PostProcessSettings.MotionBlurAmount;
+		if (Track.bHasAmount)
+		{
+			Amount = Track.bAmountCoversPlayback ? Track.MinAmount : FMath::Min(Amount, Track.MinAmount);
+		}
+		else if (!bPropertyOverride)
+		{
+			return false;
+		}
+
+		float MinWeight = FMath::Clamp(Camera->PostProcessBlendWeight, 0.f, 1.f);
+		float MaxWeight = MinWeight;
+		if (Track.bHasWeight)
+		{
+			if (Track.bWeightCoversPlayback)
+			{
+				MinWeight = FMath::Clamp(Track.MinWeight, 0.f, 1.f);
+				MaxWeight = FMath::Clamp(Track.MaxWeight, 0.f, 1.f);
+			}
+			else
+			{
+				MinWeight = FMath::Min(MinWeight, FMath::Clamp(Track.MinWeight, 0.f, 1.f));
+				MaxWeight = FMath::Max(MaxWeight, FMath::Clamp(Track.MaxWeight, 0.f, 1.f));
+			}
+		}
+
+		const float Weight = (static_cast<double>(Amount) < VolumeShutter) ? MaxWeight : MinWeight;
+		return IsZeroMotionBlurShutter(FMath::Lerp(VolumeShutter, static_cast<double>(Amount), Weight));
+	}
+
+	static int ResolveTemporalSampleCountForZeroMotionBlur(int RequestedCount, UWorld* World, ULevelSequence* Sequence)
+	{
+		if (RequestedCount <= 1 || !World || !Sequence)
+		{
+			return RequestedCount;
+		}
+
+		TArray<UCameraComponent*> Cameras;
+		TMap<UObject*, FMotionBlurTrackRange> Tracks;
+		TSet<UMovieSceneSequence*> Visited;
+		GatherMotionBlurSources(Sequence, World, Visited, Cameras, Tracks);
+
+		bool bZeroMotionBlur = false;
+		if (Cameras.Num() == 0)
+		{
+			FVector ViewLocation = FVector::ZeroVector;
+			if (const APlayerController* Controller = World->GetFirstPlayerController())
+			{
+				if (Controller->PlayerCameraManager)
+				{
+					ViewLocation = Controller->PlayerCameraManager->GetCameraLocation();
+				}
+			}
+			bZeroMotionBlur = IsZeroMotionBlurShutter(BlendVolumeMotionBlur(World, ViewLocation, Tracks));
+		}
+		else
+		{
+			for (UCameraComponent* Camera : Cameras)
+			{
+				if (ShotCameraUsesZeroMotionBlur(World, Camera, Tracks))
+				{
+					bZeroMotionBlur = true;
+					break;
+				}
+			}
+		}
+
+		if (!bZeroMotionBlur)
+		{
+			return RequestedCount;
+		}
+
+		UE_LOG(LogZLCloudPlugin, Warning, TEXT("MRQ temporal samples for '%s' forced from %d to 1. Motion blur resolves below 1/360 from a post-process volume or a sequence MotionBlurAmount track, and temporal sub-frames then drop later shots. Spatial samples are unchanged. Cameras considered: %d."),
+			*Sequence->GetName(), RequestedCount, Cameras.Num());
+		return 1;
+	}
+#endif // UNREAL_5_4_OR_NEWER
 }
 
 ZLScreenshotJob::ZLScreenshotJob(int32 InWidth, int32 InHeight, FString& InFormat, FString& InPath, FString& InUID, UWorld* InWorld, const TSharedPtr<FJsonObject>* stateRequestData, ScreenshotType InScreenshotType)
@@ -457,6 +925,18 @@ void ZLScreenshot::Update()
 		}
 	}
 
+	// A state-bearing job must not become current while another request is still being
+	// processed. Otherwise that earlier request's completion is credited to this job and
+	// its pre-request state is frozen into the capture report.
+	if (!m_CurrentRender.IsValid() && m_NextRender.IsValid() && m_NextRender->stateData.IsValid())
+	{
+		UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager();
+		if (StateManager && StateManager->IsProcessingStateRequest())
+		{
+			return;
+		}
+	}
+
 	//Check if we have a request
 	if (m_NextRender.IsValid() || m_CurrentRender.IsValid())
 	{
@@ -481,6 +961,19 @@ void ZLScreenshot::Update()
 				UStateKeyInfoAsset* SchemaAsset = StateManager ? StateManager->GetCurrentSchemaAsset() : nullptr;
 				TSharedPtr<FJsonObject> stateDataToBroadcast = MergeRequestStateWithSchemaDefaults(
 					m_CurrentRender->stateData, SchemaAsset, MergedKeyCount);
+
+				// Local image jobs opt in. Cloud and other captures still receive the schema default.
+				if (m_CurrentRender->bOmitImplicitConfiguration
+					&& stateDataToBroadcast.IsValid()
+					&& !m_CurrentRender->stateData->HasField(TEXT("configuration"))
+					&& stateDataToBroadcast->HasField(TEXT("configuration")))
+				{
+					stateDataToBroadcast->RemoveField(TEXT("configuration"));
+					if (MergedKeyCount > 0)
+					{
+						--MergedKeyCount;
+					}
+				}
 
 				if (MergedKeyCount > 0)
 				{
@@ -580,6 +1073,18 @@ void ZLScreenshot::Update()
 			if (!TickEnvironmentChangeSettle())
 			{
 				return;
+			}
+
+			// Re-sample at shutter time. The copy taken when state processing finished can
+			// still be the previous session if that completion was credited early.
+			const bool bCaptureStart = m_CurrentRender->type == ScreenshotType::DEFAULT2D
+				|| (m_CurrentRender->type == ScreenshotType::EQUIRECT360 && m_CurrentRender->faceID == 0);
+			if (bCaptureStart)
+			{
+				if (UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager())
+				{
+					SetCurrentRenderStateData(StateManager->GetCurrentAppState());
+				}
 			}
 
 			if (UGameViewportClient* GameViewport = m_CurrentRender->world->GetGameViewport())
@@ -1154,6 +1659,13 @@ bool ZLScreenshot::PerformMRQCapture(int width, int height, FString outputPath, 
 		}
 
 		ZLScreenshotAAMode aaMode = m_CurrentRender->aaMode;
+#if UNREAL_5_4_OR_NEWER
+		const int temporalSampleCount = isVideoCapture
+			? ResolveTemporalSampleCountForZeroMotionBlur(m_CurrentRender->temporalSampleCount, m_CurrentRender->world, LevelSequence)
+			: m_CurrentRender->temporalSampleCount;
+#else
+		const int temporalSampleCount = m_CurrentRender->temporalSampleCount;
+#endif
 
 		// Set anti-aliasing settings
 		UMoviePipelineAntiAliasingSetting* AntiAliasingSetting = Cast<UMoviePipelineAntiAliasingSetting>(MasterConfig->FindOrAddSettingByClass(UMoviePipelineAntiAliasingSetting::StaticClass()));
@@ -1181,7 +1693,7 @@ bool ZLScreenshot::PerformMRQCapture(int width, int height, FString outputPath, 
 			if (AntiAliasingSetting)
 			{
 				AntiAliasingSetting->SpatialSampleCount = m_CurrentRender->spatialSampleCount;
-				AntiAliasingSetting->TemporalSampleCount = m_CurrentRender->temporalSampleCount;
+				AntiAliasingSetting->TemporalSampleCount = temporalSampleCount;
 				AntiAliasingSetting->bOverrideAntiAliasing = true;
 				AntiAliasingSetting->AntiAliasingMethod = EAntiAliasingMethod::AAM_TSR; //https://forums.developer.nvidia.com/t/built-in-unreal-tsr-aa-is-required-for-dlaa/270176/3
 				AntiAliasingSetting->bUseCameraCutForWarmUp = false;
@@ -1195,7 +1707,7 @@ bool ZLScreenshot::PerformMRQCapture(int width, int height, FString outputPath, 
 			if (AntiAliasingSetting)
 			{
 				AntiAliasingSetting->SpatialSampleCount = m_CurrentRender->spatialSampleCount;
-				AntiAliasingSetting->TemporalSampleCount = m_CurrentRender->temporalSampleCount;
+				AntiAliasingSetting->TemporalSampleCount = temporalSampleCount;
 				AntiAliasingSetting->bOverrideAntiAliasing = true;
 				AntiAliasingSetting->AntiAliasingMethod = (aaMode == ZLScreenshotAAMode::TSR) ? EAntiAliasingMethod::AAM_TSR : EAntiAliasingMethod::AAM_TemporalAA;
 				AntiAliasingSetting->bUseCameraCutForWarmUp = false;
@@ -1512,12 +2024,42 @@ bool ZLScreenshot::RequestScreenshot(const char* settingsJson, UWorld* InWorld, 
 				}
 			}
 
+			// Presets only set quality. The codec stays unset, so ffmpeg keeps the MP4 default, which is h264.
+			FString CompressionPreset;
+			if (JsonParsed->TryGetStringField(TEXT("compressionPreset"), CompressionPreset))
+			{
+				int32 ConstantRateFactor = -1;
+				if (CompressionPreset.Equals(TEXT("Reduced File Size"), ESearchCase::IgnoreCase))
+				{
+					ConstantRateFactor = 28;
+				}
+				else if (CompressionPreset.Equals(TEXT("Default"), ESearchCase::IgnoreCase))
+				{
+					ConstantRateFactor = 23;
+				}
+				else if (CompressionPreset.Equals(TEXT("Reduced Compression"), ESearchCase::IgnoreCase))
+				{
+					ConstantRateFactor = 17;
+				}
+				else
+				{
+					UE_LOG(LogZLCloudPlugin, Warning, TEXT("Unknown compressionPreset '%s'. Expected 'Reduced File Size', 'Default' or 'Reduced Compression'. Leaving encoder quality unchanged."), *CompressionPreset);
+				}
+
+				if (ConstantRateFactor >= 0)
+				{
+					m_NextRender->videoEncodeOptions.Add(FString::Printf(TEXT("-crf %d"), ConstantRateFactor));
+					UE_LOG(LogZLCloudPlugin, Display, TEXT("Video compression preset '%s' using container-default codec h264 at CRF %d"), *CompressionPreset, ConstantRateFactor);
+				}
+			}
+
 			m_NextRender->useMRQPipeline = true;	//force MovieRenderQueue pipeline, as this is the only way we have to get video data anyway
 		}
 
 		if (AdvancedRenderConfig.IsValid())
 		{
 			AdvancedRenderConfig->TryGetBoolField(TEXT("useMovieRenderQueue"), m_NextRender->useMRQPipeline);
+			AdvancedRenderConfig->TryGetBoolField(TEXT("omitImplicitConfiguration"), m_NextRender->bOmitImplicitConfiguration);
 
 			const TArray<TSharedPtr<FJsonValue>>* CVarArrayValue;
 			if (AdvancedRenderConfig->TryGetArrayField(TEXT("cVarOverrides"), CVarArrayValue))

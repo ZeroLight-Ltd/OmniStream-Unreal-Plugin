@@ -41,9 +41,24 @@ public:
 	static bool IsFfmpegVideoSupportEnabled();
 
 	/**
+	 * Turns on "Download ffmpeg for media on demand videos" and starts the FFmpeg download
+	 * when the files are not already present. No-op when the setting is already enabled.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Zerolight Omnistream Capture")
+	static bool EnableFfmpegVideoSupport();
+
+	/**
 	 * Queue a screenshot or video capture job through ZLScreenshot using the same JSON
 	 * payload as a server CAPTUREIMAGE / media request. Requires an active play session.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Zerolight Omnistream Capture")
 	static bool RequestScreenshotJob(const FString& SettingsJson, FString& OutErrorMessage);
+
+	/**
+	 * True while a capture is queued, rendering, or its state request is still in flight.
+	 * Local batch tools use this so the next job is submitted only after the previous one
+	 * has fully finished, matching cloud queuing.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Zerolight Omnistream Capture")
+	static bool IsScreenshotJobActive();
 };

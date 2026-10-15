@@ -32,16 +32,23 @@ void fetch_error() {
     }
 }
 
-PortalClient::PortalClient(Config* cfg)
+namespace
 {
-    m_client = handle_ptr_error(portal::client_new_from_config(cfg->m_cfg, nullptr));
-    // The config is consumed to create the client
-    cfg->m_cfg = nullptr;
+portal::UTF8InputString MakeUtf8Input(const char* value)
+{
+    portal::UTF8InputString input = {};
+    if (value != nullptr)
+    {
+        input.pointer = reinterpret_cast<const uint8_t*>(value);
+        input.length_in_bytes = static_cast<uint32_t>(strlen(value));
+    }
+    return input;
+}
 }
 
-PortalClient::PortalClient(Config* cfg, portal::BuildContext* bc)
+PortalClient::PortalClient(Config* cfg)
 {
-    m_client = handle_ptr_error(portal::client_new_from_config(cfg->m_cfg, bc));
+    m_client = handle_ptr_error(portal::client_new_from_config(cfg->m_cfg));
     // The config is consumed to create the client
     cfg->m_cfg = nullptr;
 }
@@ -110,15 +117,52 @@ bool PortalClient::InitPlugin()
     return m_pluginLibLoaded;
 }
 
-OutputMessage PortalClient::create_build(char* json) 
+OutputMessage PortalClient::create_portal_asset_version(
+    const char* asset_line_id,
+    const char* storage_provider,
+    const char* extension_data,
+    const char* upload_dir,
+    uint64_t chunk_size,
+    const char* source_dir,
+    bool upload_git_hashes,
+    const char* comment)
 {
-    size_t len = strlen(json);
-    portal::OutputMessage* msg = handle_ptr_error(portal::client_create_build(
+    const char* commentArg = (comment != nullptr && comment[0] != '\0') ? comment : nullptr;
+    portal::OutputMessage* msg = handle_ptr_error(portal::client_create_portal_asset_version(
         m_client,
-        /* Danger, super platform specific! */
-        reinterpret_cast<const uint8_t*>(&json[0]),
-        len
-    ));
+        MakeUtf8Input(asset_line_id),
+        MakeUtf8Input(storage_provider),
+        MakeUtf8Input(extension_data),
+        MakeUtf8Input(upload_dir),
+        chunk_size,
+        MakeUtf8Input(source_dir),
+        upload_git_hashes,
+        MakeUtf8Input(commentArg)));
+    return OutputMessage(msg);
+}
+
+OutputMessage PortalClient::finalize_portal_asset_version(const char* asset_version_id)
+{
+    portal::OutputMessage* msg = handle_ptr_error(portal::client_finalize_portal_asset_version(
+        m_client,
+        MakeUtf8Input(asset_version_id)));
+    return OutputMessage(msg);
+}
+
+OutputMessage PortalClient::portal_upload(const char* asset_version_id, const char* directory)
+{
+    portal::OutputMessage* msg = handle_ptr_error(portal::client_portal_upload(
+        m_client,
+        MakeUtf8Input(asset_version_id),
+        MakeUtf8Input(directory)));
+    return OutputMessage(msg);
+}
+
+OutputMessage PortalClient::upload_portal_asset_version_one_step(portal::OneStepUploadParams params)
+{
+    portal::OutputMessage* msg = handle_ptr_error(portal::client_upload_portal_asset_version_one_step(
+        m_client,
+        params));
     return OutputMessage(msg);
 }
 

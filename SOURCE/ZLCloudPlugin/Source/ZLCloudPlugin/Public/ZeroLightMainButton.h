@@ -38,11 +38,10 @@ public:
 	enum AsyncPortalTaskType { UPLOAD, GETTOKEN, SELECTASSETLINE };
 
 	portalcli();
-	portalcli(portal::BuildContext* bc);
 
 	void AsyncPortalTask(AsyncPortalTaskType taskType, bool triggerBuildTask = false, bool triggerExistingBuildDeploy = false, FString targetPath = "");
 	void CreateDllPortalClient();
-	void CreateDllPortalClient(portal::BuildContext* bc);
+	void TakeProgressStream();
 	bool ClearCurrentBuild();
 	bool ReportBuildFailure();
 	void StartOutputReadTask();
@@ -65,9 +64,8 @@ private:
 class GetTokenAsyncTask : public FRunnable
 {
 public:
-	GetTokenAsyncTask(portal::BuildContext* bc, bool triggerBuildProcess, bool triggerExistingBuildDeploy, FString targetPath)
+	GetTokenAsyncTask(bool triggerBuildProcess, bool triggerExistingBuildDeploy, FString targetPath)
 	{
-		buildContext = bc;
 		triggerBuild = triggerBuildProcess;
 		triggerExistingDeploy = triggerExistingBuildDeploy;
 		downstreamJobTargetPath = targetPath;
@@ -88,8 +86,6 @@ public:
 
 	inline virtual void Stop() override;
 
-	portal::BuildContext* buildContext;
-
 private:
 
 	bool triggerBuild = false;
@@ -103,17 +99,7 @@ private:
 class UploadAsyncTask : public FRunnable
 {
 public:
-	UploadAsyncTask(portal::BuildContext* bc, FString uploadFolderPath, FString name, FString assetLineId, bool ciUpload, FString storageProvider = "", FString metadata = "")
-	{
-		buildContext = bc;
-		srcPath = uploadFolderPath;
-		deployName = name;
-		Thread = FRunnableThread::Create(this, TEXT("Portal Upload Task Thread"));
-		assetLineID = assetLineId;
-		portalStorageProvider = storageProvider;
-		buildMetadata = metadata;
-		isCIUpload = ciUpload;
-	};
+	UploadAsyncTask(FString uploadFolderPath, FString name, FString assetLineId, bool ciUpload, FString storageProvider = "", FString metadata = "");
 
 	//override Init,Run and Stop.
 	inline virtual bool Init() override
@@ -130,8 +116,6 @@ public:
 
 	FText GetUploadEndedProgressText();
 
-	portal::BuildContext* buildContext;
-
 private:
 
 	FRunnableThread* Thread;
@@ -144,15 +128,15 @@ private:
 	FString assetLineID;
 	FString portalStorageProvider;
 	FString buildMetadata;
+	FString uploadComment;
 	bool isCIUpload = false;
 };
 
 class SelectAssetLineAsyncTask : public FRunnable
 {
 public:
-	SelectAssetLineAsyncTask(portal::BuildContext* bc)
+	SelectAssetLineAsyncTask()
 	{
-		buildContext = bc;
 		Thread = FRunnableThread::Create(this, TEXT("Portal Select Asset Line Task Thread"));
 	};
 
@@ -168,8 +152,6 @@ public:
 	inline virtual void Exit() override;
 
 	inline virtual void Stop() override;
-
-	portal::BuildContext* buildContext;
 
 private:
 
@@ -390,6 +372,8 @@ public:
 	inline static bool s_userCancelledUpload = false;
 	inline static bool s_userPausedUpload = false;
 	inline static bool s_removeDebugSymbols = true;
+	inline static bool s_uploadGitHashes = true;
+	inline static FString s_uploadComment;
 	inline static FString s_pausedUploadPath = "";
 	inline static FString s_restoreOrigPath = "";
 	inline static FString s_restorePath = "";
@@ -407,6 +391,7 @@ protected:
 	FText GetLastSucessBuildRef() const;
 	ECheckBoxState UseExistingBuild() const;
 	ECheckBoxState UseRemoveDebugSymbols() const;
+	ECheckBoxState UseUploadGitHashes() const;
 	ECheckBoxState UseExistingRunInfo() const;
 	FSlateIcon GetButtonIcon();
 	TSharedRef<SWidget> GetMenu();
@@ -416,10 +401,12 @@ protected:
 	void SetDeployName(const FString& name);
 	void SetBuildID(const FText& id);
 	void SetRunInfoCommandLineParams(const FText& text);
+	void SetUploadComment(const FText& text);
 	void SetPercentageUnusedShaderCompilingThreads(const FText& text);
 	void SetUseExistingBuild(const ECheckBoxState state);
 	void SetUseExistingRunInfoJson(const ECheckBoxState state);
 	void SetRemoveDebugSymbols(const ECheckBoxState state);
+	void SetUploadGitHashes(const ECheckBoxState state);
 	inline static ECheckBoxState GetRemoveDebugSymbols() { return s_removeDebugSymbols ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; };
 	void SetUsePortalUpload(const ECheckBoxState state);
 	void SetPortalStorageProvider(TSharedPtr<FString> NewValue, ESelectInfo::Type SelectInfo);

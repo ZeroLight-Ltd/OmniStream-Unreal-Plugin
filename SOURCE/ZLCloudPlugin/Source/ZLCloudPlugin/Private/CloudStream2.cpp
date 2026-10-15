@@ -12,6 +12,10 @@
 #include "Engine/GameEngine.h"
 #include "RenderingThread.h"
 #include "FeatureNodesSyncGPUFence.h"
+#if UNREAL_5_8_OR_NEWER
+#include "Async/Async.h"
+#include "ZLCloudPluginRdpCaptureViewExtension.h"
+#endif
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -87,19 +91,350 @@ bool CloudStream2::IsDLLValid()
 }
 
 #if UNREAL_5_8_OR_NEWER
-// Do not Poll-sleep a fence that was already consumed. Clear() makes Poll() stay
-// false on 5.8, and a 1s render-thread wait during encoder teardown whites the stream.
-static void ConsumeTextureReleaseFence(FGPUFenceRHIRef& Fence, FRHICommandListImmediate& RHICmdList)
+// SetTexture once, when the intermediate texture is created. Every later rebind
+// encodes black on T4. OnFrameUE runs only after this texture's copy fence has
+// signaled, and the next copy starts in that same call. The render thread does
+// not sleep: that wait is what made the stream rate follow shader-compile stalls.
+struct FCloudStream2CopyTicket
 {
-	if (!Fence)
+	TAtomic<bool> bRHIDone{ false };
+	double StartSeconds = 0.0;
+};
+
+struct FCloudStream2CudaStats
+{
+	double WindowStartSeconds = 0.0;
+	int32 Captures = 0;
+	int32 Submits = 0;
+	int32 SubmitsFromCapture = 0;
+	int32 SubmitsFromCallback = 0;
+	int32 Coalesced = 0;
+	int32 Timeouts = 0;
+	int32 StaleCallbacks = 0;
+	double FenceMsSum = 0.0;
+	double FenceMsMax = 0.0;
+	int32 FenceSamples = 0;
+};
+
+static FCloudStream2CudaStats GCloudStream2CudaStats;
+
+// The two-second capture/stream line is off unless this is set.
+static bool bLogCudaStreamStats = false;
+
+static void LogCudaStreamStats(bool bForce)
+{
+	const double Now = FPlatformTime::Seconds();
+	if (GCloudStream2CudaStats.WindowStartSeconds <= 0.0)
+	{
+		GCloudStream2CudaStats.WindowStartSeconds = Now;
+		return;
+	}
+
+	const double Elapsed = Now - GCloudStream2CudaStats.WindowStartSeconds;
+	if (!bForce && Elapsed < 2.0)
 	{
 		return;
 	}
-	if (!Fence->Poll())
+	if (Elapsed <= 0.0)
 	{
-		RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
+		return;
 	}
-	Fence = nullptr;
+
+	const double FenceAvg = GCloudStream2CudaStats.FenceSamples > 0
+		? GCloudStream2CudaStats.FenceMsSum / GCloudStream2CudaStats.FenceSamples
+		: 0.0;
+	if (bLogCudaStreamStats)
+	{
+		UE_LOG(LogZLCloudPlugin, Display, TEXT("CloudStream2 : capture %.1f fps, stream %.1f fps, fence avg %.1f ms max %.1f ms, dropped %d, submit capture/callback %d/%d, timeouts %d, stale %d"),
+			GCloudStream2CudaStats.Captures / Elapsed,
+			GCloudStream2CudaStats.Submits / Elapsed,
+			FenceAvg,
+			GCloudStream2CudaStats.FenceMsMax,
+			GCloudStream2CudaStats.Coalesced,
+			GCloudStream2CudaStats.SubmitsFromCapture,
+			GCloudStream2CudaStats.SubmitsFromCallback,
+			GCloudStream2CudaStats.Timeouts,
+			GCloudStream2CudaStats.StaleCallbacks);
+	}
+
+	GCloudStream2CudaStats = FCloudStream2CudaStats();
+	GCloudStream2CudaStats.WindowStartSeconds = Now;
+}
+
+static FTextureRHIRef GCloudStream2CudaTexture;
+static TAtomic<bool> GCloudStream2CudaCopyBusy{ false };
+static uint32 GCloudStream2CudaCopyFrameId = 0;
+static FGPUFenceRHIRef GCloudStream2CudaCopyFence;
+static TSharedPtr<FCloudStream2CopyTicket, ESPMode::ThreadSafe> GCloudStream2CudaCopyTicket;
+static TAtomic<uint32> GCloudStream2CudaEpoch{ 1 };
+static TAtomic<bool> GCloudStream2CudaRecreatePending{ false };
+static int32 GCloudStream2CudaPendingWidth = 0;
+static int32 GCloudStream2CudaPendingHeight = 0;
+static FTextureRHIRef GCloudStream2CudaPendingFrame;
+static uint32 GCloudStream2CudaPendingFrameId = 0;
+
+static void BeginCudaTextureRecreate(int32 Width, int32 Height)
+{
+	GCloudStream2CudaPendingWidth = Width;
+	GCloudStream2CudaPendingHeight = Height;
+	GCloudStream2CudaPendingFrame = nullptr;
+	GCloudStream2CudaPendingFrameId = 0;
+	GCloudStream2CudaEpoch.IncrementExchange();
+	GCloudStream2CudaRecreatePending.Store(true);
+}
+
+static bool CudaCopyBusy()
+{
+	return GCloudStream2CudaCopyBusy.Load();
+}
+
+static void AbandonCudaCopy()
+{
+	GCloudStream2CudaCopyBusy.Store(false);
+	GCloudStream2CudaCopyFence = nullptr;
+	GCloudStream2CudaCopyTicket.Reset();
+}
+
+bool CloudStream2::TrySubmitCompletedCopy(const FGPUFenceRHIRef& Fence, bool bFromCapture)
+{
+	check(IsInRenderingThread());
+	if (m_IsChangingTexture || !GCloudStream2CudaCopyBusy.Load() || GCloudStream2CudaCopyFence != Fence)
+	{
+		return false;
+	}
+
+	TSharedPtr<FCloudStream2CopyTicket, ESPMode::ThreadSafe> Ticket = GCloudStream2CudaCopyTicket;
+	// Poll() is true on a brand new fence until WriteGPUFence runs. bRHIDone is set
+	// from a lambda recorded after that write, so a true poll here means the copy finished.
+	if (!Ticket.IsValid() || !Ticket->bRHIDone.Load() || !Fence.IsValid() || !Fence->Poll())
+	{
+		return false;
+	}
+
+	if (!GCloudStream2CudaTexture || !GCloudStream2CudaTexture->GetNativeResource() || !IsReady() || !IsDLLValid())
+	{
+		return false;
+	}
+
+	void* GraphicsQueue = GDynamicRHI->RHIGetNativeGraphicsQueue();
+	if (!GraphicsQueue)
+	{
+		return false;
+	}
+
+	const uint32 FrameId = GCloudStream2CudaCopyFrameId;
+	const double FenceMs = Ticket->StartSeconds > 0.0 ? (FPlatformTime::Seconds() - Ticket->StartSeconds) * 1000.0 : 0.0;
+	GCloudStream2CudaCopyBusy.Store(false);
+	GCloudStream2CudaCopyFence = nullptr;
+	CloudStream2DLL::OnFrameUE(0, GraphicsQueue, FrameId);
+	++m_SentFramesCount;
+	++GCloudStream2CudaStats.Submits;
+	if (bFromCapture)
+	{
+		++GCloudStream2CudaStats.SubmitsFromCapture;
+	}
+	else
+	{
+		++GCloudStream2CudaStats.SubmitsFromCallback;
+	}
+	if (FenceMs > 0.0)
+	{
+		GCloudStream2CudaStats.FenceMsSum += FenceMs;
+		GCloudStream2CudaStats.FenceMsMax = FMath::Max(GCloudStream2CudaStats.FenceMsMax, FenceMs);
+		++GCloudStream2CudaStats.FenceSamples;
+	}
+	return true;
+}
+
+void CloudStream2::TryFinishCudaRecreate()
+{
+	check(IsInRenderingThread());
+	if (!GCloudStream2CudaRecreatePending.Load() || CudaCopyBusy())
+	{
+		return;
+	}
+
+	GCloudStream2CudaTexture.SafeRelease();
+	m_IntermediateTexture.SafeRelease();
+	m_TextureReleaseFence = nullptr;
+	GCloudStream2CudaCopyFence = nullptr;
+	GCloudStream2CudaCopyTicket.Reset();
+
+	const int32 Width = GCloudStream2CudaPendingWidth;
+	const int32 Height = GCloudStream2CudaPendingHeight;
+	if (Width > 0 && Height > 0 && IsDLLValid())
+	{
+		GCloudStream2CudaTexture = ZLCloudPluginUtils::CreateTexture(Width, Height);
+		if (GCloudStream2CudaTexture && GCloudStream2CudaTexture->GetNativeResource())
+		{
+			m_IntermediateTexture = GCloudStream2CudaTexture;
+			CloudStream2DLL::SetTexture((ID3D12Resource*)GCloudStream2CudaTexture->GetNativeResource());
+			UE_LOG(LogZLCloudPlugin, Display, TEXT("CloudStream2 : Intermediate texture %dx%d (next copy starts on capture)"), Width, Height);
+		}
+		else
+		{
+			UE_LOG(LogZLCloudPlugin, Error, TEXT("CloudStream2 : Failed to create intermediate texture %dx%d"), Width, Height);
+		}
+	}
+
+	GCloudStream2CudaRecreatePending.Store(false);
+	m_IsChangingTexture = false;
+}
+
+void CloudStream2::WaitCudaCopyFence(uint32 Epoch, FGPUFenceRHIRef Fence)
+{
+	if (IsInRenderingThread())
+	{
+		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [Epoch, Fence]()
+		{
+			WaitCudaCopyFence(Epoch, Fence);
+		});
+		return;
+	}
+
+	TSharedPtr<FCloudStream2CopyTicket, ESPMode::ThreadSafe> Ticket = GCloudStream2CudaCopyTicket;
+
+	const double Deadline = FPlatformTime::Seconds() + 1.0;
+	// A fresh fence polls true until the RHI thread runs WriteGPUFence. Submitting on
+	// that early true encodes an empty texture.
+	while ((!Ticket.IsValid() || !Ticket->bRHIDone.Load()) && Epoch == GCloudStream2CudaEpoch.Load() && FPlatformTime::Seconds() < Deadline)
+	{
+		FPlatformProcess::SleepNoStats(0.00025f);
+	}
+
+	while (Fence && !Fence->Poll() && Epoch == GCloudStream2CudaEpoch.Load() && FPlatformTime::Seconds() < Deadline)
+	{
+		FPlatformProcess::SleepNoStats(0.00025f);
+	}
+
+	const bool bSignaled = Ticket.IsValid() && Ticket->bRHIDone.Load() && Fence && Fence->Poll() && Epoch == GCloudStream2CudaEpoch.Load();
+	if (!bSignaled && Fence && Epoch == GCloudStream2CudaEpoch.Load())
+	{
+		UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : CUDA copy fence timed out, skipping submit"));
+	}
+
+	ENQUEUE_RENDER_COMMAND(CloudStream2CudaSlotSubmit)(
+		[Epoch, bSignaled, Fence](FRHICommandListImmediate&)
+		{
+			if (GCloudStream2CudaCopyFence != Fence)
+			{
+				++GCloudStream2CudaStats.StaleCallbacks;
+				return;
+			}
+
+			const bool bAccept = bSignaled && Epoch == GCloudStream2CudaEpoch.Load() && !m_IsChangingTexture;
+			if (bAccept)
+			{
+				TrySubmitCompletedCopy(Fence, false);
+			}
+			else
+			{
+				if (!bSignaled)
+				{
+					++GCloudStream2CudaStats.Timeouts;
+				}
+				AbandonCudaCopy();
+			}
+
+			TryFinishCudaRecreate();
+			if (!m_IsChangingTexture)
+			{
+				PumpCudaFrames();
+			}
+		});
+}
+
+bool CloudStream2::StartCudaCopy(const FTextureRHIRef& Source, uint32 FrameId)
+{
+	check(IsInRenderingThread());
+	if (!Source || !GCloudStream2CudaTexture || !GCloudStream2CudaTexture->GetNativeResource() || GCloudStream2CudaCopyBusy.Load())
+	{
+		return false;
+	}
+
+	FGPUFenceRHIRef CopyFence = GDynamicRHI->RHICreateGPUFence(TEXT("CloudStream2CopyTexture"));
+	if (!CopyFence)
+	{
+		UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : Failed to create GPU fence, skipping frame"));
+		return false;
+	}
+
+	GCloudStream2CudaCopyBusy.Store(true);
+	GCloudStream2CudaCopyFrameId = FrameId;
+	GCloudStream2CudaCopyFence = CopyFence;
+	FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
+	ZLCloudPluginUtils::CopyTexture(RHICmdList, Source, GCloudStream2CudaTexture, CopyFence);
+	TSharedRef<FCloudStream2CopyTicket, ESPMode::ThreadSafe> Ticket = MakeShared<FCloudStream2CopyTicket, ESPMode::ThreadSafe>();
+	Ticket->StartSeconds = FPlatformTime::Seconds();
+	GCloudStream2CudaCopyTicket = Ticket;
+	RHICmdList.EnqueueLambda([Ticket](FRHICommandListBase&)
+	{
+		Ticket->bRHIDone.Store(true);
+	});
+	// Hand the copy to the RHI thread without waiting. FlushRHIThread here makes CUDA
+	// share the graphics queue with Present and hangs T4 (G4).
+	RHICmdList.ImmediateFlush(EImmediateFlushType::DispatchToRHIThread);
+
+	const uint32 Epoch = GCloudStream2CudaEpoch.Load();
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [Epoch, CopyFence]()
+	{
+		WaitCudaCopyFence(Epoch, CopyFence);
+	});
+	return true;
+}
+
+void CloudStream2::PumpCudaFrames()
+{
+	check(IsInRenderingThread());
+	if (m_IsChangingTexture || !GCloudStream2CudaPendingFrame || CudaCopyBusy())
+	{
+		return;
+	}
+
+	FTextureRHIRef Pending = MoveTemp(GCloudStream2CudaPendingFrame);
+	GCloudStream2CudaPendingFrame = nullptr;
+	const uint32 FrameId = GCloudStream2CudaPendingFrameId;
+	GCloudStream2CudaPendingFrameId = 0;
+	if (!StartCudaCopy(Pending, FrameId))
+	{
+		GCloudStream2CudaPendingFrame = Pending;
+		GCloudStream2CudaPendingFrameId = FrameId;
+	}
+}
+
+void CloudStream2::AcquireCudaFrame(const FTextureRHIRef& Source, uint32 FrameId)
+{
+	check(IsInRenderingThread());
+	if (!GCloudStream2CudaTexture)
+	{
+		return;
+	}
+
+	++GCloudStream2CudaStats.Captures;
+	LogCudaStreamStats(false);
+
+	if (GCloudStream2CudaCopyBusy.Load() && GCloudStream2CudaCopyFence.IsValid())
+	{
+		TrySubmitCompletedCopy(GCloudStream2CudaCopyFence, true);
+	}
+
+	if (StartCudaCopy(Source, FrameId))
+	{
+		if (GCloudStream2CudaPendingFrame)
+		{
+			++GCloudStream2CudaStats.Coalesced;
+		}
+		GCloudStream2CudaPendingFrame = nullptr;
+		GCloudStream2CudaPendingFrameId = 0;
+		return;
+	}
+
+	if (GCloudStream2CudaPendingFrame)
+	{
+		++GCloudStream2CudaStats.Coalesced;
+	}
+	GCloudStream2CudaPendingFrame = Source;
+	GCloudStream2CudaPendingFrameId = FrameId;
 }
 #endif
 
@@ -505,8 +840,36 @@ void CloudStream2::Update(UWorld* World)
 			DisconnectInputHandler();
 		}
 
+#if UNREAL_5_8_OR_NEWER
+		static bool bDeferredViewportResize = false;
+		if (bDeferredViewportResize && !ZLCloudPluginUtils::IsRdpClientConnected() && !ZLCloudPluginUtils::ShouldSkipStreamGpuWork())
+		{
+			bDeferredViewportResize = false;
+			m_NeedsResolutionChange = true;
+		}
+#endif
 		if (m_NeedsResolutionChange)
 		{
+#if UNREAL_5_8_OR_NEWER
+			// r.SetRes flushes the render thread, which is blocked in Present while an RDP
+			// client is connected. The encoder texture still resizes in CheckInterruptions.
+			// The viewport resize runs once that client has gone.
+			if (ZLCloudPluginUtils::IsRdpClientConnected())
+			{
+				static int32 DeferredLogWidth = -1;
+				static int32 DeferredLogHeight = -1;
+				if (DeferredLogWidth != m_FrameRequirements.Width || DeferredLogHeight != m_FrameRequirements.Height)
+				{
+					DeferredLogWidth = m_FrameRequirements.Width;
+					DeferredLogHeight = m_FrameRequirements.Height;
+					UE_LOG(LogZLCloudPlugin, Display, TEXT("CloudStream2 : Deferring viewport resize to %dx%d until the RDP client disconnects"),
+						m_FrameRequirements.Width, m_FrameRequirements.Height);
+				}
+				bDeferredViewportResize = true;
+				m_NeedsResolutionChange = false;
+			}
+			else
+#endif
 			if (m_BackToInitialCameraConfig)
 			{
 				UE_LOG(LogZLCloudPlugin, Display, TEXT("CloudStream2 : Clients disconnected,  changing to startup camera quality settings"));
@@ -617,6 +980,25 @@ void CloudStream2::Update(UWorld* World)
 				}
 			}
 		}
+
+#if UNREAL_5_8_OR_NEWER
+		// Submit the offscreen tonemap copy from the game tick, not from the Present callback.
+		if (ZLCloudPluginUtils::IsRdpClientConnected() && !ZLCloudPluginUtils::ShouldSkipStreamGpuWork())
+		{
+			const FTextureRHIRef Offscreen = FZLCloudPluginRdpCaptureViewExtension::GetLatestTexture();
+			if (Offscreen && Offscreen->GetNativeResource())
+			{
+				static bool bLoggedOffscreenSubmit = false;
+				if (!bLoggedOffscreenSubmit)
+				{
+					bLoggedOffscreenSubmit = true;
+					UE_LOG(LogZLCloudPlugin, Display, TEXT("CloudStream2 : RDP client connected — streaming offscreen capture (%dx%d)"),
+						Offscreen->GetDesc().Extent.X, Offscreen->GetDesc().Extent.Y);
+				}
+				OnFrame(Offscreen);
+			}
+		}
+#endif
 	}
 }
 
@@ -644,14 +1026,15 @@ void CloudStream2::CheckInterruptions()
 		if (CurrentInterruption == InterruptionReason::FRAME_REQUIREMENTS)
 		{
 			m_IsChangingTexture = true;
-			
+
+#if UNREAL_5_8_OR_NEWER
+			BeginCudaTextureRecreate(FrameReqs.Width, FrameReqs.Height);
+			TryFinishCudaRecreate();
+#else
 			if (m_IntermediateTexture)
 			{
 				FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
 
-#if UNREAL_5_8_OR_NEWER
-				ConsumeTextureReleaseFence(m_TextureReleaseFence, RHICmdList);
-#else
 				if (m_TextureReleaseFence)
 				{
 					const int32 MaxWaitIterations = 1000;
@@ -666,18 +1049,17 @@ void CloudStream2::CheckInterruptions()
 						UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : GPU fence wait timeout"));
 					}
 				}
-#endif
-				
+
 				RHICmdList.ImmediateFlush(EImmediateFlushType::WaitForOutstandingTasksOnly);
-				
+
 				m_IntermediateTexture.SafeRelease();
 				m_TextureReleaseFence = nullptr;
 			}
-			
+
 			if (FrameReqs.Width > 0 && FrameReqs.Height > 0)
 			{
 				m_IntermediateTexture = ZLCloudPluginUtils::CreateTexture(FrameReqs.Width, FrameReqs.Height);
-				
+
 				if (m_IntermediateTexture && m_IntermediateTexture->GetNativeResource() && IsDLLValid())
 				{
 					CloudStream2DLL::SetTexture((ID3D12Resource*)m_IntermediateTexture->GetNativeResource());
@@ -692,26 +1074,24 @@ void CloudStream2::CheckInterruptions()
 			{
 				UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : Invalid frame requirements for texture creation: %dx%d"), FrameReqs.Width, FrameReqs.Height);
 			}
-			
+
 			m_IsChangingTexture = false;
+#endif
 		}
 		else if (CurrentInterruption == InterruptionReason::CLIENTS_DISCONNECTED)
 		{
 			m_SentFramesCount = 0;
 
 			m_IsChangingTexture = true;
-			
+
 #if UNREAL_5_8_OR_NEWER
-			{
-				FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
-				ConsumeTextureReleaseFence(m_TextureReleaseFence, RHICmdList);
-				RHICmdList.ImmediateFlush(EImmediateFlushType::WaitForOutstandingTasksOnly);
-			}
+			BeginCudaTextureRecreate(0, 0);
+			TryFinishCudaRecreate();
 #else
 			if (m_TextureReleaseFence)
 			{
 				FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
-				
+
 				const int32 MaxWaitIterations = 1000;
 				int32 WaitIterations = 0;
 				while (!m_TextureReleaseFence->Poll() && WaitIterations < MaxWaitIterations)
@@ -723,7 +1103,7 @@ void CloudStream2::CheckInterruptions()
 				{
 					UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : GPU fence wait timeout during cleanup"));
 				}
-				
+
 				RHICmdList.ImmediateFlush(EImmediateFlushType::WaitForOutstandingTasksOnly);
 				m_TextureReleaseFence = nullptr;
 			}
@@ -734,8 +1114,10 @@ void CloudStream2::CheckInterruptions()
 
 			m_FrameRequirements.Clear();
 			m_inputDeactivate = true;
-			
+
+#if !UNREAL_5_8_OR_NEWER
 			m_IsChangingTexture = false;
+#endif
 		}
 	}
 }
@@ -790,6 +1172,19 @@ void CloudStream2::OnFrame(const FTexture2DRHIRef& BackBuffer)
 	}
 
 	CheckInterruptions();
+#if UNREAL_5_8_OR_NEWER
+	TryFinishCudaRecreate();
+	// RDP sends no frames, and the DLL destroys NVENC after that gap. Recreate the
+	// intermediate texture once the swapchain settle ends so the next copy can register it.
+	if (ZLCloudPluginUtils::ConsumeRebindAfterRemoteSession() && IsDLLValid()
+		&& m_FrameRequirements.Width > 0 && m_FrameRequirements.Height > 0)
+	{
+		UE_LOG(LogZLCloudPlugin, Display, TEXT("CloudStream2 : RDP client disconnected — recreating intermediate texture %dx%d so NVENC can restart"),
+			m_FrameRequirements.Width, m_FrameRequirements.Height);
+		BeginCudaTextureRecreate(m_FrameRequirements.Width, m_FrameRequirements.Height);
+		TryFinishCudaRecreate();
+	}
+#endif
 
 	// Skip frames during resolution transition to prevent GPU resource conflicts
 	if (m_FramesToSkipAfterResolutionChange > 0)
@@ -797,7 +1192,11 @@ void CloudStream2::OnFrame(const FTexture2DRHIRef& BackBuffer)
 		--m_FramesToSkipAfterResolutionChange;
 	}
 	// Additional validation: ensure texture is valid, not being changed, and resolution change is not in progress
-	else if (m_IntermediateTexture && m_IntermediateTexture->GetNativeResource() && !m_NeedsResolutionChange && !m_IsChangingTexture && IsDLLValid())
+	else if (!m_NeedsResolutionChange && !m_IsChangingTexture && IsDLLValid()
+#if !UNREAL_5_8_OR_NEWER
+		&& m_IntermediateTexture && m_IntermediateTexture->GetNativeResource()
+#endif
+		)
 	{
 		// Validate back buffer is valid
 		if (!BackBuffer || !BackBuffer->GetNativeResource())
@@ -806,17 +1205,16 @@ void CloudStream2::OnFrame(const FTexture2DRHIRef& BackBuffer)
 			return;
 		}
 
+#if UNREAL_5_8_OR_NEWER
+		AcquireCudaFrame(BackBuffer, (uint32)FeatureNodesSyncGPUFence::GetLatestFrameID());
+#else
 		FGPUFenceRHIRef CopyFence = GDynamicRHI->RHICreateGPUFence(*FString::Printf(TEXT("CloudStream2CopyTexture")));
-		
+
 		if (CopyFence)
 		{
 #if UNREAL_5_1_OR_NEWER
 			FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
 			ZLCloudPluginUtils::CopyTexture(RHICmdList, BackBuffer, m_IntermediateTexture, CopyFence);
-#if UNREAL_5_8_OR_NEWER
-			// Copy must be on the D3D queue before CUDA waits on it (5.7 did this implicitly).
-			RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
-#endif
 #else
 			ZLCloudPluginUtils::CopyTexture(BackBuffer, m_IntermediateTexture, CopyFence);
 #endif
@@ -838,6 +1236,7 @@ void CloudStream2::OnFrame(const FTexture2DRHIRef& BackBuffer)
 		{
 			UE_LOG(LogZLCloudPlugin, Warning, TEXT("CloudStream2 : Failed to create GPU fence, skipping frame"));
 		}
+#endif
 	}
 
 		/*

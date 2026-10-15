@@ -13,6 +13,8 @@
 #include "Framework/Application/SlateApplication.h"
 #if UNREAL_5_8_OR_NEWER
 #include "Slate/SlateViewportProvider.h"
+#include "SceneViewExtension.h"
+#include "ZLCloudPluginRdpCaptureViewExtension.h"
 #endif
 
 TSharedPtr<FZLCloudPluginVideoInputBackBuffer> FZLCloudPluginVideoInputBackBuffer::Create()
@@ -32,6 +34,9 @@ TSharedPtr<FZLCloudPluginVideoInputBackBuffer> FZLCloudPluginVideoInputBackBuffe
 		{
 			FSlateRenderer* Renderer = FSlateApplication::Get().GetRenderer();
 			Input->DelegateHandle = Renderer->OnBackBufferReadyToPresent().AddSP(Input.ToSharedRef(), &FZLCloudPluginVideoInputBackBuffer::OnBackBufferReady);
+#if UNREAL_5_8_OR_NEWER
+			Input->RdpCaptureExtension = FSceneViewExtensions::NewExtension<FZLCloudPluginRdpCaptureViewExtension>();
+#endif
 		}
 	});
 
@@ -51,11 +56,19 @@ FZLCloudPluginVideoInputBackBuffer::~FZLCloudPluginVideoInputBackBuffer()
 #if UNREAL_5_8_OR_NEWER
 void FZLCloudPluginVideoInputBackBuffer::OnBackBufferReady(SWindow& SlateWindow, ISlateViewportProvider& ViewportProvider)
 {
+	// Present must not copy the swapchain while an RDP client is connected.
+	// Tonemap color is copied offscreen and submitted from CloudStream2::Update instead.
+	if (ZLCloudPluginUtils::ShouldSkipStreamGpuWork() || ZLCloudPluginUtils::IsRdpClientConnected())
+	{
+		return;
+	}
+
 	FRHITexture* BackBuffer = ViewportProvider.GetBackBufferResource();
 	if (!BackBuffer)
 	{
 		return;
 	}
+
 	OnFrame(FPixelCaptureInputFrameRHI(FTextureRHIRef(BackBuffer)));
 }
 #elif UNREAL_5_5_OR_NEWER

@@ -33,9 +33,11 @@
 #include "TimerManager.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SMenuAnchor.h"
+#include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/Views/SListView.h"
 #include "Widgets/Views/STableRow.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/SToolTip.h"
 #include "Interfaces/IPluginManager.h"
@@ -2864,13 +2866,289 @@ bool ShouldUseConfigurationAutofill(UStateKeyInfoAsset* Schema, const FString& K
 {
 	return IsZLVEPluginAvailable() && IsValidConfigurationKeyForAutofill(Schema, KeyName);
 }
+
+bool IsConfigurationStringField(const FString& KeyName)
+{
+	return KeyName == TEXT("configuration");
+}
+}
+
+namespace
+{
+constexpr float GConfigurationFieldDefaultHeight = 160.f;
+constexpr float GConfigurationFieldMinHeight = 72.f;
+constexpr float GConfigurationFieldMaxHeight = 480.f;
+constexpr float GConfigurationResizeGripHeight = 12.f;
+
+float GConfigurationFieldHeight = GConfigurationFieldDefaultHeight;
+
+class SResizableConfigurationField;
+
+class SConfigurationResizeGrip : public SCompoundWidget
+{
+public:
+	SLATE_BEGIN_ARGS(SConfigurationResizeGrip) {}
+	SLATE_END_ARGS()
+
+	void Construct(const FArguments& InArgs)
+	{
+		SetCursor(EMouseCursor::ResizeUpDown);
+		SetToolTipText(FText::FromString(TEXT("Drag to resize")));
+		ChildSlot
+		[
+			SNew(SBox)
+				.HeightOverride(GConfigurationResizeGripHeight)
+				.Visibility(EVisibility::HitTestInvisible)
+				.HAlign(HAlign_Fill)
+				.VAlign(VAlign_Center)
+				[
+					SNew(SBorder)
+						.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+						.BorderBackgroundColor(FLinearColor(0.78f, 0.78f, 0.78f, 1.f))
+						.Padding(FMargin(0.f, 4.f))
+						.HAlign(HAlign_Center)
+						.VAlign(VAlign_Center)
+						[
+							SNew(SBox)
+								.WidthOverride(36.f)
+								.HeightOverride(3.f)
+								[
+									SNew(SBorder)
+										.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+										.BorderBackgroundColor(FLinearColor(0.35f, 0.35f, 0.35f, 1.f))
+								]
+						]
+				]
+		];
+	}
+
+	void Setup(const TSharedRef<SResizableConfigurationField>& InField);
+
+	virtual FReply OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+	virtual FReply OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+	virtual FReply OnMouseMove(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
+
+private:
+	TWeakPtr<SResizableConfigurationField> Field;
+	float DragStartScreenY = 0.f;
+	float DragStartHeight = 0.f;
+	bool bDragging = false;
+};
+
+class SResizableConfigurationField : public SCompoundWidget
+{
+public:
+	SLATE_BEGIN_ARGS(SResizableConfigurationField) {}
+		SLATE_ARGUMENT(TWeakObjectPtr<UStateKeyInputConfigurationTextBox>, Owner)
+		SLATE_ARGUMENT(FText, Text)
+		SLATE_ARGUMENT(const FEditableTextBoxStyle*, Style)
+		SLATE_EVENT(FOnTextChanged, OnTextChanged)
+		SLATE_EVENT(FOnTextCommitted, OnTextCommitted)
+	SLATE_END_ARGS()
+
+	void Construct(const FArguments& InArgs)
+	{
+		OwnerWidget = InArgs._Owner;
+		const bool bClearFocusOnCommit = OwnerWidget.IsValid() ? OwnerWidget->GetClearKeyboardFocusOnCommit() : true;
+
+		TSharedRef<SConfigurationResizeGrip> Grip = SNew(SConfigurationResizeGrip);
+
+		ChildSlot
+		[
+			SAssignNew(HeightBox, SBox)
+				.HeightOverride(GConfigurationFieldHeight)
+				[
+					SNew(SVerticalBox)
+						+ SVerticalBox::Slot()
+						.FillHeight(1.f)
+						[
+							SAssignNew(TextBox, SMultiLineEditableTextBox)
+								.Style(InArgs._Style)
+								.Text(InArgs._Text)
+								.AutoWrapText(true)
+								.WrappingPolicy(ETextWrappingPolicy::AllowPerCharacterWrapping)
+								.AllowMultiLine(true)
+								.ModiferKeyForNewLine(EModifierKey::Shift)
+								.ClearKeyboardFocusOnCommit(bClearFocusOnCommit)
+								.Margin(FMargin(4.f, 4.f))
+								.OnTextChanged(InArgs._OnTextChanged)
+								.OnTextCommitted(InArgs._OnTextCommitted)
+						]
+						+ SVerticalBox::Slot()
+						.AutoHeight()
+						[
+							Grip
+						]
+				]
+		];
+
+		Grip->Setup(SharedThis(this));
+	}
+
+	void SetText(const FText& InText)
+	{
+		if (TextBox.IsValid())
+		{
+			TextBox->SetText(InText);
+		}
+	}
+
+	TSharedPtr<SMultiLineEditableTextBox> GetTextBox() const
+	{
+		return TextBox;
+	}
+
+	virtual FVector2D ComputeDesiredSize(float) const override
+	{
+		// Report a tiny width so a long comma-separated value cannot stretch the
+		// schema column. The grid still fills this slot to the column width, and
+		// the text wraps inside that arranged width.
+		return FVector2D(1.f, GConfigurationFieldHeight);
+	}
+
+	float GetHeight() const
+	{
+		return GConfigurationFieldHeight;
+	}
+
+	void ApplyHeightFromDrag(float DragStartHeight, float DragStartScreenY, float CurrentScreenY, float LayoutScale)
+	{
+		const float SafeScale = FMath::Max(LayoutScale, KINDA_SMALL_NUMBER);
+		const float DeltaY = (CurrentScreenY - DragStartScreenY) / SafeScale;
+		GConfigurationFieldHeight = FMath::Clamp(DragStartHeight + DeltaY, GConfigurationFieldMinHeight, GConfigurationFieldMaxHeight);
+		if (HeightBox.IsValid())
+		{
+			HeightBox->SetHeightOverride(GConfigurationFieldHeight);
+		}
+		Invalidate(EInvalidateWidgetReason::Layout);
+	}
+
+	void NotifyResizeStarted()
+	{
+		if (UStateKeyInputConfigurationTextBox* Owner = OwnerWidget.Get())
+		{
+			Owner->BeginConfigurationResize();
+		}
+	}
+
+	void NotifyResizeFinished()
+	{
+		if (UStateKeyInputConfigurationTextBox* Owner = OwnerWidget.Get())
+		{
+			Owner->EndConfigurationResize();
+		}
+	}
+
+private:
+	TWeakObjectPtr<UStateKeyInputConfigurationTextBox> OwnerWidget;
+	TSharedPtr<SBox> HeightBox;
+	TSharedPtr<SMultiLineEditableTextBox> TextBox;
+};
+
+void SConfigurationResizeGrip::Setup(const TSharedRef<SResizableConfigurationField>& InField)
+{
+	Field = InField;
+}
+
+FReply SConfigurationResizeGrip::OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+{
+	if (MouseEvent.GetEffectingButton() != EKeys::LeftMouseButton)
+	{
+		return FReply::Unhandled();
+	}
+
+	TSharedPtr<SResizableConfigurationField> Pinned = Field.Pin();
+	if (!Pinned.IsValid())
+	{
+		return FReply::Unhandled();
+	}
+
+	bDragging = true;
+	DragStartScreenY = MouseEvent.GetScreenSpacePosition().Y;
+	DragStartHeight = Pinned->GetHeight();
+	Pinned->NotifyResizeStarted();
+
+	FReply Reply = FReply::Handled().CaptureMouse(AsShared());
+	if (TSharedPtr<SMultiLineEditableTextBox> Editor = Pinned->GetTextBox())
+	{
+		Reply.SetUserFocus(Editor.ToSharedRef(), EFocusCause::Mouse);
+	}
+	return Reply;
+}
+
+FReply SConfigurationResizeGrip::OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+{
+	if (!bDragging || MouseEvent.GetEffectingButton() != EKeys::LeftMouseButton)
+	{
+		return FReply::Unhandled();
+	}
+
+	bDragging = false;
+	FReply Reply = FReply::Handled().ReleaseMouseCapture();
+	if (TSharedPtr<SResizableConfigurationField> Pinned = Field.Pin())
+	{
+		Pinned->NotifyResizeFinished();
+	}
+	return Reply;
+}
+
+FReply SConfigurationResizeGrip::OnMouseMove(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+{
+	if (!bDragging || !HasMouseCapture())
+	{
+		return FReply::Unhandled();
+	}
+
+	if (TSharedPtr<SResizableConfigurationField> Pinned = Field.Pin())
+	{
+		const float Scale = MyGeometry.GetAccumulatedLayoutTransform().GetScale();
+		Pinned->ApplyHeightFromDrag(DragStartHeight, DragStartScreenY, MouseEvent.GetScreenSpacePosition().Y, Scale);
+	}
+	return FReply::Handled();
+}
+
+TMap<TWeakObjectPtr<UStateKeyInputConfigurationTextBox>, TWeakPtr<SResizableConfigurationField>> GConfigurationFields;
+
+TSharedPtr<SResizableConfigurationField> FindConfigurationField(UStateKeyInputConfigurationTextBox* Owner)
+{
+	if (!Owner)
+	{
+		return nullptr;
+	}
+
+	const TWeakObjectPtr<UStateKeyInputConfigurationTextBox> Key(Owner);
+	if (TWeakPtr<SResizableConfigurationField>* Found = GConfigurationFields.Find(Key))
+	{
+		return Found->Pin();
+	}
+	return nullptr;
+}
 }
 
 TSharedRef<SWidget> UStateKeyInputConfigurationTextBox::RebuildWidget()
 {
-	TSharedRef<SWidget> InnerWidget = Super::RebuildWidget();
-
 	TWeakObjectPtr<UStateKeyInputConfigurationTextBox> WeakSelf(this);
+
+	TSharedRef<SResizableConfigurationField> Field = SNew(SResizableConfigurationField)
+		.Owner(this)
+		.Text(GetText())
+		.Style(&WidgetStyle)
+		.OnTextChanged_Lambda([WeakSelf](const FText& InText)
+		{
+			if (UStateKeyInputConfigurationTextBox* Strong = WeakSelf.Get())
+			{
+				Strong->HandleOnTextChanged(InText);
+			}
+		})
+		.OnTextCommitted_Lambda([WeakSelf](const FText& InText, ETextCommit::Type CommitMethod)
+		{
+			if (UStateKeyInputConfigurationTextBox* Strong = WeakSelf.Get())
+			{
+				Strong->HandleOnTextCommitted(InText, CommitMethod);
+			}
+		});
+
+	GConfigurationFields.Add(this, Field);
 
 	SuggestionList = SNew(SListView<TSharedPtr<FConfigurationAutofillSuggestion>>)
 		.ListItemsSource(&SuggestionItems)
@@ -2898,7 +3176,7 @@ TSharedRef<SWidget> UStateKeyInputConfigurationTextBox::RebuildWidget()
 		.UseApplicationMenuStack(false)
 		.MenuContent(MenuContentWidget)
 		[
-			InnerWidget
+			Field
 		];
 
 	return SuggestionAnchor.ToSharedRef();
@@ -2906,6 +3184,7 @@ TSharedRef<SWidget> UStateKeyInputConfigurationTextBox::RebuildWidget()
 
 void UStateKeyInputConfigurationTextBox::ReleaseSlateResources(bool bReleaseChildren)
 {
+	GConfigurationFields.Remove(this);
 	if (SuggestionAnchor.IsValid())
 	{
 		SuggestionAnchor->SetIsOpen(false);
@@ -2926,8 +3205,34 @@ void UStateKeyInputConfigurationTextBox::HandleAutofillTextChanged(const FText& 
 	RefreshSuggestions();
 }
 
+void UStateKeyInputConfigurationTextBox::BeginConfigurationResize()
+{
+	bSuppressFocusLossCommit = true;
+	bDeferredFocusLossCommit = false;
+}
+
+void UStateKeyInputConfigurationTextBox::EndConfigurationResize()
+{
+	const bool bShouldCommit = bDeferredFocusLossCommit;
+	const FText TextToCommit = GetText();
+	bSuppressFocusLossCommit = false;
+	bDeferredFocusLossCommit = false;
+	if (bShouldCommit)
+	{
+		OnTextValueCommitted(TextToCommit, ETextCommit::OnUserMovedFocus);
+	}
+}
+
 void UStateKeyInputConfigurationTextBox::OnTextValueCommitted(const FText& ComittedText, ETextCommit::Type CommitMethod)
 {
+	// Dragging the resize grip can move focus off the editor. Swallow that commit
+	// until the drag finishes so the field is not rebuilt mid-resize.
+	if (CommitMethod == ETextCommit::OnUserMovedFocus && bSuppressFocusLossCommit)
+	{
+		bDeferredFocusLossCommit = true;
+		return;
+	}
+
 	// While the suggestion popup is open, clicking suggestion rows/scrollbar can move focus
 	// away from the text box. Ignore that transient focus commit only when the new focus
 	// is still inside the suggestion popup itself.
@@ -3148,9 +3453,14 @@ void UStateKeyInputConfigurationTextBox::HandleSuggestionSelected(
 	}
 	Rebuilt += Item->Code;
 
+	const FText RebuiltText = FText::FromString(Rebuilt);
 	{
 		TGuardValue<bool> Guard(bSuppressTextChangedHandler, true);
-		SetText(FText::FromString(Rebuilt));
+		SetText(RebuiltText);
+		if (TSharedPtr<SResizableConfigurationField> Field = FindConfigurationField(this))
+		{
+			Field->SetText(RebuiltText);
+		}
 	}
 
 	if (SuggestionAnchor.IsValid())
@@ -3158,10 +3468,13 @@ void UStateKeyInputConfigurationTextBox::HandleSuggestionSelected(
 		SuggestionAnchor->SetIsOpen(false);
 	}
 
-	// Keep keyboard focus on the underlying text box so the user can keep editing.
-	if (MyEditableTextBlock.IsValid())
+	// Keep keyboard focus on the multiline editor so the user can keep editing.
+	if (TSharedPtr<SResizableConfigurationField> Field = FindConfigurationField(this))
 	{
-		FSlateApplication::Get().SetKeyboardFocus(MyEditableTextBlock, EFocusCause::SetDirectly);
+		if (TSharedPtr<SMultiLineEditableTextBox> Editor = Field->GetTextBox())
+		{
+			FSlateApplication::Get().SetKeyboardFocus(Editor, EFocusCause::SetDirectly);
+		}
 	}
 
 	if (SuggestionList.IsValid())
@@ -3638,6 +3951,7 @@ void UZLDebugUIWidget::RebuildDebugUIWithNesting()
 
 			UWidget* InputWidget = nullptr;
 			EHorizontalAlignment Alignment = HAlign_Fill;
+			EVerticalAlignment RowVAlign = VAlign_Center;
 
 			switch (StateKeyInfo.GetDataTypeEnum())
 			{
@@ -3717,7 +4031,18 @@ void UZLDebugUIWidget::RebuildDebugUIWithNesting()
 				else
 				{
 					UStateKeyInputTextBox* TextBox = nullptr;
-					if (bUseAcceptedValuesAutofillText)
+					if (ZLDebugUIConfigAutofill::IsConfigurationStringField(KeyName))
+					{
+						UStateKeyInputConfigurationTextBox* ConfigTextBox = WidgetTree->ConstructWidget<UStateKeyInputConfigurationTextBox>(UStateKeyInputConfigurationTextBox::StaticClass());
+						if (ZLDebugUIConfigAutofill::ShouldUseConfigurationAutofill(TargetSchema, KeyName))
+						{
+							ConfigTextBox->OnTextChanged.AddDynamic(ConfigTextBox, &UStateKeyInputConfigurationTextBox::HandleAutofillTextChanged);
+						}
+						TextBox = ConfigTextBox;
+						RowVAlign = VAlign_Top;
+						LabelSlot->SetVerticalAlignment(VAlign_Top);
+					}
+					else if (bUseAcceptedValuesAutofillText)
 					{
 						UStateKeyInputAcceptedValuesTextBox* AcceptedValuesTextBox = WidgetTree->ConstructWidget<UStateKeyInputAcceptedValuesTextBox>(UStateKeyInputAcceptedValuesTextBox::StaticClass());
 						AcceptedValuesTextBox->AcceptedValues = StateKeyInfo.AcceptedStringValues;
@@ -3747,12 +4072,6 @@ void UZLDebugUIWidget::RebuildDebugUIWithNesting()
 						AcceptedValuesTextBox->BuildDisplayLabels();
 						AcceptedValuesTextBox->OnTextChanged.AddDynamic(AcceptedValuesTextBox, &UStateKeyInputAcceptedValuesTextBox::HandleAcceptedValuesTextChanged);
 						TextBox = AcceptedValuesTextBox;
-					}
-					else if (ZLDebugUIConfigAutofill::ShouldUseConfigurationAutofill(TargetSchema, KeyName))
-					{
-						UStateKeyInputConfigurationTextBox* ConfigTextBox = WidgetTree->ConstructWidget<UStateKeyInputConfigurationTextBox>(UStateKeyInputConfigurationTextBox::StaticClass());
-						ConfigTextBox->OnTextChanged.AddDynamic(ConfigTextBox, &UStateKeyInputConfigurationTextBox::HandleAutofillTextChanged);
-						TextBox = ConfigTextBox;
 					}
 					else
 					{
@@ -4490,7 +4809,7 @@ void UZLDebugUIWidget::RebuildDebugUIWithNesting()
 				UGridSlot* InputSlot = RowGrid->AddChildToGrid(InputWidget, 0, ColInput);
 				InputSlot->SetPadding(FMargin(5.f));
 				InputSlot->SetHorizontalAlignment(Alignment);
-				InputSlot->SetVerticalAlignment(VAlign_Center);
+				InputSlot->SetVerticalAlignment(RowVAlign);
 
 				if (allowResendCurrentValues)
 				{
@@ -4535,7 +4854,7 @@ void UZLDebugUIWidget::RebuildDebugUIWithNesting()
 					UGridSlot* ResendSlot = RowGrid->AddChildToGrid(ResendButton, 0, ColResend);
 					ResendSlot->SetPadding(FMargin(5.f));
 					ResendSlot->SetHorizontalAlignment(Alignment);
-					ResendSlot->SetVerticalAlignment(VAlign_Center);
+					ResendSlot->SetVerticalAlignment(RowVAlign);
 				}
 			}
 

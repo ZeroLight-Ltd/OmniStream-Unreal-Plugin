@@ -1,12 +1,9 @@
-// Copyright ZeroLight ltd. All Rights Reserved.
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 
 typedef struct AbortHandle AbortHandle;
-
-typedef struct BuildContext BuildContext;
 
 /**
  * Opaque pointer to a bard client object
@@ -75,10 +72,10 @@ typedef struct UTF8InputString {
 /**
  * There are many params for one step uploads, so stuff them in a struct
  *
- * Note on intermeidate storage providers (ISP). You may set a ISP,
+ * Note on intermediate storage providers (ISP). You may set a ISP,
  * disable any use of an ISP or say you don't care use the action default.
  *
- * intermediate_storge_provider | disable_intermeidate_provider | outcome
+ * intermediate_storage_provider | disable_intermediate_provider | outcome
  * -------------------------------------------------------------------------
  * unset                        | false                         | use server side default
  * set                          | false                         | use an ISP
@@ -88,7 +85,7 @@ typedef struct UTF8InputString {
  */
 typedef struct OneStepUploadParams {
   /**
-   * An asset verison id. If this is specified, an attempt will be made to
+   * An asset version id. If this is specified, an attempt will be made to
    * resume uploading to an existing asset version id. If not set, a fresh
    * asset version will be created
    */
@@ -101,6 +98,9 @@ typedef struct OneStepUploadParams {
   struct UTF8InputString extension_data;
   struct UTF8InputString thumbnail;
   uint64_t chunk_size;
+  bool save_git_hash;
+  struct UTF8InputString source_dir;
+  struct UTF8InputString comment;
 } OneStepUploadParams;
 
 typedef struct OpenSelectAssetLineParams {
@@ -144,7 +144,7 @@ struct FFIString get_library_version(void);
 void start_simple_logging_unbuffered(bool truncate_log_file);
 
 /**
- * Takes the last error to have occured from thread local storage. Note that the error is "taken"
+ * Takes the last error to have occurred from thread local storage. Note that the error is "taken"
  * and the thread local storage will be cleared so that if this function is called twice
  * it will return a null pointer the second time.
  */
@@ -156,13 +156,13 @@ struct PortalError *take_last_error(void);
 struct FFIString error_get_message(struct PortalError *error);
 
 /**
- * Destory an error
+ * Destroy an error
  */
 void error_destory(struct PortalError *error);
 
 /**
  * Use a [Config] object to create a [Client]. Important: The [Config] is *consumed* and becomes invalid
- * after this function returns. Do not try to also destroy the [Config], this wil case **undefined behavior**. Do not
+ * after this function returns. Do not try to also destroy the [Config], this will case **undefined behavior**. Do not
  * Reuse the config object by calling this function a second time on the same argument, this will cause **undefined behavior**
  *
  * Optionally, a build context may be passed in, in which case the state of the client and any ongoing build will be
@@ -171,24 +171,12 @@ void error_destory(struct PortalError *error);
  * If a build context is passed in, the client takes ownership of that build context. In this case **there is no need to destroy**
  * the context
  */
-struct Client *client_new_from_config(struct Config *opts,
-                                      struct BuildContext *cx);
+struct Client *client_new_from_config(struct Config *opts);
 
 /**
  * Destroys a [Client]
  */
 void client_destroy(struct Client *client);
-
-/**
- * Extracts the state of any ongoing build into a build context. This may be used at a later date
- * date to create a new client the same state with regards to the progress of builds as this client
- */
-struct BuildContext *client_get_build_context(struct Client *client);
-
-/**
- * Destroys a [BuildContext].
- */
-void build_context_destroy(struct BuildContext *cx);
 
 /**
  * If a token has not yet being obtained, opens a browser inviting the user to log in.
@@ -259,20 +247,6 @@ struct OutputMessage *client_get_logged_in_user(struct Client *client);
 struct OutputMessage *client_logout_user(struct Client *client);
 
 /**
- * Creates a new build using a set of parameters specified in JSON
- */
-struct OutputMessage *client_create_build(struct Client *client,
-                                          const uint8_t *json,
-                                          uintptr_t length);
-
-/**
- * Creates a new stage using a set of parameters specified in JSON
- */
-struct OutputMessage *client_create_stage(struct Client *client,
-                                          const uint8_t *json,
-                                          uintptr_t length);
-
-/**
  * Gets an abort handle of a task. This may be used to cancel that task
  */
 struct AbortHandle *client_upload_task_get_abort_handle(struct UploadTask *task);
@@ -308,35 +282,8 @@ void client_upload_task_destory(struct UploadTask *task);
 void client_upload_task_result_destory(struct UploadResult *task_result);
 
 /**
- * Uploads files to bard
- */
-struct OutputMessage *client_upload(struct Client *client, const uint8_t *json, uintptr_t length);
-
-/**
- * Uploads files to bard
- */
-struct UploadTask *client_upload_async(struct Client *client,
-                                       const uint8_t *json,
-                                       uintptr_t length);
-
-/**
- * Finalizes a stage. If exactly one stage is open for this client, that stage will be finalized, otherwise an error will
- * be returned unless the stage id is specified
- */
-struct OutputMessage *client_finalize_stage(struct Client *client,
-                                            const uint8_t *json,
-                                            uintptr_t length);
-
-/**
- * Finalizes a build. Note that all open stages should be finalized before calling this function
- */
-struct OutputMessage *client_finalize_build(struct Client *client,
-                                            const uint8_t *json,
-                                            uintptr_t length);
-
-/**
  * Takes the progress stream for this client. The client may emit progress update messages as it works
- * especially during uploads. Calling code may wish to monitor progress on a seperate thread and update
+ * especially during uploads. Calling code may wish to monitor progress on a separate thread and update
  * the user.
  * Note: it is an error to call this function twice.
  */
@@ -344,7 +291,7 @@ struct ProgressStream *client_take_progress_stream(struct Client *client);
 
 /**
  * Creates a new portal asset version.
- * asset_line_id - the id of the parent asset line formated as a utf8 string. Note: asset line ids *should* bet just hex strings
+ * asset_line_id - the id of the parent asset line formatted as a utf8 string. Note: asset line ids *should* bet just hex strings
  *    so ascii string should also just work here.
  * storage_provider - the storage provider to upload to. May be left null to use the default provider.
  * extension data: JSON encoded extension data. May be null
@@ -354,11 +301,14 @@ struct OutputMessage *client_create_portal_asset_version(struct Client *client,
                                                          struct UTF8InputString storage_provider,
                                                          struct UTF8InputString extension_data,
                                                          struct UTF8InputString upload_dir,
-                                                         uint64_t chunk_size);
+                                                         uint64_t chunk_size,
+                                                         struct UTF8InputString source_dir,
+                                                         bool upload_git_hashes,
+                                                         struct UTF8InputString comment);
 
 /**
  * Finalizes a new portal asset version.
- * asset_version_id - the id of the asset_version to be finalized, formated as a utf8 string. Note: asset version ids *should* bet just hex strings
+ * asset_version_id - the id of the asset_version to be finalized, formatted as a utf8 string. Note: asset version ids *should* bet just hex strings
  *    so ascii string should also just work here.
  */
 struct OutputMessage *client_finalize_portal_asset_version(struct Client *client,

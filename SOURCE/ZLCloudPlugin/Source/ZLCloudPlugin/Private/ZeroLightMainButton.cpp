@@ -18,6 +18,7 @@
 #include "Widgets/SUserWidget.h"
 #include "Widgets/Layout/SUniformGridPanel.h"
 #include "Widgets/Layout/SExpandableArea.h"
+#include "Widgets/SOverlay.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Notifications/SNotificationList.h"
 #include "Framework/Notifications/NotificationManager.h"
@@ -1158,6 +1159,11 @@ ECheckBoxState FZeroLightMainButton::UseRemoveDebugSymbols() const
 	return s_removeDebugSymbols ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
 }
 
+ECheckBoxState FZeroLightMainButton::UseUploadGitHashes() const
+{
+	return s_uploadGitHashes ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
 ECheckBoxState FZeroLightMainButton::UseExistingRunInfo() const
 {
 	return s_useExistingRunInfo ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
@@ -1439,6 +1445,11 @@ void FZeroLightMainButton::SetRunInfoCommandLineParams(const FText& text)
 	}
 }
 
+void FZeroLightMainButton::SetUploadComment(const FText& text)
+{
+	s_uploadComment = text.ToString();
+}
+
 void FZeroLightMainButton::SetPercentageUnusedShaderCompilingThreads(const FText& text)
 {
 	if (!s_savedIniPath.IsEmpty())
@@ -1548,6 +1559,14 @@ void FZeroLightMainButton::SetUseExistingBuild(const ECheckBoxState state)
 void FZeroLightMainButton::SetRemoveDebugSymbols(const ECheckBoxState state)
 {
 	s_removeDebugSymbols = (state == ECheckBoxState::Checked) ? true : false;
+
+	if (IsInSlateThread())
+		FSlateApplication::Get().ForceRedrawWindow(BuildAndDeployWnd.ToSharedRef());
+}
+
+void FZeroLightMainButton::SetUploadGitHashes(const ECheckBoxState state)
+{
+	s_uploadGitHashes = (state == ECheckBoxState::Checked) ? true : false;
 
 	if (IsInSlateThread())
 		FSlateApplication::Get().ForceRedrawWindow(BuildAndDeployWnd.ToSharedRef());
@@ -3237,6 +3256,45 @@ void FZeroLightMainButton::ShowBuildAndDeployDialog()
 										]
 								]
 						]
+						+ SGridPanel::Slot(0, 4)
+						.Padding(FMargin(5, 5, 2, 1))
+						.VAlign(EVerticalAlignment::VAlign_Center)
+						.HAlign(EHorizontalAlignment::HAlign_Left)
+						[
+							SNew(STextBlock).Text(FText::FromString("Build Comment"))
+						]
+						+ SGridPanel::Slot(1, 4)
+						.Padding(FMargin(5, 5, 2, 1))
+						.VAlign(EVerticalAlignment::VAlign_Center)
+						.HAlign(EHorizontalAlignment::HAlign_Right)
+						[
+							SNew(SOverlay)
+							+ SOverlay::Slot()
+							[
+								SNew(SEditableTextBox)
+									.Text_Lambda([this]() { return FText::FromString(s_uploadComment); })
+									.OnTextChanged(FOnTextChanged::CreateSP(this, &FZeroLightMainButton::SetUploadComment))
+									.MinDesiredWidth(230)
+									.IsEnabled_Lambda([this]() {
+										if (s_isCurrentlyBuilding)
+											return false;
+										else
+											return s_uploadAsyncTask == nullptr;
+									})
+							]
+							+ SOverlay::Slot()
+							.VAlign(EVerticalAlignment::VAlign_Center)
+							.Padding(FMargin(6, 0, 0, 0))
+							[
+								SNew(STextBlock)
+									.Text(FText::FromString("Optional"))
+									.Font(FCoreStyle::GetDefaultFontStyle("Italic", 9))
+									.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+									.Visibility_Lambda([this]() {
+										return s_uploadComment.IsEmpty() ? EVisibility::HitTestInvisible : EVisibility::Collapsed;
+									})
+							]
+						]
 				]
 		]
 
@@ -3409,14 +3467,18 @@ void FZeroLightMainButton::ShowBuildAndDeployDialog()
 					[
 						SNew(SHorizontalBox)
 						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						.Padding(13, 0, 60, 0)
+						.FillWidth(1.0f)
+						.Padding(13, 0, 8, 0)
 						.VAlign(EVerticalAlignment::VAlign_Center)
 						[
 							SNew(STextBlock).Text(FText::FromString("Existing Build"))
 						]
 
 						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.Padding(0, 0, 13, 0)
+						.HAlign(HAlign_Right)
+						.VAlign(EVerticalAlignment::VAlign_Center)
 						[
 								SNew(SCheckBox)
 								.OnCheckStateChanged(this, &FZeroLightMainButton::SetUseExistingBuild)
@@ -3438,18 +3500,52 @@ void FZeroLightMainButton::ShowBuildAndDeployDialog()
 					[
 						SNew(SHorizontalBox)
 							+ SHorizontalBox::Slot()
-							.AutoWidth()
-							.Padding(13, 0, 60, 0)
+							.FillWidth(1.0f)
+							.Padding(13, 0, 8, 0)
 							.VAlign(EVerticalAlignment::VAlign_Center)
 							[
 								SNew(STextBlock).Text(FText::FromString("Clean Debug Symbols from Build"))
 							]
 
 							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							.Padding(0, 0, 13, 0)
+							.HAlign(HAlign_Right)
+							.VAlign(EVerticalAlignment::VAlign_Center)
 							[
 								SNew(SCheckBox)
 									.OnCheckStateChanged(this, &FZeroLightMainButton::SetRemoveDebugSymbols)
 									.IsChecked(this, &FZeroLightMainButton::UseRemoveDebugSymbols)
+									.IsEnabled_Lambda([this]() {
+										if (s_isCurrentlyBuilding)
+											return false;
+										else
+											return s_uploadAsyncTask == nullptr;
+								})
+							]
+					]
+
+					+ SVerticalBox::Slot().AutoHeight()
+					.Padding(0, 0, 0, 3)
+					[
+						SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot()
+							.FillWidth(1.0f)
+							.Padding(13, 0, 8, 0)
+							.VAlign(EVerticalAlignment::VAlign_Center)
+							[
+								SNew(STextBlock).Text(FText::FromString("Upload Git Hashes"))
+							]
+
+							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							.Padding(0, 0, 13, 0)
+							.HAlign(HAlign_Right)
+							.VAlign(EVerticalAlignment::VAlign_Center)
+							[
+								SNew(SCheckBox)
+									.OnCheckStateChanged(this, &FZeroLightMainButton::SetUploadGitHashes)
+									.IsChecked(this, &FZeroLightMainButton::UseUploadGitHashes)
 									.IsEnabled_Lambda([this]() {
 										if (s_isCurrentlyBuilding)
 											return false;
@@ -3938,17 +4034,6 @@ portalcli::portalcli()
 	CreateDllPortalClient();
 }
 
-portalcli::portalcli(portal::BuildContext* context)
-{
-	if (!PortalClient::InitPlugin())
-	{
-		UE_LOG(LogPortalCLI, Error, TEXT("ZLCloudStream Failed to load Portal Client dll"));
-		return;
-	}
-
-	CreateDllPortalClient(context);
-}
-
 void portalcli::CreateDllPortalClient()
 {
 	if (m_client != nullptr)
@@ -3992,48 +4077,14 @@ void portalcli::CreateDllPortalClient()
 	delete[] httpProxyString;
 }
 
-void portalcli::CreateDllPortalClient(portal::BuildContext* bc)
+void portalcli::TakeProgressStream()
 {
-	if (m_client != nullptr)
+	if (m_client == nullptr || m_ps != nullptr)
 	{
-		if (m_ps != nullptr)
-			m_ps.Reset();
-
-		m_client.Reset();
+		return;
 	}
 
-	Config cfg = Config();
-
-	std::string utf8String(TCHAR_TO_UTF8(TEXT("OmniStreamUpload")));
-	int stringSize = utf8String.length() + 1;
-	char* utf8StringChar = new char[stringSize];
-	strcpy_s(utf8StringChar, stringSize, utf8String.c_str());
-
-	cfg.add_scope(utf8StringChar);
-
-	//Set to live
-	std::string portalServerUrl(TCHAR_TO_UTF8(*FZeroLightMainButton::GetPortalServerUrl()));
-	stringSize = portalServerUrl.length() + 1;
-	char* utf8StringUrl = new char[stringSize];
-	strcpy_s(utf8StringUrl, stringSize, portalServerUrl.c_str());
-
-	portal::config_set_portal_server(cfg.m_cfg, utf8StringUrl);
-	
-	std::string httpProxyOverride(TCHAR_TO_UTF8(*FZeroLightMainButton::GetHttpProxyOverride()));
-	stringSize = httpProxyOverride.length() + 1;
-	char* httpProxyString = new char[stringSize];
-	strcpy_s(httpProxyString, stringSize, httpProxyOverride.c_str());
-
-	if(httpProxyOverride != "")
-		portal::config_set_http_proxy(cfg.m_cfg, httpProxyString);
-
-	m_client = MakeShareable<PortalClient>(new PortalClient(&cfg, bc));
-
-	m_ps = MakeShareable<ProgressStream>(new ProgressStream(portal::client_take_progress_stream(m_client->m_client)));
-
-	delete[] utf8StringChar;
-	delete[] utf8StringUrl;
-	delete[] httpProxyString;
+	m_ps = MakeShareable<ProgressStream>(m_client->take_progress_stream());
 }
 
 void portalcli::AsyncPortalTask(AsyncPortalTaskType taskType, bool triggerBuildTask, bool triggerExistingBuildDeploy, FString targetPath)
@@ -4044,7 +4095,6 @@ void portalcli::AsyncPortalTask(AsyncPortalTaskType taskType, bool triggerBuildT
 		FZeroLightMainButton::SetProgressText(FText::FromString("Uploading to Portal..."));
 
 		FZeroLightMainButton::SetUploadTask(MakeShareable<UploadAsyncTask>(new UploadAsyncTask(
-			portal::client_get_build_context(m_client->m_client), 
 			FZeroLightMainButton::GetUploadDirectory(), 
 			FZeroLightMainButton::GetDeployName(), 
 			FZeroLightMainButton::GetPortalAssetLineID(), 
@@ -4053,10 +4103,10 @@ void portalcli::AsyncPortalTask(AsyncPortalTaskType taskType, bool triggerBuildT
 			FZeroLightMainButton::GetBuildMetadata())));
 		break;
 	case portalcli::GETTOKEN:
-		FZeroLightMainButton::SetAuthTask(MakeShareable<GetTokenAsyncTask>(new GetTokenAsyncTask(portal::client_get_build_context(m_client->m_client), triggerBuildTask, triggerExistingBuildDeploy, targetPath)));
+		FZeroLightMainButton::SetAuthTask(MakeShareable<GetTokenAsyncTask>(new GetTokenAsyncTask(triggerBuildTask, triggerExistingBuildDeploy, targetPath)));
 		break;
 	case portalcli::SELECTASSETLINE:
-		FZeroLightMainButton::SetSelectAssetLineTask(MakeShareable<SelectAssetLineAsyncTask>(new SelectAssetLineAsyncTask(portal::client_get_build_context(m_client->m_client))));
+		FZeroLightMainButton::SetSelectAssetLineTask(MakeShareable<SelectAssetLineAsyncTask>(new SelectAssetLineAsyncTask()));
 		break;
 	default:
 		break;
@@ -4065,30 +4115,8 @@ void portalcli::AsyncPortalTask(AsyncPortalTaskType taskType, bool triggerBuildT
 
 bool portalcli::ReportBuildFailure()
 {
-	TSharedPtr<FJsonObject> JsonObject = MakeShareable(new FJsonObject);
-	JsonObject->SetBoolField(TEXT("fail"), true);
-
-	FString OutputString;
-
-	// Create a Json writer
-	TSharedRef<TJsonWriter<>> JsonWriter = TJsonWriterFactory<>::Create(&OutputString);
-
-	// Serialize the Json object to a string
-	FJsonSerializer::Serialize(JsonObject.ToSharedRef(), JsonWriter);
-
-	std::string utf8String(TCHAR_TO_UTF8(*OutputString));
-
-	int stringSize = utf8String.length() + 1;
-	char* pSendData = new char[stringSize];
-	strcpy_s(pSendData, stringSize, utf8String.c_str());
-
-	OutputMessage createMsg = m_client->finalize_build(pSendData);
-
-	delete pSendData;
-
-	createMsg.print();
-
-	return true;
+	UE_LOG(LogPortalCLI, Error, TEXT("Packaging failed before a Portal asset version was created"));
+	return false;
 }
 
 bool portalcli::ClearCurrentBuild()
@@ -4150,7 +4178,7 @@ OutputMessage portalcli::ForceLogout()
 
 uint32 GetTokenAsyncTask::Run()
 {
-	portalcli threadBardCli = portalcli(buildContext);
+	portalcli threadBardCli;
 
 	portal::FFIString fallbackFfistr;
 	fallbackFfistr.c_str = nullptr;
@@ -4258,9 +4286,23 @@ void GetTokenAsyncTask::Exit()
 	FZeroLightMainButton::ClearAuthTask();
 }
 
+UploadAsyncTask::UploadAsyncTask(FString uploadFolderPath, FString name, FString assetLineId, bool ciUpload, FString storageProvider, FString metadata)
+{
+	srcPath = uploadFolderPath;
+	deployName = name;
+	assetLineID = assetLineId;
+	portalStorageProvider = storageProvider;
+	buildMetadata = metadata;
+	isCIUpload = ciUpload;
+	uploadComment = FZeroLightMainButton::s_uploadComment;
+	FZeroLightMainButton::s_uploadComment.Empty();
+	Thread = FRunnableThread::Create(this, TEXT("Portal Upload Task Thread"));
+}
+
 uint32 UploadAsyncTask::Run()
 {
-	portalcli threadBardCli = portalcli(buildContext);
+	portalcli threadBardCli;
+	threadBardCli.TakeProgressStream();
 
 	m_tokenTask = portal::client_ensure_token_is_fetched_async(threadBardCli.m_client->m_client);
 
@@ -4443,10 +4485,28 @@ uint32 UploadAsyncTask::Run()
 		thumbnailInputStr.pointer = (!specifyThumbnailPath) ? nullptr : reinterpret_cast<const uint8_t*>(&thumbnailPathPtr[0]);
 		thumbnailInputStr.length_in_bytes = thumbnailLen;
 
+		const bool uploadGitHashes = FZeroLightMainButton::s_uploadGitHashes;
+		FString sourceDir = uploadGitHashes ? FPaths::ConvertRelativePathToFull(FPaths::ProjectDir()) : FString();
+		FPaths::NormalizeDirectoryName(sourceDir);
+		std::string sourceDirUtf8 = TCHAR_TO_UTF8(*sourceDir);
+
+		portal::UTF8InputString sourceDirInputStr;
+		sourceDirInputStr.pointer = (uploadGitHashes && !sourceDirUtf8.empty()) ? reinterpret_cast<const uint8_t*>(sourceDirUtf8.data()) : nullptr;
+		sourceDirInputStr.length_in_bytes = (sourceDirInputStr.pointer == nullptr) ? 0 : static_cast<uint32_t>(sourceDirUtf8.size());
+
+		FString buildComment = this->uploadComment.TrimStartAndEnd();
+		std::string commentUtf8 = TCHAR_TO_UTF8(*buildComment);
+		portal::UTF8InputString commentInputStr = {};
+		if (!buildComment.IsEmpty())
+		{
+			commentInputStr.pointer = reinterpret_cast<const uint8_t*>(commentUtf8.data());
+			commentInputStr.length_in_bytes = static_cast<uint32_t>(commentUtf8.size());
+		}
+
 		FString currentAssetVersionId = FZeroLightMainButton::GetCurrentUploadAssetVersionId();
 		if (currentAssetVersionId.IsEmpty())
 		{
-			OutputMessage createAssetVersionOutput = portal::client_create_portal_asset_version(threadBardCli.m_client->m_client, assetLineInputStr, storageProviderInputStr, extensionDataInputStr, directoryInputStr, 0);
+			OutputMessage createAssetVersionOutput = portal::client_create_portal_asset_version(threadBardCli.m_client->m_client, assetLineInputStr, storageProviderInputStr, extensionDataInputStr, directoryInputStr, 0, sourceDirInputStr, uploadGitHashes && sourceDirInputStr.pointer != nullptr, commentInputStr);
 
 			createAssetVersionOutput.print();
 
@@ -4481,6 +4541,9 @@ uint32 UploadAsyncTask::Run()
 		uploadParams.extension_data = extensionDataInputStr;
 		uploadParams.thumbnail = thumbnailInputStr;
 		uploadParams.chunk_size = 0;
+		uploadParams.save_git_hash = uploadGitHashes && sourceDirInputStr.pointer != nullptr;
+		uploadParams.source_dir = sourceDirInputStr;
+		uploadParams.comment = commentInputStr;
 
 		m_oneStepPortalUploadTask = handle_ptr_error(portal::client_upload_portal_asset_version_one_step_async(
 			threadBardCli.m_client->m_client,
@@ -4725,7 +4788,7 @@ void UploadAsyncTask::Exit()
 
 uint32 SelectAssetLineAsyncTask::Run()
 {
-	portalcli threadBardCli = portalcli(buildContext);
+	portalcli threadBardCli;
 
 	portal::OpenSelectAssetLineParams params;
 

@@ -20,7 +20,7 @@ namespace ZLStateKeyInfoDimeMetadataInternal
 }
 
 // Helper to convert a single FStateKeyInfo into a JSON Schema Leaf Node
-TSharedPtr<FJsonObject> ConvertInfoToSchemaNode(const FStateKeyInfo& Info)
+TSharedPtr<FJsonObject> ConvertInfoToSchemaNode(const FStateKeyInfo& Info, const FString& FullKey)
 {
 	TSharedPtr<FJsonObject> Node = MakeShared<FJsonObject>();
 
@@ -71,6 +71,12 @@ TSharedPtr<FJsonObject> ConvertInfoToSchemaNode(const FStateKeyInfo& Info)
 	if (Info.bDisplayDescriptionAsOptions)
 	{
 		Node->SetBoolField(TEXT("x-zl-displayDescriptionAsOptions"), true);
+	}
+
+	const int32 EffectiveComplexity = Info.GetEffectiveComplexity(FullKey);
+	if (ZLStateKeyComplexity::ShouldSerialize(EffectiveComplexity, FullKey))
+	{
+		Node->SetNumberField(TEXT("x-zl-complexity"), EffectiveComplexity);
 	}
 
 	if (SchemaType == "number" && Info.bUseMinMax)
@@ -240,7 +246,7 @@ TSharedRef<FJsonObject> UStateKeyInfoAsset::BuildJsonSchemaCompliantFromKeyInfos
 
 			if (bIsLeaf)
 			{
-				TSharedPtr<FJsonObject> LeafNode = ConvertInfoToSchemaNode(Info);
+				TSharedPtr<FJsonObject> LeafNode = ConvertInfoToSchemaNode(Info, FullKey);
 				CurrentContext->SetObjectField(PartName, LeafNode);
 			}
 			else

@@ -327,8 +327,10 @@ struct FConfigurationAutofillSuggestion
 
 /**
  * Drop-in replacement for UStateKeyInputTextBox used only for the `configuration`
- * field in the Debug UI when the ZLVE plugin is present. Adds an autofill popup
- * with PR-code suggestions sourced from all model/group schema branches.
+ * field. Shows a taller, resizable multiline editor so long comma-separated values
+ * stay readable. Enter still commits; Shift+Enter inserts a newline. When the ZLVE
+ * plugin is present, also adds an autofill popup with PR-code suggestions sourced
+ * from all model/group schema branches.
  */
 UCLASS()
 class UStateKeyInputConfigurationTextBox : public UStateKeyInputTextBox
@@ -338,6 +340,11 @@ public:
 	UFUNCTION()
 	void HandleAutofillTextChanged(const FText& InText);
 	virtual void OnTextValueCommitted(const FText& ComittedText, ETextCommit::Type CommitMethod) override;
+
+	/** Ignore focus-loss commits while the resize grip is being dragged. */
+	void BeginConfigurationResize();
+	/** Replay a commit that was swallowed so a resize drag could finish. */
+	void EndConfigurationResize();
 
 protected:
 	virtual TSharedRef<SWidget> RebuildWidget() override;
@@ -352,6 +359,8 @@ protected:
 	TSharedPtr<class SMenuAnchor> SuggestionAnchor;
 	TSharedPtr<class SListView<TSharedPtr<FConfigurationAutofillSuggestion>>> SuggestionList;
 	bool bSuppressTextChangedHandler = false;
+	bool bSuppressFocusLossCommit = false;
+	bool bDeferredFocusLossCommit = false;
 };
 
 class UFoldoutHelper;

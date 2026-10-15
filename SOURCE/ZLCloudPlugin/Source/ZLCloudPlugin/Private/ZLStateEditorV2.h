@@ -30,6 +30,13 @@
 
 DECLARE_LOG_CATEGORY_EXTERN(LogZLStateEditorV2, Log, All);
 
+struct FZLStateEditorAreaExpansionState
+{
+    bool bExpanded = false;
+    bool bAdvancedExpanded = false;
+    bool bContentGenMetadataHintsExpanded = false;
+};
+
 class StateKeyInfoV2
 {
 public:
@@ -49,6 +56,12 @@ public:
     bool allowNullValue = false;
     bool defaultValueIsNull = false;
     bool displayDescriptionAsOptions = false;
+    int32 complexity = ZLStateKeyComplexity::Unset;
+
+    inline int32 GetEffectiveComplexity(const FString& Key) const
+    {
+        return ZLStateKeyComplexity::GetEffective(complexity, Key);
+    }
 
     inline void ResetDefaultValue()
     {
@@ -167,7 +180,7 @@ protected:
     TSharedPtr<SVerticalBox> ButtonsContainer;
     TSharedPtr<SListView<TSharedPtr<FString>>> KeyListView;
     TArray<TSharedPtr<FString>> JsonKeys;
-    TMap<FString, TPair<bool, bool>> AreaExpansionStates;
+    TMap<FString, FZLStateEditorAreaExpansionState> AreaExpansionStates;
 
     void OnJsonTextChanged(const FText& NewText);
     bool IsFullJsonSchemaAndMetadataView() const;

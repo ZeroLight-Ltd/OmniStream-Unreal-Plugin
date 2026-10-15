@@ -61,6 +61,38 @@ bool UZLCloudPluginBlueprints::IsFfmpegVideoSupportEnabled()
 	return PluginSettings && PluginSettings->bDownloadFFmpegForMediaOnDemandVideos;
 }
 
+bool UZLCloudPluginBlueprints::EnableFfmpegVideoSupport()
+{
+#if WITH_EDITOR
+	UZLCloudPluginSettings* PluginSettings = GetMutableDefault<UZLCloudPluginSettings>();
+	if (PluginSettings == nullptr)
+	{
+		return false;
+	}
+
+	if (PluginSettings->bDownloadFFmpegForMediaOnDemandVideos)
+	{
+		return true;
+	}
+
+	FProperty* Property = UZLCloudPluginSettings::StaticClass()->FindPropertyByName(
+		GET_MEMBER_NAME_CHECKED(UZLCloudPluginSettings, bDownloadFFmpegForMediaOnDemandVideos));
+	if (Property)
+	{
+		PluginSettings->PreEditChange(Property);
+	}
+
+	PluginSettings->bDownloadFFmpegForMediaOnDemandVideos = true;
+
+	// Same path as ticking the setting in OmniStream Settings: save the ini and download FFmpeg.
+	FPropertyChangedEvent PropertyChangedEvent(Property, EPropertyChangeType::ValueSet);
+	PluginSettings->PostEditChangeProperty(PropertyChangedEvent);
+	return PluginSettings->bDownloadFFmpegForMediaOnDemandVideos;
+#else
+	return false;
+#endif
+}
+
 bool UZLCloudPluginBlueprints::RequestScreenshotJob(const FString& SettingsJson, FString& OutErrorMessage)
 {
 	OutErrorMessage.Empty();
@@ -82,4 +114,23 @@ bool UZLCloudPluginBlueprints::RequestScreenshotJob(const FString& SettingsJson,
 #endif
 
 	return bQueued;
+}
+
+bool UZLCloudPluginBlueprints::IsScreenshotJobActive()
+{
+	TSharedPtr<ZLCloudPlugin::ZLScreenshot> Screenshot = ZLCloudPlugin::ZLScreenshot::Get();
+	if (Screenshot.IsValid() && (Screenshot->HasCurrentRender() || Screenshot->HasNextRender()))
+	{
+		return true;
+	}
+
+	if (UZLCloudPluginStateManager* StateManager = UZLCloudPluginStateManager::GetZLCloudPluginStateManager())
+	{
+		if (StateManager->IsProcessingStateRequest())
+		{
+			return true;
+		}
+	}
+
+	return false;
 }

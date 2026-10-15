@@ -9,6 +9,12 @@
 #include "RHIStaticStates.h"
 #include "Modules/ModuleManager.h"
 #include "ZLCloudPluginPrivate.h"
+#if UNREAL_5_8_OR_NEWER && PLATFORM_WINDOWS
+#include "Windows/AllowWindowsPlatformTypes.h"
+#include <WinUser.h>
+#include <wtsapi32.h>
+#include "Windows/HideWindowsPlatformTypes.h"
+#endif
 
 
 namespace ZLCloudPluginUtils
@@ -231,6 +237,118 @@ namespace ZLCloudPluginUtils
 		RHICmdList.ReadSurfaceData(TextureRef, Rect, OutPixels, FReadSurfaceDataFlags());
 	}
 
+
+#if UNREAL_5_8_OR_NEWER && PLATFORM_WINDOWS
+	inline bool IsRemoteDesktopSession()
+	{
+		return GetSystemMetrics(SM_REMOTESESSION) != 0;
+	}
+
+	// SM_REMOTESESSION stays set after the RDP client disconnects, which left capture
+	// paused forever. This is true only while an RDP client is actively connected.
+	inline bool IsRdpClientConnected()
+	{
+		static double NextQueryAt = 0.0;
+		static bool bCachedConnected = false;
+		const double Now = FPlatformTime::Seconds();
+		if (Now < NextQueryAt)
+		{
+			return bCachedConnected;
+		}
+		NextQueryAt = Now + 0.2;
+
+		DWORD SessionId = 0;
+		if (!ProcessIdToSessionId(GetCurrentProcessId(), &SessionId))
+		{
+			bCachedConnected = IsRemoteDesktopSession();
+			return bCachedConnected;
+		}
+
+		INT ConnectState = -1;
+		USHORT Protocol = 0;
+		LPWSTR Buffer = nullptr;
+		DWORD Bytes = 0;
+		if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, SessionId, WTSConnectState, &Buffer, &Bytes) && Buffer)
+		{
+			ConnectState = *reinterpret_cast<INT*>(Buffer);
+			WTSFreeMemory(Buffer);
+			Buffer = nullptr;
+		}
+		if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, SessionId, WTSClientProtocolType, &Buffer, &Bytes) && Buffer)
+		{
+			Protocol = *reinterpret_cast<USHORT*>(Buffer);
+			WTSFreeMemory(Buffer);
+		}
+
+		// WTSActive == 0, RDP protocol == 2. A disconnected RDP session is not "connected".
+		bCachedConnected = (Protocol == 2 && ConnectState == 0);
+		return bCachedConnected;
+	}
+
+	// Set when the RDP client disconnects. OnFrame consumes it after the swapchain settle.
+	inline bool& PendingRebindAfterRemoteSession()
+	{
+		static bool bPending = false;
+		return bPending;
+	}
+
+	// True for 0.5s after the RDP client connects or disconnects while the swap chain is rebuilt.
+	inline bool ShouldSkipStreamGpuWork()
+	{
+		const bool bRdpClient = IsRdpClientConnected();
+		static bool bWasRdpClient = bRdpClient;
+		static double ResumeStreamGpuWorkAt = 0.0;
+
+		if (bRdpClient != bWasRdpClient)
+		{
+			bWasRdpClient = bRdpClient;
+			ResumeStreamGpuWorkAt = FPlatformTime::Seconds() + 0.5;
+			if (!bRdpClient)
+			{
+				PendingRebindAfterRemoteSession() = true;
+			}
+			UE_LOG(LogZLCloudPlugin, Display, TEXT("CloudStream2 : RDP client %s — pausing stream GPU copies for 0.5s (swapchain rebuild)"),
+				bRdpClient ? TEXT("connected") : TEXT("disconnected"));
+		}
+
+		return ResumeStreamGpuWorkAt > 0.0 && FPlatformTime::Seconds() < ResumeStreamGpuWorkAt;
+	}
+
+	// True once, on the first frame after the post-RDP settle.
+	inline bool ConsumeRebindAfterRemoteSession()
+	{
+		if (!PendingRebindAfterRemoteSession())
+		{
+			return false;
+		}
+		if (IsRdpClientConnected() || ShouldSkipStreamGpuWork())
+		{
+			return false;
+		}
+		PendingRebindAfterRemoteSession() = false;
+		return true;
+	}
+#else
+	inline bool IsRemoteDesktopSession()
+	{
+		return false;
+	}
+
+	inline bool IsRdpClientConnected()
+	{
+		return false;
+	}
+
+	inline bool ShouldSkipStreamGpuWork()
+	{
+		return false;
+	}
+
+	inline bool ConsumeRebindAfterRemoteSession()
+	{
+		return false;
+	}
+#endif
 
 	template <typename T>
 	void DoOnGameThread(T&& Func)

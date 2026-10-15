@@ -25,6 +25,7 @@
 		"ZLCloudPluginInputComponent.cpp.obj",
 		"ZLCloudPluginInputHandler.cpp.obj",
 		"ZLCloudPluginModule.cpp.obj",
+		"ZLCloudPluginRdpCaptureViewExtension.cpp.obj",
 		"ZLCloudPluginStateManager.cpp.obj",
 		"ZLCloudPluginVideoInput.cpp.obj",
 		"ZLCloudPluginVideoInputBackBuffer.cpp.obj",

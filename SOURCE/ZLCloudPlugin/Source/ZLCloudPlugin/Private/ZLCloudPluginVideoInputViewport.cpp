@@ -86,6 +86,11 @@ void FZLCloudPluginVideoInputViewport::OnViewportRendered(FViewport* InViewport)
 	}
 #endif
 
+	if (ZLCloudPluginUtils::ShouldSkipStreamGpuWork())
+	{
+		return;
+	}
+
 	const FTextureRHIRef& FrameBuffer = InViewport->GetRenderTargetTexture();
 	if (!FrameBuffer)
 	{

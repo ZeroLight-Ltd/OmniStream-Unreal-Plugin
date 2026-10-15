@@ -153,54 +153,23 @@ public:
 
 	PortalClient() {};
 	PortalClient(Config* cfg);
-	PortalClient(Config* cfg, portal::BuildContext* bc);
 	~PortalClient();
 
+	OutputMessage create_portal_asset_version(
+		const char* asset_line_id,
+		const char* storage_provider,
+		const char* extension_data,
+		const char* upload_dir,
+		uint64_t chunk_size,
+		const char* source_dir,
+		bool upload_git_hashes,
+		const char* comment);
 
+	OutputMessage finalize_portal_asset_version(const char* asset_version_id);
 
-	OutputMessage create_build(char* json);
+	OutputMessage portal_upload(const char* asset_version_id, const char* directory);
 
-	OutputMessage create_stage(char* json) {
-		size_t len = strlen(json);
-		portal::OutputMessage* msg = handle_ptr_error(portal::client_create_stage(
-			m_client,
-			/* Danger, super platform specific! */
-			reinterpret_cast<const uint8_t*>(&json[0]),
-			len
-		));
-		return OutputMessage(msg);
-	}
-	OutputMessage upload(char* json) {
-		size_t len = strlen(json);
-		portal::OutputMessage* msg = handle_ptr_error(portal::client_upload(
-			m_client,
-			/* Danger, super platform specific! */
-			reinterpret_cast<const uint8_t*>(&json[0]),
-			len
-		));
-		return OutputMessage(msg);
-	}
-
-	OutputMessage finalize_stage(char* json) {
-		size_t len = strlen(json);
-		portal::OutputMessage* msg = handle_ptr_error(portal::client_finalize_stage(
-			m_client,
-			/* Danger, super platform specific! */
-			reinterpret_cast<const uint8_t*>(&json[0]),
-			len
-		));
-		return OutputMessage(msg);
-	}
-	OutputMessage finalize_build(char* json) {
-		size_t len = strlen(json);
-		portal::OutputMessage* msg = handle_ptr_error(portal::client_finalize_build(
-			m_client,
-			/* Danger, super platform specific! */
-			reinterpret_cast<const uint8_t*>(&json[0]),
-			len
-		));
-		return OutputMessage(msg);
-	}
+	OutputMessage upload_portal_asset_version_one_step(portal::OneStepUploadParams params);
 
 	ProgressStream* take_progress_stream() {
 		portal::ProgressStream* ps = portal::client_take_progress_stream(m_client);
